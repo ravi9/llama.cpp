@@ -569,7 +569,7 @@ To read documentation for how to build on Android, [click here](./android.md)
 
 ## OpenVINO
 
-[OpenVINO](https://docs.openvino.ai/2025/index.html) is a open-source toolkit for optimizing and deploying performant AI inference, specifically designed for Intel hardware including CPUs, GPUs, and NPUs in the cloud, on-prem, and on the edge alike. The OpenVINO backend enhances performance by leveraging hardware-specific optimizations and can be enabled for use with llama.cpp. 
+[OpenVINO](https://docs.openvino.ai/2025/index.html) is a open-source toolkit for optimizing and deploying performant AI inference, specifically designed for Intel hardware including CPUs, GPUs, and NPUs in the cloud, on-prem, and on the edge alike. The OpenVINO backend enhances performance by leveraging hardware-specific optimizations and can be enabled for use with llama.cpp.
 
 Follow the instructions below to install OpenVINO runtime and build llama.cpp with OpenVINO support.
 
@@ -581,7 +581,7 @@ Follow the instructions below to install OpenVINO runtime and build llama.cpp wi
 ```bash
 source /opt/intel/openvino_2025.1.0/setupvars.sh
 ```
-- Verify OpenVINO is initialized properly 
+- Verify OpenVINO is initialized properly
 ```bash
 echo $OpenVINO_DIR
 ```
