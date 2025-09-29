@@ -55,7 +55,7 @@ OutputVector translate_set_rows(const NodeContext& context) {
         res = std::make_shared<ov::op::v1::Reshape>(updated, std::make_shared<ov::op::v0::ShapeOf>(dst), false);
     } else {
         auto data_reshaped = std::make_shared<ov::op::v1::Reshape>(data, std::make_shared<ov::op::v0::ShapeOf>(dst), false);
-        res = std::make_shared<ov::op::v0::Concat>(OutputVector{dst, data_reshaped}, 0);
+        res = std::make_shared<ov::op::v0::Concat>(OutputVector{dst, data_reshaped}, 1);
     }
     return rename_outputs_with_suffix({res}, context.get_name());
 }

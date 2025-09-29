@@ -99,6 +99,7 @@ void add_sliced_mask(TensorMap& tensor_map, GgmlDecoder& ggml_model_decoder) {
                 auto stop = std::make_shared<ov::op::v0::Concat>(ov::OutputVector{token_len, gather_leaf_8}, 0);
                 mask_sliced =
                     std::make_shared<ov::op::v8::Slice>(mask, zero_2d, stop, one_2d, axes);
+                mask_sliced = std::make_shared<ov::op::v0::Unsqueeze>(mask_sliced, zero_1d);
                 mask_sliced = std::make_shared<ov::op::v0::Convert>(mask_sliced, ov::element::f16);
                 mask_sliced->set_friendly_name(sliced_name);
             }

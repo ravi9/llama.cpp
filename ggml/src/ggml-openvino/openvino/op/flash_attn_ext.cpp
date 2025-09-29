@@ -41,7 +41,7 @@ OutputVector translate_flash_attn_ext(const NodeContext& context) {
     if (context.has_input(mask_name)) {
         mask_sliced = context.get_input(mask_name);
     } else {
-        auto token_len = get_dimensions(q, {1});
+        auto token_len = get_dimensions(q, {2});
         auto zero_2d = ov::op::v0::Constant::create(ov::element::i64, {2}, {0,0});
         auto one_2d = ov::op::v0::Constant::create(ov::element::i64, {2}, {1,1});
         auto zero_1d = ov::op::v0::Constant::create(ov::element::i64, {1}, {0});
@@ -53,6 +53,7 @@ OutputVector translate_flash_attn_ext(const NodeContext& context) {
         auto stop = std::make_shared<ov::op::v0::Concat>(ov::OutputVector{token_len, gather_leaf_8}, 0);
         mask_sliced =
             std::make_shared<ov::op::v8::Slice>(mask, zero_2d, stop, one_2d, axes);
+        mask_sliced = std::make_shared<ov::op::v0::Unsqueeze>(mask_sliced, zero_1d);
     }
 
     if (mask_sliced.get_element_type() != ov::element::f16) {
@@ -66,16 +67,17 @@ OutputVector translate_flash_attn_ext(const NodeContext& context) {
             auto kv_batch_node = ov::op::v0::Constant::create(ov::element::i64, {1}, std::vector<int64_t>{kv_batch});
             auto factor_node = ov::op::v0::Constant::create(ov::element::i64, {1}, std::vector<int64_t>{factor});
 
-            auto unsqueeze_axes = ov::op::v0::Constant::create(ov::element::i64, Shape{}, {1});
+            auto one_1d = ov::op::v0::Constant::create(ov::element::i64, {1}, {1});
+            auto unsqueeze_axes = ov::op::v0::Constant::create(ov::element::i64, Shape{}, {2});
             auto kv_unsqueezed = std::make_shared<ov::op::v0::Unsqueeze>(kv, unsqueeze_axes);
 
-            auto kv_last_two_dims = get_dimensions(kv.get_node_shared_ptr(), {1, 2});
+            auto kv_last_two_dims = get_dimensions(kv.get_node_shared_ptr(), {2, 3});
             auto kv_broadcast_shape =
-                std::make_shared<ov::op::v0::Concat>(ov::OutputVector{kv_batch_node, factor_node, kv_last_two_dims}, 0);
+                std::make_shared<ov::op::v0::Concat>(ov::OutputVector{one_1d, kv_batch_node, factor_node, kv_last_two_dims}, 0);
             kv = std::make_shared<ov::op::v3::Broadcast>(kv_unsqueezed, kv_broadcast_shape);
 
             auto new_kv_shape =
-                std::make_shared<ov::op::v0::Concat>(ov::OutputVector{q_batch_node, kv_last_two_dims}, 0);
+                std::make_shared<ov::op::v0::Concat>(ov::OutputVector{one_1d, q_batch_node, kv_last_two_dims}, 0);
             kv = std::make_shared<ov::op::v1::Reshape>(kv, new_kv_shape, false);
         }
         return kv;
@@ -89,7 +91,7 @@ OutputVector translate_flash_attn_ext(const NodeContext& context) {
     auto sdpa = std::make_shared<ov::op::v13::ScaledDotProductAttention>(q, k, v, mask_sliced, scale_node, false);
     auto sdpa_f32 = std::make_shared<ov::op::v0::Convert>(sdpa, ov::element::f32);
     auto res = std::make_shared<ov::op::v1::Transpose>(sdpa_f32,
-                                                       ov::op::v0::Constant::create(ov::element::i64, {3}, {1, 0, 2}));
+                                                       ov::op::v0::Constant::create(ov::element::i64, {4}, {0, 2, 1, 3}));
     return rename_outputs_with_suffix({res}, context.get_name());
 }
 

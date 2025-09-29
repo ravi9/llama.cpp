@@ -26,7 +26,7 @@ OutputVector translate_permute(const NodeContext& context) {
 
     if (op_case == 1) {
         res = std::make_shared<ov::op::v1::Transpose>(context.get_input(0),
-                                                      ov::op::v0::Constant::create(ov::element::i64, {3}, {1, 0, 2}));
+                                                      ov::op::v0::Constant::create(ov::element::i64, {4}, {0, 2, 1, 3}));
     } else {
         auto src = context.get_input(0);
         Output<Node> attention_size;
@@ -53,7 +53,7 @@ OutputVector translate_permute(const NodeContext& context) {
                                                           ov::op::v0::Constant::create(ov::element::i64, {3}, {1, 0, 2}));
         } else {
             res = std::make_shared<ov::op::v1::Transpose>(src,
-                                                          ov::op::v0::Constant::create(ov::element::i64, {3}, {1, 0, 2}));
+                                                          ov::op::v0::Constant::create(ov::element::i64, {4}, {0, 2, 1, 3}));
         }
     }
     return rename_outputs_with_suffix({res}, context.get_name());

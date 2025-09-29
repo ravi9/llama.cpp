@@ -10,6 +10,7 @@
 #include <openvino/op/gather.hpp>
 #include <openvino/op/matmul.hpp>
 #include <openvino/op/multiply.hpp>
+#include <openvino/op/unsqueeze.hpp>
 #include <openvino/op/slice.hpp>
 #include <openvino/op/softmax.hpp>
 #include <vector>
@@ -69,6 +70,7 @@ OutputVector translate_soft_max(const NodeContext& context) {
         auto stop = std::make_shared<ov::op::v0::Concat>(ov::OutputVector{token_len, gather_leaf_8}, 0);
         mask_node_sliced =
             std::make_shared<ov::op::v8::Slice>(mask_node, zero_2d, stop, one_2d, axes);
+        mask_node_sliced = std::make_shared<ov::op::v0::Unsqueeze>(mask_node_sliced, zero_1d);
     }
 
     if (mask_node_sliced.get_element_type() != context.get_output_type(0)) {
