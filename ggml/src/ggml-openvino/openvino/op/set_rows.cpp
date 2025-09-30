@@ -8,6 +8,7 @@
 #include <openvino/op/convert.hpp>
 #include <openvino/op/gather.hpp>
 #include <openvino/op/reshape.hpp>
+#include <openvino/op/unsqueeze.hpp>
 #include <openvino/op/scatter_update.hpp>
 #include <openvino/op/shape_of.hpp>
 #include <openvino/op/slice.hpp>
@@ -54,8 +55,11 @@ OutputVector translate_set_rows(const NodeContext& context) {
         auto updated = std::make_shared<ov::op::v3::ScatterUpdate>(dst_reshaped, indices_reshaped, data_reshaped, zero);
         res = std::make_shared<ov::op::v1::Reshape>(updated, std::make_shared<ov::op::v0::ShapeOf>(dst), false);
     } else {
-        auto data_reshaped = std::make_shared<ov::op::v1::Reshape>(data, std::make_shared<ov::op::v0::ShapeOf>(dst), false);
-        res = std::make_shared<ov::op::v0::Concat>(OutputVector{dst, data_reshaped}, 1);
+        // TODO: Better solution would be to reshape the data into 4D at first place (for stateful model)
+        if (data.get_partial_shape().rank() + 1 == dst.get_partial_shape().rank()) {
+            data = std::make_shared<ov::op::v0::Unsqueeze>(data, zero);
+        }
+        res = std::make_shared<ov::op::v0::Concat>(OutputVector{dst, data}, 1);
     }
     return rename_outputs_with_suffix({res}, context.get_name());
 }
