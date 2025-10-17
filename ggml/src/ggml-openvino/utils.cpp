@@ -99,14 +99,16 @@ enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph *
     }
 
     static std::mutex cache_mutex;
-    static std::unordered_map<ggml_cgraph *, std::shared_ptr<ov::InferRequest>> infer_request_cache;
-    static std::unordered_map<ggml_cgraph *, std::vector<std::string>> ov_input_names_cache;
-    static std::unordered_map<ggml_cgraph *, std::vector<std::string>> ov_output_names_cache;
-    // For NPU, store the kvcache model, since we cannot create two infer_request
-    static std::unordered_map<ggml_cgraph *, ov::CompiledModel> compiled_model_cache;
+    static std::unordered_map<ggml_cgraph*, std::shared_ptr<ov::InferRequest>> infer_request_cache;
+    static std::unordered_map<ggml_cgraph*, std::vector<std::string>> ov_input_names_cache;
+    static std::unordered_map<ggml_cgraph*, std::vector<std::string>> ov_output_names_cache;
+    static std::vector<std::pair<std::string, ggml_tensor*>> kv_tensors = get_kv_tensors(cgraph);
+    // For NPU
+    static std::unordered_map<ggml_cgraph*, std::shared_ptr<ov::InferRequest>> decode_infer_request_cache;
 
     std::shared_ptr<GgmlOvDecoder> ggml_decoder;
-    ov::InferRequest infer_request;
+    std::shared_ptr<ov::InferRequest> infer_request;
+    bool is_first_token = get_is_first_token(cgraph);
 
     int64_t decoder_end_time;
     int64_t conversion_end_time;
@@ -118,16 +120,14 @@ enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph *
         auto it = infer_request_cache.find(cgraph);
         if (it != infer_request_cache.end()) {
             std::map<std::string, std::shared_ptr<ov::Node>> model_weights;
-            ggml_decoder = std::make_shared<GgmlOvDecoder>(cgraph, model_weights, is_static, false);
+            ggml_decoder = std::make_shared<GgmlOvDecoder>(cgraph, model_weights, is_static, is_first_token);
             decoder_end_time = ggml_time_us();
 
-            // For NPU for the first time we call kvcache modle, pop the compiled kvcache model from cache
-            if (is_static && compiled_model_cache.find(cgraph) != compiled_model_cache.end()) {
-                infer_request_cache[cgraph] =
-                    std::make_shared<ov::InferRequest>(compiled_model_cache[cgraph].create_infer_request());
-                compiled_model_cache.erase(cgraph);
+            if (is_static && !is_first_token) {
+                infer_request = decode_infer_request_cache[cgraph];
+            } else {
+                infer_request = infer_request_cache[cgraph];
             }
-            infer_request = *infer_request_cache[cgraph];
 
             conversion_end_time = ggml_time_us();
             compile_end_time = conversion_end_time;
@@ -160,12 +160,12 @@ enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph *
 
                 auto compiled_model = core.compile_model(model, device, get_npu_prefill_config());
                 auto compiled_model_kvcache = core.compile_model(model_kvcache, device, get_npu_generate_config());
-                compiled_model_cache[cgraph] = compiled_model_kvcache;
                 compile_end_time = ggml_time_us();
 
                 infer_request_cache[cgraph] = std::make_shared<ov::InferRequest>(compiled_model.create_infer_request());
-                infer_request = *infer_request_cache[cgraph];
-                compiled_model_cache[cgraph] = compiled_model_kvcache;
+                decode_infer_request_cache[cgraph] =
+                    std::make_shared<ov::InferRequest>(compiled_model_kvcache.create_infer_request());
+                infer_request = infer_request_cache[cgraph];
             } else {
                 ggml_decoder = std::make_shared<GgmlOvDecoder>(cgraph, model_weights, is_static, true);
                 decoder_end_time = ggml_time_us();
@@ -192,7 +192,7 @@ enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph *
                 auto compiled_model = core.compile_model(model, device, config);
                 compile_end_time = ggml_time_us();
                 infer_request_cache[cgraph] = std::make_shared<ov::InferRequest>(compiled_model.create_infer_request());
-                infer_request = *infer_request_cache[cgraph];
+                infer_request = infer_request_cache[cgraph];
             }
 
             std::vector<std::string> ov_input_names;
@@ -208,12 +208,51 @@ enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph *
         }
     }
 
+    // TODO not correct yet
+    // Even if we make this correct, there will still be a corner case that will fail:
+    // in llama-server, enter some prompt in a conversation, after it completes,
+    // enter the same prompt in another conversation. This should still be treated as
+    // prefill but get_is_prefill will return false because len(inp_pos) == 1 && inp_pos[0] != 0
+    // which in most cases means generate stage.
+    if (!is_static && get_is_prefill(cgraph)) {
+        auto states = infer_request->query_state();
+        if (get_is_first_token(cgraph)) {
+            for (auto& state : states) {
+                state.reset();
+            }
+        } else {
+            const auto* inp_pos = get_inp_pos_tensor(cgraph);
+            for (auto& state : states) {
+                std::string state_name = state.get_name();
+                state_name = state_name.substr(0, state_name.size() / 2);
+                ggml_tensor* kv_tensor;
+                for (const auto& kv : kv_tensors) {
+                    if (state_name == kv.first) {
+                        kv_tensor = kv.second;
+                        break;
+                    }
+                }
+                // shape should be [1, inp_pos[0], num_heads, head_dim]
+                ov::Shape state_shape = state.get_state().get_shape();
+                // std::cout << state_shape << std::endl;
+                state_shape[1] = *(int32_t*) inp_pos->data;
+                // std::cout << state_shape << std::endl;
+                ov::Tensor state_tensor(state.get_state().get_element_type(), state_shape, kv_tensor->data);
+
+                // The above is wrong becaues I am setting the state using kvbuffer's in the cgraph which
+                // we never update with our stateful approach.
+                // What we should do is to get the kv values from ov by state.get_state(), slice the to the
+                // rows of inp_pos->data, and use that as the new state.
+            }
+        }
+    }
+
     auto ov_input_names = ov_input_names_cache[cgraph];
     auto ov_output_names = ov_output_names_cache[cgraph];
     for (size_t i = 0; i < ov_input_names.size(); i++) {
         auto param_name = ov_input_names[i];
         auto input_tensor = get_ov_input_tensor(ggml_decoder, param_name);
-        infer_request.set_input_tensor(i, input_tensor);
+        infer_request->set_input_tensor(i, input_tensor);
 
         if (getenv("GGML_OPENVINO_DEBUG_INPUT")) {
             print_input_tensor_info(param_name, input_tensor);
@@ -221,13 +260,13 @@ enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph *
     }
     auto input_end_time = ggml_time_us();
 
-    infer_request.infer();
+    infer_request->infer();
     auto infer_end_time = ggml_time_us();
 
     auto gguf_tensor_addrs = get_ggml_graph_output_dst(ggml_decoder);
     for (size_t i = 0; i < ov_output_names.size(); i++) {
         auto & result_name = ov_output_names[i];
-        const auto output_tensor = infer_request.get_output_tensor(i);
+        const auto output_tensor = infer_request->get_output_tensor(i);
 
         std::memcpy(gguf_tensor_addrs[result_name], output_tensor.data(), output_tensor.get_byte_size());
 
@@ -493,7 +532,7 @@ void set_zero_diagonal(std::vector<float> & matrix, size_t dim) {
     }
 }
 
-bool is_prefill(ggml_cgraph * cgraph) {
+const ggml_tensor* get_inp_pos_tensor(ggml_cgraph* cgraph) {
     for (int i = 0; i < cgraph->n_nodes; ++i) {
         auto * op = cgraph->nodes[i];
         for (int j = 0; j < GGML_MAX_SRC; ++j) {
@@ -501,11 +540,34 @@ bool is_prefill(ggml_cgraph * cgraph) {
             if (src == nullptr) {
                 break;
             }
-            if (std::string(src->name) == "inp_tokens") {
-                return src->ne[0] != 1;
+            if (std::string(src->name) == "inp_pos") {
+                return src;
             }
         }
     }
-    GGML_LOG_ERROR("is_prefill: inp_tokens not found in cgraph");
-    throw std::runtime_error("is_prefill: inp_tokens not found in cgraph");
+    GGML_LOG_ERROR("get_inp_pos_tensor: inp_pos not found in cgraph");
+    throw std::runtime_error("get_inp_pos_tensor: inp_pos not found in cgraph");
+}
+
+bool get_is_first_token(struct ggml_cgraph* cgraph) {
+    const auto* inp_pos = get_inp_pos_tensor(cgraph);
+    return *(int32_t*) inp_pos->data == 0;
+}
+
+// Check if the graph is for prefill (first token or batch size > 1)
+bool get_is_prefill(struct ggml_cgraph* cgraph) {
+    const auto* inp_pos = get_inp_pos_tensor(cgraph);
+    return *(int32_t*) inp_pos->data == 0 || inp_pos->ne[0] > 1;
+}
+
+std::vector<std::pair<std::string, ggml_tensor*>> get_kv_tensors(struct ggml_cgraph* cgraph) {
+    std::vector<std::pair<std::string, ggml_tensor*>> kv_tensors;
+    for (int i = 0; i < cgraph->n_nodes; ++i) {
+        auto* op = cgraph->nodes[i];
+        if (op->op == GGML_OP_SET_ROWS) {
+            assert(std::string(op->src[2]->name).find("cache_") == 0);
+            kv_tensors.emplace_back(op->src[2]->name, op->src[2]);
+        }
+    }
+    return kv_tensors;
 }
