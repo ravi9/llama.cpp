@@ -40,9 +40,7 @@ void set_zero_diagonal(std::vector<float> & matrix, size_t dim);
 
 const ggml_tensor* get_inp_pos_tensor(struct ggml_cgraph* cgraph);
 
-bool get_is_first_token(struct ggml_cgraph* cgraph);
-
-bool get_is_prefill(struct ggml_cgraph* cgraph);
+bool get_is_first_token(const ggml_tensor* inp_pos);
 
 std::vector<std::pair<std::string, ggml_tensor*>> get_kv_tensors(struct ggml_cgraph* cgraph);
 

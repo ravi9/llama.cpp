@@ -108,7 +108,9 @@ enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph *
 
     std::shared_ptr<GgmlOvDecoder> ggml_decoder;
     std::shared_ptr<ov::InferRequest> infer_request;
-    bool is_first_token = get_is_first_token(cgraph);
+
+    const ggml_tensor* inp_pos = get_inp_pos_tensor(cgraph);
+    bool is_first_token = get_is_first_token(inp_pos);
 
     int64_t decoder_end_time;
     int64_t conversion_end_time;
@@ -208,41 +210,17 @@ enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph *
         }
     }
 
-    // TODO not correct yet
-    // Even if we make this correct, there will still be a corner case that will fail:
-    // in llama-server, enter some prompt in a conversation, after it completes,
-    // enter the same prompt in another conversation. This should still be treated as
-    // prefill but get_is_prefill will return false because len(inp_pos) == 1 && inp_pos[0] != 0
-    // which in most cases means generate stage.
-    if (!is_static && get_is_prefill(cgraph)) {
+    if (!is_static) {
         auto states = infer_request->query_state();
-        if (get_is_first_token(cgraph)) {
+        int32_t kv_len = *(int32_t*) inp_pos->data;
+        int32_t kv_len_in_state = states[0].get_state().get_shape()[1];
+        if (kv_len != kv_len_in_state) {
             for (auto& state : states) {
-                state.reset();
-            }
-        } else {
-            const auto* inp_pos = get_inp_pos_tensor(cgraph);
-            for (auto& state : states) {
-                std::string state_name = state.get_name();
-                state_name = state_name.substr(0, state_name.size() / 2);
-                ggml_tensor* kv_tensor;
-                for (const auto& kv : kv_tensors) {
-                    if (state_name == kv.first) {
-                        kv_tensor = kv.second;
-                        break;
-                    }
-                }
-                // shape should be [1, inp_pos[0], num_heads, head_dim]
-                ov::Shape state_shape = state.get_state().get_shape();
-                // std::cout << state_shape << std::endl;
-                state_shape[1] = *(int32_t*) inp_pos->data;
-                // std::cout << state_shape << std::endl;
-                ov::Tensor state_tensor(state.get_state().get_element_type(), state_shape, kv_tensor->data);
-
-                // The above is wrong becaues I am setting the state using kvbuffer's in the cgraph which
-                // we never update with our stateful approach.
-                // What we should do is to get the kv values from ov by state.get_state(), slice the to the
-                // rows of inp_pos->data, and use that as the new state.
+                ov::Tensor state_tensor = state.get_state();
+                ov::Shape state_shape = state_tensor.get_shape();
+                state_shape[1] = kv_len;
+                state_tensor.set_shape(state_shape);
+                state.set_state(state_tensor);
             }
         }
     }
@@ -549,15 +527,8 @@ const ggml_tensor* get_inp_pos_tensor(ggml_cgraph* cgraph) {
     throw std::runtime_error("get_inp_pos_tensor: inp_pos not found in cgraph");
 }
 
-bool get_is_first_token(struct ggml_cgraph* cgraph) {
-    const auto* inp_pos = get_inp_pos_tensor(cgraph);
+bool get_is_first_token(const ggml_tensor* inp_pos) {
     return *(int32_t*) inp_pos->data == 0;
-}
-
-// Check if the graph is for prefill (first token or batch size > 1)
-bool get_is_prefill(struct ggml_cgraph* cgraph) {
-    const auto* inp_pos = get_inp_pos_tensor(cgraph);
-    return *(int32_t*) inp_pos->data == 0 || inp_pos->ne[0] > 1;
 }
 
 std::vector<std::pair<std::string, ggml_tensor*>> get_kv_tensors(struct ggml_cgraph* cgraph) {
