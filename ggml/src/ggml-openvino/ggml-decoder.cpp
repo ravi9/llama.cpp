@@ -160,8 +160,8 @@ void GgmlOvDecoder::set_input_output(ggml_tensor * node, bool naive) {
         // Model outputs are tensors with GGML_TENSOR_FLAG_OUTPUT flag and kv_caches
         static std::set<std::string> debug_output_names = {};
         // Workaround: the final tensor "result_output" does not have GGML_TENSOR_FLAG_OUTPUT flag set in cgraph
-        if (node->op == GGML_OP_SET_ROWS || node->flags & GGML_TENSOR_FLAG_OUTPUT || node_name.find("result") == 0 ||
-            debug_output_names.count(node_name)) {
+        if (node->op == GGML_OP_SET_ROWS || node->flags & GGML_TENSOR_FLAG_OUTPUT ||
+            node_name.find("output") != std::string::npos || debug_output_names.count(node_name)) {
             if (node->op == GGML_OP_SET_ROWS) {
                 assert(node_name.find("cache_k") == 0 || node_name.find("cache_v") == 0);
                 if (auto it = std::find(m_kv_names.begin(), m_kv_names.end(), node_name); it == m_kv_names.end()) {

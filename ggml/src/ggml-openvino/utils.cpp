@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -67,20 +68,24 @@ static ov::frontend::FrontEnd::Ptr get_ggml_frontend() {
 enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     static ov::Core core;
 
-    static std::string device = getenv("GGML_OPENVINO_DEVICE") ? getenv("GGML_OPENVINO_DEVICE") : "";
-    if (device.empty()) {
-        const std::vector<std::string> preferred_device = {"GPU", "CPU", "NPU"};
-        const auto available_devices = core.get_available_devices();
-        for (const auto & dev : preferred_device) {
-            if (std::find(available_devices.begin(), available_devices.end(), dev) != available_devices.end()) {
-                device = dev;
-                break;
-            }
-        }
+    static std::string device = getenv("GGML_OPENVINO_DEVICE") ? getenv("GGML_OPENVINO_DEVICE") : "CPU";
+    static const auto available_devices = core.get_available_devices();
+    if (std::find(available_devices.begin(), available_devices.end(), device) == available_devices.end()) {
+        GGML_LOG_WARN("GGML OpenVINO Backend: device %s is not available, fallback to CPU\n", device.c_str());
+        device = "CPU";
     }
 
     bool is_static = device == "NPU" ? true : false;
+
     ov::AnyMap config;
+    if (device == "GPU") {
+        auto* disable_sdpa_optimization = getenv("GGML_OPENVINO_DISABLE_SDPA_OPTIMIZATION");
+        if (disable_sdpa_optimization && std::string(disable_sdpa_optimization) != "0") {
+            config = {
+                {"GPU_ENABLE_SDPA_OPTIMIZATION", "0"}
+            };
+        }
+    }
 
     if (getenv("GGML_OPENVINO_DUMP_CGRAPH")) {
         std::string filename = "cgraph.txt";
@@ -102,10 +107,10 @@ enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph *
     static std::unordered_map<ggml_cgraph*, std::shared_ptr<ov::InferRequest>> infer_request_cache;
     static std::unordered_map<ggml_cgraph*, std::vector<std::string>> ov_input_names_cache;
     static std::unordered_map<ggml_cgraph*, std::vector<std::string>> ov_output_names_cache;
-    static std::vector<std::pair<std::string, ggml_tensor*>> kv_tensors = get_kv_tensors(cgraph);
     // For NPU
     static std::unordered_map<ggml_cgraph*, std::shared_ptr<ov::InferRequest>> decode_infer_request_cache;
 
+    auto kv_tensors = get_kv_tensors(cgraph);
     std::shared_ptr<GgmlOvDecoder> ggml_decoder;
     std::shared_ptr<ov::InferRequest> infer_request;
 
@@ -184,13 +189,6 @@ enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph *
                     ov::serialize(model, timestamped_filename);
                 }
 
-                auto * disable_sdpa_optimization = getenv("GGML_OPENVINO_DISABLE_SDPA_OPTIMIZATION");
-                if (disable_sdpa_optimization && std::string(disable_sdpa_optimization) != "0") {
-                    config = {
-                        {"GPU_ENABLE_SDPA_OPTIMIZATION", "0"}
-                    };
-                }
-
                 auto compiled_model = core.compile_model(model, device, config);
                 compile_end_time = ggml_time_us();
                 infer_request_cache[cgraph] = std::make_shared<ov::InferRequest>(compiled_model.create_infer_request());
@@ -225,6 +223,8 @@ enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph *
         }
     }
 
+    auto state_update_end_time = ggml_time_us();
+
     auto ov_input_names = ov_input_names_cache[cgraph];
     auto ov_output_names = ov_output_names_cache[cgraph];
     for (size_t i = 0; i < ov_input_names.size(); i++) {
@@ -239,6 +239,7 @@ enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph *
     auto input_end_time = ggml_time_us();
 
     infer_request->infer();
+
     auto infer_end_time = ggml_time_us();
 
     auto gguf_tensor_addrs = get_ggml_graph_output_dst(ggml_decoder);
@@ -255,11 +256,12 @@ enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph *
     auto end_time = ggml_time_us();
 
     if (getenv("GGML_OPENVINO_PROFILING")) {
-        GGML_LOG_INFO("GGML OpenVINO Backend: \n");
+        GGML_LOG_INFO("\nGGML OpenVINO Backend: \n");
         GGML_LOG_INFO("  - Graph decoder Time: %ld ms \n", (decoder_end_time - start_time) / 1000);
         GGML_LOG_INFO("  - Graph conversion Time: %ld ms \n", (conversion_end_time - decoder_end_time) / 1000);
         GGML_LOG_INFO("  - Graph compile Time: %ld ms \n", (compile_end_time - conversion_end_time) / 1000);
-        GGML_LOG_INFO("  - Graph Input Time: %ld ms \n", (input_end_time - compile_end_time) / 1000);
+        GGML_LOG_INFO("  - Graph State Update Time: %ld ms \n", (state_update_end_time - compile_end_time) / 1000);
+        GGML_LOG_INFO("  - Graph Input Time: %ld ms \n", (input_end_time - state_update_end_time) / 1000);
         GGML_LOG_INFO("  - Graph Inference Time: %ld ms \n", (infer_end_time - input_end_time) / 1000);
         GGML_LOG_INFO("  - Graph Output Time: %ld ms \n", (end_time - infer_end_time) / 1000);
     }
@@ -531,14 +533,22 @@ bool get_is_first_token(const ggml_tensor* inp_pos) {
     return *(int32_t*) inp_pos->data == 0;
 }
 
-std::vector<std::pair<std::string, ggml_tensor*>> get_kv_tensors(struct ggml_cgraph* cgraph) {
-    std::vector<std::pair<std::string, ggml_tensor*>> kv_tensors;
+std::unordered_map<std::string, ggml_tensor*> get_kv_tensors(struct ggml_cgraph* cgraph) {
+    static std::unordered_map<struct ggml_cgraph*, std::unordered_map<std::string, ggml_tensor*>> kv_tensors_cache;
+
+    auto it = kv_tensors_cache.find(cgraph);
+    if (it != kv_tensors_cache.end()) {
+        return it->second;
+    }
+
+    std::unordered_map<std::string, ggml_tensor*> kv_tensors;
     for (int i = 0; i < cgraph->n_nodes; ++i) {
         auto* op = cgraph->nodes[i];
         if (op->op == GGML_OP_SET_ROWS) {
             assert(std::string(op->src[2]->name).find("cache_") == 0);
-            kv_tensors.emplace_back(op->src[2]->name, op->src[2]);
+            kv_tensors[std::string(op->src[2]->name)] = op->src[2];
         }
     }
+    kv_tensors_cache[cgraph] = kv_tensors;
     return kv_tensors;
 }
