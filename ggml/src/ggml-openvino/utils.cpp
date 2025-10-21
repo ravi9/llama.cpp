@@ -211,12 +211,35 @@ enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph *
         auto states = infer_request->query_state();
         int32_t kv_len = *(int32_t*) inp_pos->data;
         int32_t kv_len_in_state = states[0].get_state().get_shape()[1];
-        if (kv_len != kv_len_in_state) {
+
+        // outdated if:
+        // 1. kv_len != kv_len_in_state
+        // 2. last row has different values
+        bool state_outdated = kv_len != kv_len_in_state;
+        if (!state_outdated && kv_len > 0) {
+            auto state_tensor = states[0].get_state();
+            auto state_name = states[0].get_name();
+            state_name = state_name.substr(0, state_name.size() / 2);
+            auto state_shape = state_tensor.get_shape();
+            auto* ggml_tensor = kv_tensors[state_name];
+            auto offset = (kv_len - 1) * state_shape[2] * state_shape[3] * ggml_type_size(ggml_tensor->type);
+            auto size = state_shape[2] * state_shape[3] * ggml_type_size(ggml_tensor->type);
+            state_outdated =
+                std::memcmp((char*) ggml_tensor->data + offset, (char*) state_tensor.data() + offset, size) != 0;
+        }
+
+        if (state_outdated) {
+            GGML_LOG_DEBUG(
+                "GGML OpenVINO Backend: updating kv cache states from ggml tensors (kv_len: %d, kv_len_in_state: %d)\n",
+                kv_len,
+                kv_len_in_state);
             for (auto& state : states) {
-                ov::Tensor state_tensor = state.get_state();
-                ov::Shape state_shape = state_tensor.get_shape();
+                auto state_name = state.get_name();
+                state_name = state_name.substr(0, state_name.size() / 2);
+                auto* ggml_tensor = kv_tensors[state_name];
+                auto state_shape = state.get_state().get_shape();
                 state_shape[1] = kv_len;
-                state_tensor.set_shape(state_shape);
+                ov::Tensor state_tensor(state.get_state().get_element_type(), state_shape, ggml_tensor->data);
                 state.set_state(state_tensor);
             }
         }
@@ -252,6 +275,18 @@ enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph *
             print_output_tensor_info(result_name, output_tensor, gguf_tensor_addrs);
         }
     }
+
+    for (auto& state : infer_request->query_state()) {
+        auto state_name = state.get_name();
+        state_name = state_name.substr(0, state_name.size() / 2);
+        auto state_tensor = state.get_state();
+        auto state_shape = state_tensor.get_shape();
+        auto* ggml_tensor = kv_tensors[state_name];
+        auto size = state_shape[2] * state_shape[3] * inp_pos->ne[0] * ggml_type_size(ggml_tensor->type);
+        auto offset = state_shape[2] * state_shape[3] * (*(int32_t*) inp_pos->data) * ggml_type_size(ggml_tensor->type);
+        std::memcpy((char*) ggml_tensor->data + offset, (char*) state_tensor.data() + offset, size);
+    }
+
     auto end_time = ggml_time_us();
 
     if (getenv("GGML_OPENVINO_PROFILING")) {
