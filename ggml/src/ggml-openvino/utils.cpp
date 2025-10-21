@@ -96,17 +96,17 @@ enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph *
     }
 
     static std::mutex cache_mutex;
-    static std::unordered_map<ggml_cgraph*, std::shared_ptr<ov::InferRequest>> infer_request_cache;
-    static std::unordered_map<ggml_cgraph*, std::vector<std::string>> ov_input_names_cache;
-    static std::unordered_map<ggml_cgraph*, std::vector<std::string>> ov_output_names_cache;
+    static std::unordered_map<ggml_cgraph *, std::shared_ptr<ov::InferRequest>> infer_request_cache;
+    static std::unordered_map<ggml_cgraph *, std::vector<std::string>> ov_input_names_cache;
+    static std::unordered_map<ggml_cgraph *, std::vector<std::string>> ov_output_names_cache;
     // For NPU
-    static std::unordered_map<ggml_cgraph*, std::shared_ptr<ov::InferRequest>> decode_infer_request_cache;
+    static std::unordered_map<ggml_cgraph *, std::shared_ptr<ov::InferRequest>> decode_infer_request_cache;
 
     auto kv_tensors = get_kv_tensors(cgraph);
     std::shared_ptr<GgmlOvDecoder> ggml_decoder;
     std::shared_ptr<ov::InferRequest> infer_request;
 
-    const ggml_tensor* inp_pos = get_inp_pos_tensor(cgraph);
+    const ggml_tensor * inp_pos = get_inp_pos_tensor(cgraph);
     bool is_first_token = get_is_first_token(inp_pos);
 
     int64_t decoder_end_time;
@@ -209,7 +209,7 @@ enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph *
 
     if (!is_static) {
         auto states = infer_request->query_state();
-        int32_t kv_len = *(int32_t*) inp_pos->data;
+        int32_t kv_len = *(int32_t *) inp_pos->data;
         int32_t kv_len_in_state = states[0].get_state().get_shape()[1];
 
         // outdated if:
@@ -221,22 +221,21 @@ enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph *
             auto state_name = states[0].get_name();
             state_name = state_name.substr(0, state_name.size() / 2);
             auto state_shape = state_tensor.get_shape();
-            auto* ggml_tensor = kv_tensors[state_name];
+            auto * ggml_tensor = kv_tensors[state_name];
             auto offset = (kv_len - 1) * state_shape[2] * state_shape[3] * ggml_type_size(ggml_tensor->type);
             auto size = state_shape[2] * state_shape[3] * ggml_type_size(ggml_tensor->type);
             state_outdated =
-                std::memcmp((char*) ggml_tensor->data + offset, (char*) state_tensor.data() + offset, size) != 0;
+                std::memcmp((char *) ggml_tensor->data + offset, (char *) state_tensor.data() + offset, size) != 0;
         }
 
         if (state_outdated) {
             GGML_LOG_DEBUG(
                 "GGML OpenVINO Backend: updating kv cache states from ggml tensors (kv_len: %d, kv_len_in_state: %d)\n",
-                kv_len,
-                kv_len_in_state);
-            for (auto& state : states) {
+                kv_len, kv_len_in_state);
+            for (auto & state : states) {
                 auto state_name = state.get_name();
                 state_name = state_name.substr(0, state_name.size() / 2);
-                auto* ggml_tensor = kv_tensors[state_name];
+                auto * ggml_tensor = kv_tensors[state_name];
                 auto state_shape = state.get_state().get_shape();
                 state_shape[1] = kv_len;
                 ov::Tensor state_tensor(state.get_state().get_element_type(), state_shape, ggml_tensor->data);
@@ -276,15 +275,16 @@ enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph *
         }
     }
 
-    for (auto& state : infer_request->query_state()) {
+    for (auto & state : infer_request->query_state()) {
         auto state_name = state.get_name();
         state_name = state_name.substr(0, state_name.size() / 2);
         auto state_tensor = state.get_state();
         auto state_shape = state_tensor.get_shape();
-        auto* ggml_tensor = kv_tensors[state_name];
+        auto * ggml_tensor = kv_tensors[state_name];
         auto size = state_shape[2] * state_shape[3] * inp_pos->ne[0] * ggml_type_size(ggml_tensor->type);
-        auto offset = state_shape[2] * state_shape[3] * (*(int32_t*) inp_pos->data) * ggml_type_size(ggml_tensor->type);
-        std::memcpy((char*) ggml_tensor->data + offset, (char*) state_tensor.data() + offset, size);
+        auto offset =
+            state_shape[2] * state_shape[3] * (*(int32_t *) inp_pos->data) * ggml_type_size(ggml_tensor->type);
+        std::memcpy((char *) ggml_tensor->data + offset, (char *) state_tensor.data() + offset, size);
     }
 
     auto end_time = ggml_time_us();
@@ -546,7 +546,7 @@ void set_zero_diagonal(std::vector<float> & matrix, size_t dim) {
     }
 }
 
-const ggml_tensor* get_inp_pos_tensor(ggml_cgraph* cgraph) {
+const ggml_tensor * get_inp_pos_tensor(ggml_cgraph * cgraph) {
     for (int i = 0; i < cgraph->n_nodes; ++i) {
         auto * op = cgraph->nodes[i];
         for (int j = 0; j < GGML_MAX_SRC; ++j) {
@@ -563,21 +563,21 @@ const ggml_tensor* get_inp_pos_tensor(ggml_cgraph* cgraph) {
     throw std::runtime_error("get_inp_pos_tensor: inp_pos not found in cgraph");
 }
 
-bool get_is_first_token(const ggml_tensor* inp_pos) {
-    return *(int32_t*) inp_pos->data == 0;
+bool get_is_first_token(const ggml_tensor * inp_pos) {
+    return *(int32_t *) inp_pos->data == 0;
 }
 
-std::unordered_map<std::string, ggml_tensor*> get_kv_tensors(struct ggml_cgraph* cgraph) {
-    static std::unordered_map<struct ggml_cgraph*, std::unordered_map<std::string, ggml_tensor*>> kv_tensors_cache;
+std::unordered_map<std::string, ggml_tensor *> get_kv_tensors(struct ggml_cgraph * cgraph) {
+    static std::unordered_map<struct ggml_cgraph *, std::unordered_map<std::string, ggml_tensor *>> kv_tensors_cache;
 
     auto it = kv_tensors_cache.find(cgraph);
     if (it != kv_tensors_cache.end()) {
         return it->second;
     }
 
-    std::unordered_map<std::string, ggml_tensor*> kv_tensors;
+    std::unordered_map<std::string, ggml_tensor *> kv_tensors;
     for (int i = 0; i < cgraph->n_nodes; ++i) {
-        auto* op = cgraph->nodes[i];
+        auto * op = cgraph->nodes[i];
         if (op->op == GGML_OP_SET_ROWS) {
             assert(std::string(op->src[2]->name).find("cache_") == 0);
             kv_tensors[std::string(op->src[2]->name)] = op->src[2];

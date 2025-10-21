@@ -38,11 +38,11 @@ std::vector<T> pad_input(const ggml_tensor * tensor, size_t padded_rows, size_t 
 
 void set_zero_diagonal(std::vector<float> & matrix, size_t dim);
 
-const ggml_tensor* get_inp_pos_tensor(struct ggml_cgraph* cgraph);
+const ggml_tensor * get_inp_pos_tensor(struct ggml_cgraph * cgraph);
 
-bool get_is_first_token(const ggml_tensor* inp_pos);
+bool get_is_first_token(const ggml_tensor * inp_pos);
 
-std::unordered_map<std::string, ggml_tensor*> get_kv_tensors(struct ggml_cgraph* cgraph);
+std::unordered_map<std::string, ggml_tensor *> get_kv_tensors(struct ggml_cgraph * cgraph);
 
 ov::AnyMap get_npu_prefill_config();
 ov::AnyMap get_npu_generate_config();
