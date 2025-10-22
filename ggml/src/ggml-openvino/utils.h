@@ -11,15 +11,13 @@ std::shared_ptr<GgmlOvDecoder> get_ggml_decoder(struct ggml_cgraph * cgraph, boo
 
 ov::Tensor convert_ggml_input_to_ov(std::shared_ptr<GgmlOvDecoder> ggml_decoder, const std::string & name);
 
-std::map<std::string, void *> get_ggml_graph_output_dst(std::shared_ptr<GgmlOvDecoder> ggml_decoder);
+std::map<std::string, ggml_tensor *> get_ggml_graph_output_dst(std::shared_ptr<GgmlOvDecoder> ggml_decoder);
 
 size_t checksum(const void * data, size_t size);
 
 void print_input_tensor_info(const std::string & name, const ov::Tensor & tensor);
 
-void print_output_tensor_info(const std::string & name,
-                              const ov::Tensor & tensor,
-                              std::map<std::string, void *> & output_dst);
+void print_output_tensor_info(const std::string & name, const ov::Tensor & tensor, void * output_dst);
 
 template <typename T>
 std::vector<T> pad_input(const ggml_tensor * tensor, size_t padded_rows, size_t padded_cols, T pad_value) {
@@ -41,8 +39,6 @@ void set_zero_diagonal(std::vector<float> & matrix, size_t dim);
 const ggml_tensor * get_inp_pos_tensor(struct ggml_cgraph * cgraph);
 
 bool get_is_first_token(const ggml_tensor * inp_pos);
-
-std::unordered_map<std::string, ggml_tensor *> get_kv_tensors(struct ggml_cgraph * cgraph);
 
 ov::AnyMap get_npu_prefill_config();
 ov::AnyMap get_npu_generate_config();

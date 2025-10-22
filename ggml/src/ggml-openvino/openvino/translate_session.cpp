@@ -243,11 +243,11 @@ std::shared_ptr<Model> TranslateSession::apply_transformations(std::shared_ptr<M
         manager.set_per_pass_validation(true);
         manager.register_pass<ov::pass::MarkCompressedFloatConstants>();
 
-        if (!ggml_model_decoder->is_static()) {
-            const auto kv_param_res_names = ggml_model_decoder->get_kv_param_res_names();
-            const auto kv_param_res_pairs = get_kv_param_res_pairs(model, kv_param_res_names);
-            manager.register_pass<ov::pass::MakeStateful>(kv_param_res_pairs);
-        }
+        // if (!ggml_model_decoder->is_static()) {
+        //     const auto kv_param_res_names = ggml_model_decoder->get_kv_param_res_names();
+        //     const auto kv_param_res_pairs = get_kv_param_res_pairs(model, kv_param_res_names);
+        //     manager.register_pass<ov::pass::MakeStateful>(kv_param_res_pairs);
+        // }
 
         // if (ggml_model_decoder->is_static()) {
         manager.register_pass<pass::EliminateZeroPoints>();

@@ -285,14 +285,17 @@ void GgmlOvDecoder::set_llm_params() {
             } else {
                 m_context_size = cache_k->ne[1];
             }
-        } else if (node->op == GGML_OP_ROPE &&
-                   (name.find("Qcur-0") == 0 || std::string(node->src[0]->name).find("Qcur-0") == 0)) {
-            m_head_size = node->ne[0];
-            m_num_heads = node->ne[1];
-            m_rope_params = node->op_params;
-        } else if (node->op == GGML_OP_ROPE &&
-                   (name.find("Kcur-0") == 0 || std::string(node->src[0]->name).find("Kcur-0") == 0)) {
-            m_num_heads_kv = node->ne[1];
+        } else if (node->op == GGML_OP_ROPE) {
+            if (name.find("Qcur-0") == 0 || std::string(node->src[0]->name).find("Qcur-0") == 0) {
+                m_head_size = node->ne[0];
+                m_num_heads = node->ne[1];
+                m_rope_params = node->op_params;
+                auto * inp_pos = node->src[1];
+                m_input_len = inp_pos->ne[0];
+                m_past_kv_len = *(int32_t *) inp_pos->data;
+            } else if (name.find("Kcur-0") == 0 || std::string(node->src[0]->name).find("Kcur-0") == 0) {
+                m_num_heads_kv = node->ne[1];
+            }
         }
     }
 }

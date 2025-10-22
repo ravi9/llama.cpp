@@ -81,9 +81,9 @@ public:
 
     virtual void visit_subgraph(std::function<void(std::shared_ptr<GgmlDecoder>)> node_visitor) const override;
 
-    const ggml_tensor * get_input_ggml_tensor(const std::string & name) const { return m_inputs.at(name); }
+    ggml_tensor * get_input_ggml_tensor(const std::string & name) const { return m_inputs.at(name); }
 
-    const ggml_tensor * get_output_ggml_tensor(const std::string & name) const { return m_outputs.at(name); }
+    ggml_tensor * get_output_ggml_tensor(const std::string & name) const { return m_outputs.at(name); }
 
     virtual int get_op_case() const override { return m_op_case; }
 
@@ -118,6 +118,10 @@ public:
     virtual int get_num_heads_kv() const override { return m_num_heads_kv; }
 
     virtual int get_head_size() const override { return m_head_size; }
+
+    int get_past_kv_len() const { return m_past_kv_len; }
+
+    int get_input_len() const { return m_input_len; }
 
     virtual int32_t * get_rope_params() const override { return m_rope_params; }
 
@@ -176,6 +180,8 @@ private:
     int m_num_heads;
     int m_num_heads_kv;
     int m_head_size;
+    int m_past_kv_len;
+    int m_input_len;
     int32_t * m_rope_params;
     std::vector<std::string> m_kv_names;
     bool m_is_static = false;
