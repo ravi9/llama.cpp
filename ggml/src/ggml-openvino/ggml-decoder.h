@@ -16,14 +16,12 @@ public:
     // Graph decoder
     GgmlOvDecoder(ggml_cgraph * cgraph,
                   std::map<std::string, std::shared_ptr<ov::Node>> & model_weights,
-                  bool is_static,
-                  bool is_first_token);
+                  bool is_static);
 
     // Node decoder, called in GgmlOvDecoder::visit_subgraph
     GgmlOvDecoder(ggml_tensor * node,
                   ggml_cgraph * cgraph,
                   bool is_static,
-                  bool is_first_token,
                   int context_size,
                   int context_size_swa,
                   int num_heads,
@@ -129,8 +127,6 @@ public:
 
     virtual bool is_static() const override { return m_is_static; }
 
-    virtual bool is_first_token() const override { return m_is_first_token; }
-
     ov::PartialShape get_graph_input_shape(const ggml_tensor * src) const;
 
     static void dump_cgraph(const ggml_cgraph * cgraph, std::string & filename);
@@ -157,6 +153,7 @@ private:
 
     // set context_size, num_heads, etc
     void set_llm_params();
+    void validate_cgraph() const;
 
     ggml_cgraph * m_cgraph = nullptr;
     ggml_tensor * m_node = nullptr;
@@ -185,7 +182,6 @@ private:
     int32_t * m_rope_params;
     std::vector<std::string> m_kv_names;
     bool m_is_static = false;
-    bool m_is_first_token;
 };
 
 void print_tensor_address_map(const ggml_cgraph * cgraph);

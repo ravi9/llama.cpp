@@ -19,6 +19,7 @@
 #include <mutex>
 #include <openvino/core/any.hpp>
 #include <openvino/core/graph_util.hpp>
+#include <openvino/core/shape.hpp>
 #include <openvino/core/type/float16.hpp>
 #include <openvino/frontend/manager.hpp>
 #include <openvino/openvino.hpp>
@@ -31,39 +32,23 @@
 #include <unordered_map>
 #include <vector>
 
-ov::Tensor convert_ggml_input_to_ov(std::shared_ptr<GgmlOvDecoder> ggml_decoder, const std::string & name) {
-    const auto * ggml_tensor = ggml_decoder->get_input_ggml_tensor(name);
-    auto * input_data = ggml_tensor->data;
-    ov::Shape input_shape;
-    if (name.find("cache_k") == 0 || name.find("cache_v") == 0) {
-        input_shape = {1, (size_t) ggml_decoder->get_past_kv_len(), (size_t) ggml_decoder->get_num_heads_kv(),
-                       (size_t) ggml_decoder->get_head_size()};
-    } else if (ggml_tensor->op == GGML_OP_VIEW) {
-        // This case is added to make test-backend-ops work
-        input_shape = ggml_decoder->get_graph_input_shape(ggml_tensor->view_src).to_shape();
-    } else {
-        input_shape = ggml_decoder->get_input_shape(name).to_shape();
-    }
-    auto input_tensor = ov::Tensor(ggml_decoder->get_input_type(name), input_shape, input_data);
-    return input_tensor;
-}
-
-static ov::frontend::FrontEnd::Ptr get_ggml_frontend() {
-    auto fem = ov::frontend::FrontEndManager();
-    auto front_end = fem.load_by_framework("ggml");
-    return front_end;
-}
+// Suppress deprecation warning for ov::Tensor::data()
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
 enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     static ov::Core core;
 
-    static std::string device = getenv("GGML_OPENVINO_DEVICE") ? getenv("GGML_OPENVINO_DEVICE") : "CPU";
-    static const auto available_devices = core.get_available_devices();
-    if (std::find(available_devices.begin(), available_devices.end(), device) == available_devices.end()) {
-        GGML_LOG_WARN("GGML OpenVINO Backend: device %s is not available, fallback to CPU\n", device.c_str());
-        device = "CPU";
-    }
-
+    auto get_device = [&] {
+        std::string device = getenv("GGML_OPENVINO_DEVICE") ? getenv("GGML_OPENVINO_DEVICE") : "CPU";
+        auto available_devices = core.get_available_devices();
+        if (std::find(available_devices.begin(), available_devices.end(), device) == available_devices.end()) {
+            GGML_LOG_WARN("GGML OpenVINO Backend: device %s is not available, fallback to CPU\n", device.c_str());
+            device = "CPU";
+        }
+        return device;
+    };
+    static std::string device = get_device();
     bool is_static = device == "NPU" ? true : false;
 
     ov::AnyMap config;
@@ -88,14 +73,9 @@ enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph *
     static std::unordered_map<ggml_cgraph *, std::shared_ptr<ov::InferRequest>> infer_request_cache;
     static std::unordered_map<ggml_cgraph *, std::vector<std::string>> ov_input_names_cache;
     static std::unordered_map<ggml_cgraph *, std::vector<std::string>> ov_output_names_cache;
-    // For NPU
-    static std::unordered_map<ggml_cgraph *, std::shared_ptr<ov::InferRequest>> decode_infer_request_cache;
 
     std::shared_ptr<GgmlOvDecoder> ggml_decoder;
     std::shared_ptr<ov::InferRequest> infer_request;
-
-    const ggml_tensor * inp_pos = get_inp_pos_tensor(cgraph);
-    bool is_first_token = get_is_first_token(inp_pos);
 
     int64_t decoder_end_time;
     int64_t conversion_end_time;
@@ -107,80 +87,35 @@ enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph *
         auto it = infer_request_cache.find(cgraph);
         if (it != infer_request_cache.end()) {
             std::map<std::string, std::shared_ptr<ov::Node>> model_weights;
-            ggml_decoder = std::make_shared<GgmlOvDecoder>(cgraph, model_weights, is_static, is_first_token);
+            ggml_decoder = std::make_shared<GgmlOvDecoder>(cgraph, model_weights, is_static);
             decoder_end_time = ggml_time_us();
 
-            if (is_static && !is_first_token) {
-                infer_request = decode_infer_request_cache[cgraph];
-            } else {
-                infer_request = infer_request_cache[cgraph];
-            }
-
+            infer_request = infer_request_cache[cgraph];
             conversion_end_time = ggml_time_us();
             compile_end_time = conversion_end_time;
         } else {
             std::shared_ptr<ov::Model> model;
             auto model_weights = GgmlOvDecoder::create_weight_nodes(cgraph, get_types_to_requant(device));
 
-            if (is_static) {
-                ggml_decoder = std::make_shared<GgmlOvDecoder>(cgraph, model_weights, is_static, true);
-                auto ggml_decoder_kvcache = std::make_shared<GgmlOvDecoder>(cgraph, model_weights, is_static, false);
-                decoder_end_time = ggml_time_us();
+            ggml_decoder = std::make_shared<GgmlOvDecoder>(cgraph, model_weights, is_static);
+            decoder_end_time = ggml_time_us();
 
-                auto input_model = std::make_shared<ov::frontend::ggml::InputModel>(ggml_decoder);
-                auto input_model_kvcache = std::make_shared<ov::frontend::ggml::InputModel>(ggml_decoder_kvcache);
+            auto input_model = std::make_shared<ov::frontend::ggml::InputModel>(ggml_decoder);
+            model = ov::frontend::ggml::FrontEnd::convert(input_model);
+            ggml_decoder->clear_model_weights();
+            conversion_end_time = ggml_time_us();
 
-                model = ov::frontend::ggml::FrontEnd::convert(input_model);
-                ggml_decoder->clear_model_weights();
-                auto model_kvcache = ov::frontend::ggml::FrontEnd::convert(input_model_kvcache);
-                ggml_decoder_kvcache->clear_model_weights();
-                conversion_end_time = ggml_time_us();
-
-                if (getenv("GGML_OPENVINO_DUMP_IR")) {
-                    char timestamped_filename[64];
-                    auto timestamp = (long long) ggml_time_us();
-                    snprintf(timestamped_filename, sizeof(timestamped_filename), "model_prefill_%lld.xml", timestamp);
-                    ov::serialize(model, timestamped_filename);
-                    snprintf(timestamped_filename, sizeof(timestamped_filename), "model_kvcache_%lld.xml", timestamp);
-                    ov::serialize(model_kvcache, timestamped_filename);
-                }
-
-                auto compiled_model = core.compile_model(model, device, get_npu_prefill_config());
-                auto compiled_model_kvcache = core.compile_model(model_kvcache, device, get_npu_generate_config());
-                compile_end_time = ggml_time_us();
-
-                infer_request_cache[cgraph] = std::make_shared<ov::InferRequest>(compiled_model.create_infer_request());
-                decode_infer_request_cache[cgraph] =
-                    std::make_shared<ov::InferRequest>(compiled_model_kvcache.create_infer_request());
-                infer_request = infer_request_cache[cgraph];
-            } else {
-                ggml_decoder = std::make_shared<GgmlOvDecoder>(cgraph, model_weights, is_static, true);
-                decoder_end_time = ggml_time_us();
-
-                auto input_model = std::make_shared<ov::frontend::ggml::InputModel>(ggml_decoder);
-                model = ov::frontend::ggml::FrontEnd::convert(input_model);
-                ggml_decoder->clear_model_weights();
-                conversion_end_time = ggml_time_us();
-
-                if (getenv("GGML_OPENVINO_DUMP_IR")) {
-                    char timestamped_filename[64];
-                    auto timestamp = (long long) ggml_time_us();
-                    snprintf(timestamped_filename, sizeof(timestamped_filename), "model_%lld.xml", timestamp);
-                    ov::serialize(model, timestamped_filename);
-                }
-
-                auto * disable_sdpa_optimization = getenv("GGML_OPENVINO_DISABLE_SDPA_OPTIMIZATION");
-                if (disable_sdpa_optimization && std::string(disable_sdpa_optimization) != "0") {
-                    config = {
-                        {"GPU_ENABLE_SDPA_OPTIMIZATION", "0"}
-                    };
-                }
-
-                auto compiled_model = core.compile_model(model, device, config);
-                compile_end_time = ggml_time_us();
-                infer_request_cache[cgraph] = std::make_shared<ov::InferRequest>(compiled_model.create_infer_request());
-                infer_request = infer_request_cache[cgraph];
+            if (getenv("GGML_OPENVINO_DUMP_IR")) {
+                char timestamped_filename[64];
+                auto timestamp = (long long) ggml_time_us();
+                snprintf(timestamped_filename, sizeof(timestamped_filename), "model_%lld.xml", timestamp);
+                ov::serialize(model, timestamped_filename);
             }
+
+            auto compiled_model = core.compile_model(model, device, get_ov_compile_config(device));
+            compile_end_time = ggml_time_us();
+            infer_request_cache[cgraph] = std::make_shared<ov::InferRequest>(compiled_model.create_infer_request());
+            infer_request = infer_request_cache[cgraph];
 
             std::vector<std::string> ov_input_names;
             std::vector<std::string> ov_output_names;
@@ -239,31 +174,24 @@ enum ggml_status openvino_frontend_compute(ggml_backend_t backend, ggml_cgraph *
     GGML_UNUSED(backend);
 }
 
-namespace {
-ov::AnyMap get_npu_base_config() {
-    return {
-        {"NPU_COMPILATION_MODE_PARAMS",       "compute-layers-with-higher-precision=Sqrt,Power,ReduceMean,Add_RMSNorm"  },
-        {"NPU_COMPILER_DYNAMIC_QUANTIZATION", "YES"                                                                     },
-        {"NPU_USE_NPUW",                      "YES"                                                                     },
-        {"NPUW_DEVICES",                      "NPU"                                                                     },
-        {"NPUW_FOLD",                         "YES"                                                                     },
-        {"NPUW_WEIGHTS_BANK",                 "shared"                                                                  },
-        {"NPUW_FUNCALL_FOR_ALL",              "YES"                                                                     },
-        {"NPUW_FUNCALL_ASYNC",                "YES"                                                                     },
-        {"NPUW_DQ",                           "YES"                                                                     },
-        {"NPUW_DQ_FULL",                      "NO"                                                                      },
-        {"NPUW_CACHE_DIR",                    getenv("GGML_OPENVINO_CACHE_DIR") ? getenv("GGML_OPENVINO_CACHE_DIR") : ""},
-    };
-}
-}  // namespace
-
-ov::AnyMap get_npu_prefill_config() {
-    auto config = get_npu_base_config();
-    return config;
-}
-
-ov::AnyMap get_npu_generate_config() {
-    auto config = get_npu_base_config();
+ov::AnyMap get_ov_compile_config(const std::string & device) {
+    ov::AnyMap config;
+    if (device == "NPU") {
+        config = {
+            {"NPU_COMPILER_DYNAMIC_QUANTIZATION", "YES"   },
+            {"NPU_USE_NPUW",                      "YES"   },
+            {"NPUW_DEVICES",                      "NPU"   },
+            {"NPUW_FOLD",                         "YES"   },
+            {"NPUW_WEIGHTS_BANK",                 "shared"},
+            {"NPUW_FUNCALL_FOR_ALL",              "YES"   },
+            {"NPUW_FUNCALL_ASYNC",                "YES"   },
+            {"NPUW_DQ",                           "YES"   },
+            {"NPUW_DQ_FULL",                      "NO"    },
+        };
+        if (auto * cache_dir = getenv("GGML_OPENVINO_CACHE_DIR"); cache_dir) {
+            config["NPUW_CACHE_DIR"] = cache_dir;
+        }
+    }
     return config;
 }
 
@@ -279,7 +207,7 @@ std::map<ggml_type, ExtraQuantType> get_types_to_requant(const std::string & dev
     }
     if (device == "GPU") {
         return {
-            // gs16 is WIP
+            // gs16 will be supported on openvino-2025.4
             {GGML_TYPE_Q6_K, ExtraQuantType::Q8_0_32},
         };
     }
@@ -330,53 +258,54 @@ enum ggml_status naive_compute(ggml_cgraph * cgraph,
     return GGML_STATUS_SUCCESS;
 }
 
+namespace {
+ov::Tensor convert_ggml_input_to_ov(std::shared_ptr<GgmlOvDecoder> ggml_decoder, const std::string & name) {
+    const auto * ggml_tensor = ggml_decoder->get_input_ggml_tensor(name);
+    auto * input_data = ggml_tensor->data;
+    ov::Shape input_shape;
+    if (ggml_tensor->op == GGML_OP_VIEW) {
+        // This case is added to make test-backend-ops work
+        input_shape = ggml_decoder->get_graph_input_shape(ggml_tensor->view_src).to_shape();
+    } else {
+        input_shape = ggml_decoder->get_input_shape(name).to_shape();
+    }
+    auto input_tensor = ov::Tensor(ggml_decoder->get_input_type(name), input_shape, input_data);
+    return input_tensor;
+}
+}  // namespace
+
 ov::Tensor get_ov_input_tensor(std::shared_ptr<GgmlOvDecoder> ggml_decoder, const std::string & param_name) {
     bool is_static = ggml_decoder->is_static();
-    bool is_first_token = ggml_decoder->is_first_token();
 
     ov::Tensor input_tensor;
     if (ggml_decoder->get_model_extra_inputs().find(param_name) != ggml_decoder->get_model_extra_inputs().end()) {
         input_tensor = *ggml_decoder->get_model_extra_input_values().at(param_name);
 
-    } else if (!is_static) {
+    } else if (param_name.find("cache_k") == 0 || param_name.find("cache_v") == 0) {
+        void * input_data = ggml_decoder->get_input_ggml_tensor(param_name)->data;
+        size_t past_kv_len =
+            ggml_decoder->is_static() ? ggml_decoder->get_context_size() : ggml_decoder->get_past_kv_len();
+        ov::Shape input_shape = {past_kv_len, (size_t) ggml_decoder->get_num_heads_kv(),
+                                 (size_t) ggml_decoder->get_head_size()};
+        input_tensor = ov::Tensor(ggml_decoder->get_input_type(param_name), input_shape, input_data);
+
+    } else if (is_static && param_name.find("KQ_mask") == 0) {
+        size_t context_size = ggml_decoder->get_context_size();
+        const auto * input_tensor_ggml = ggml_decoder->get_input_ggml_tensor(param_name);
+        std::vector<float> padded_data = pad_input<float>(input_tensor_ggml, 1, context_size, -INFINITY);
+        input_tensor = ov::Tensor(ov::element::f32, ov::Shape{1, 1, context_size});
+        auto * data_ptr = input_tensor.data<float>();
+        std::copy(padded_data.begin(), padded_data.end(), data_ptr);
+
+    } else if (is_static && param_name.find("inp_out_ids") == 0) {
         input_tensor = convert_ggml_input_to_ov(ggml_decoder, param_name);
+        if (input_tensor.get_size() == 0) {
+            input_tensor = ov::Tensor(input_tensor.get_element_type(), ov::Shape{1, 1, 1});
+            *input_tensor.data<int32_t>() = 0;
+        }
 
     } else {
-        if (param_name == "inp_tokens" || param_name == "inp_pos") {
-            if (is_first_token) {
-                size_t context_size = ggml_decoder->get_context_size();
-                const auto * input_tensor_ggml = ggml_decoder->get_input_ggml_tensor(param_name);
-                std::vector<int32_t> padded_data = pad_input<int32_t>(input_tensor_ggml, 1, context_size, 0);
-                input_tensor = ov::Tensor(ov::element::i32, ov::Shape{1, 1, context_size});
-                auto * data_ptr = input_tensor.data<int32_t>();
-                std::copy(padded_data.begin(), padded_data.end(), data_ptr);
-            } else {
-                input_tensor = convert_ggml_input_to_ov(ggml_decoder, param_name);
-            }
-
-        } else if (param_name.find("KQ_mask") == 0) {
-            size_t context_size = ggml_decoder->get_context_size();
-            const auto * input_tensor_ggml = ggml_decoder->get_input_ggml_tensor(param_name);
-            if (is_first_token) {
-                std::vector<float> padded_data =
-                    pad_input<float>(input_tensor_ggml, context_size, context_size, -INFINITY);
-                set_zero_diagonal(padded_data, context_size);
-                input_tensor = ov::Tensor(ov::element::f32, ov::Shape{1, context_size, context_size});
-                auto * data_ptr = input_tensor.data<float>();
-                std::copy(padded_data.begin(), padded_data.end(), data_ptr);
-            } else {
-                std::vector<float> padded_data = pad_input<float>(input_tensor_ggml, 1, context_size, -INFINITY);
-                input_tensor = ov::Tensor(ov::element::f32, ov::Shape{1, 1, context_size});
-                auto * data_ptr = input_tensor.data<float>();
-                std::copy(padded_data.begin(), padded_data.end(), data_ptr);
-            }
-
-        } else if (const auto * op = ggml_decoder->get_tensor_used_op(ggml_decoder->get_tensor_from_name(param_name));
-                   op && op->op == GGML_OP_SET_ROWS && is_static && is_first_token) {
-            input_tensor = ov::Tensor(ov::element::i64, ov::Shape{1, 1, 1});
-        } else {
-            input_tensor = convert_ggml_input_to_ov(ggml_decoder, param_name);
-        }
+        input_tensor = convert_ggml_input_to_ov(ggml_decoder, param_name);
     }
     return input_tensor;
 }
@@ -387,11 +316,17 @@ ov::Tensor get_ov_output_tensor(std::shared_ptr<GgmlOvDecoder> ggml_decoder, con
     ov::Shape output_shape;
     if (result_name.find("cache") == std::string::npos) {
         output_shape = ggml_decoder->get_output_shape(result_name).to_shape();
+        if (ggml_decoder->is_static() && result_name == "result_output") {
+            output_shape[1] = 1;
+        }
     } else {
         size_t total_token_len = ggml_decoder->get_past_kv_len() + ggml_decoder->get_input_len();
         size_t num_heads_kv = ggml_decoder->get_num_heads_kv();
         size_t head_size = ggml_decoder->get_head_size();
-        output_shape = ov::Shape{1, total_token_len, num_heads_kv, head_size};
+        if (ggml_decoder->is_static()) {
+            total_token_len = ggml_decoder->get_context_size();
+        }
+        output_shape = ov::Shape{total_token_len, num_heads_kv, head_size};
     }
     ov::Tensor output_tensor(output_type, output_shape, ggml_tensor->data);
     return output_tensor;
@@ -406,10 +341,6 @@ size_t checksum(const void * data, size_t size) {
     }
     return sum;
 }
-
-// Suppress deprecation warning for ov::Tensor::data()
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
 void print_input_tensor_info(const std::string & name, const ov::Tensor & tensor) {
     std::cout << "Input name: " << name << ", Input shape: " << tensor.get_shape() << ", Address: " << tensor.data()
@@ -485,8 +416,6 @@ void print_output_tensor_info(const std::string & name, const ov::Tensor & tenso
     }
 }
 
-#pragma GCC diagnostic pop
-
 void set_zero_diagonal(std::vector<float> & matrix, size_t dim) {
     for (size_t i = 0; i < dim; ++i) {
         matrix[i * dim + i] = 0.0f;
@@ -513,3 +442,5 @@ const ggml_tensor * get_inp_pos_tensor(ggml_cgraph * cgraph) {
 bool get_is_first_token(const ggml_tensor * inp_pos) {
     return *(int32_t *) inp_pos->data == 0;
 }
+
+#pragma GCC diagnostic pop

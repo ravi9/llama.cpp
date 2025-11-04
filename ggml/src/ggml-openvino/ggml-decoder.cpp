@@ -27,7 +27,6 @@
 #include <openvino/op/constant.hpp>
 #include <openvino/op/convert.hpp>
 #include <openvino/op/parameter.hpp>
-#include <openvino/op/unsqueeze.hpp>
 #include <openvino/runtime/tensor.hpp>
 #include <optional>
 #include <ostream>
@@ -39,7 +38,6 @@
 GgmlOvDecoder::GgmlOvDecoder(ggml_tensor * node,
                              ggml_cgraph * cgraph,
                              bool is_static,
-                             bool is_first_token,
                              int context_size,
                              int context_size_swa,
                              int num_heads,
@@ -55,25 +53,24 @@ GgmlOvDecoder::GgmlOvDecoder(ggml_tensor * node,
     m_num_heads(num_heads),
     m_num_heads_kv(num_heads_kv),
     m_head_size(head_size),
-    m_is_static(is_static),
-    m_is_first_token(is_first_token) {
+    m_is_static(is_static) {
     set_input_output(node);
 }
 
 GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph,
                              std::map<std::string, std::shared_ptr<ov::Node>> & model_weights,
-                             bool is_static,
-                             bool is_first_token) :
+                             bool is_static) :
     m_cgraph(cgraph),
     m_op_name(m_node ? std::string(m_node->name) : ""),
     m_model_weights(model_weights),
-    m_is_static(is_static),
-    m_is_first_token(is_first_token) {
-    if (is_first_token && getenv("GGML_OPENVINO_PRINT_CGRAPH_TENSOR_ADDRESS")) {
+    m_is_static(is_static) {
+    if (auto * env = getenv("GGML_OPENVINO_PRINT_CGRAPH_TENSOR_ADDRESS"); env && std::string(env) != "0") {
+        unsetenv("GGML_OPENVINO_PRINT_CGRAPH_TENSOR_ADDRESS");
         print_tensor_address_map(cgraph);
     }
 
     set_llm_params();
+    validate_cgraph();
 
     for (int node_n = 0; node_n < cgraph->n_nodes; node_n++) {
         auto * cur_node = cgraph->nodes[node_n];
@@ -300,41 +297,39 @@ void GgmlOvDecoder::set_llm_params() {
     }
 }
 
+void GgmlOvDecoder::validate_cgraph() const {
+    if (m_is_static && m_input_len != 1) {
+        throw std::runtime_error("Static graph (NPU) must have input_len == 1, but got " + std::to_string(m_input_len) +
+                                 ", try set -ub 1");
+    }
+}
+
 ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * src) const {
     auto name = std::string(src->name);
     ov::PartialShape input_shape;
-    if (name == "inp_tokens" || name == "inp_pos") {
-        if (m_is_static) {
-            if (m_is_first_token) {
-                input_shape = ov::PartialShape{1, 1, m_context_size};
-            } else {
-                input_shape = ov::PartialShape{1, 1, 1};
-            }
-        } else {
-            input_shape = ov::PartialShape{1, 1, -1};
-        }
-    } else if (name == "inp_out_ids" && !m_is_static) {
-        input_shape = ov::PartialShape{1, 1, -1};
+
+    if (name == "inp_tokens" || name == "inp_pos" || name == "inp_out_ids") {
+        input_shape = ov::PartialShape{1, 1, m_is_static ? 1 : -1};
+
     } else if (name.find("KQ_mask") == 0) {
         if (m_is_static) {
-            if (m_is_first_token) {
-                input_shape = ov::PartialShape{1, m_context_size, m_context_size};
-            } else {
-                input_shape = ov::PartialShape{1, 1, m_context_size};
-            }
+            input_shape = ov::PartialShape{1, 1, m_context_size};
         } else {
             input_shape = ov::PartialShape{1, -1, -1};
         }
+
     } else if (name.find("cache_") == 0) {
+        auto past_token_len = -1;
         if (m_is_static) {
             int layer = extract_layer_from_name(name);
             bool is_swa = is_swa_layer(layer);
-            input_shape = ov::PartialShape{is_swa ? m_context_size_swa : m_context_size, m_num_heads_kv, m_head_size};
-        } else {
-            input_shape = ov::PartialShape{1, -1, m_num_heads_kv, m_head_size};
+            past_token_len = is_swa ? m_context_size_swa : m_context_size;
         }
+        input_shape = ov::PartialShape{past_token_len, m_num_heads_kv, m_head_size};
+
     } else if (const auto * op = get_tensor_used_op(src); op && op->op == GGML_OP_SET_ROWS) {
         input_shape = ov::PartialShape{1, 1, m_is_static ? 1 : -1};
+
     } else if (src->op == GGML_OP_VIEW) {
         // This case is added to make test-backend-ops work
         input_shape = ov::PartialShape{get_shape(src->view_src)};
@@ -748,9 +743,8 @@ int32_t * GgmlOvDecoder::get_output_op_params(const std::string & name) const {
 
 void GgmlOvDecoder::visit_subgraph(std::function<void(std::shared_ptr<GgmlDecoder>)> node_visitor) const {
     for (const auto & node : m_nodes) {
-        auto decoder =
-            std::make_shared<GgmlOvDecoder>(node, m_cgraph, m_is_static, m_is_first_token, m_context_size,
-                                            m_context_size_swa, m_num_heads, m_num_heads_kv, m_head_size, m_swa_layers);
+        auto decoder = std::make_shared<GgmlOvDecoder>(node, m_cgraph, m_is_static, m_context_size, m_context_size_swa,
+                                                       m_num_heads, m_num_heads_kv, m_head_size, m_swa_layers);
         node_visitor(decoder);
     }
 }
