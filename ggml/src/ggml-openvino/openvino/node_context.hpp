@@ -217,8 +217,7 @@ private:
                     op_case = 1;
                 } else {
                     // Permute kv cache (view)
-                    // int layer = extract_layer_from_name(src_name);
-                    if (!(std::string(node->name).find("swa") != std::string::npos)) {
+                    if (!(std::string(node->src[3]->name).find("swa") != std::string::npos)) {
                         op_case = 2;
                     } else {
                         op_case = 3;
