@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ggml.h"
+#include "ggml-openvino/ggml-decoder.h"
 
 #include <cstdint>
 #include <openvino/frontend/node_context.hpp>
@@ -25,7 +25,6 @@ public:
         m_node(node),
         m_tensor_map(tensor_map),
         m_is_static(is_static),
-        m_op_type(op_type),
         m_translate_session(translate_session),
         m_node_name(std::string(node->name)),
         m_op_case(0) {
@@ -56,55 +55,26 @@ public:
 
     const std::vector<std::string> & get_input_names() const { return m_input_names; }
 
+    const std::vector<std::string> & get_output_names() const { return m_output_names; }
+
     size_t get_input_size() const override { return m_input_names.size(); }
 
     ov::element::Type get_input_type(size_t index) const {
-        switch (m_inputs.at(m_input_names[index])->type) {
-        case GGML_TYPE_F64:
-            return ov::element::f64;
-        case GGML_TYPE_F32:
-            return ov::element::f32;
-        case GGML_TYPE_F16:
-            return ov::element::f16;
-        case GGML_TYPE_BF16:
-            return ov::element::bf16;
-        case GGML_TYPE_I8:
-            return ov::element::i8;
-        case GGML_TYPE_I16:
-            return ov::element::i16;
-        case GGML_TYPE_I32:
-            return ov::element::i32;
-        case GGML_TYPE_I64:
-            return ov::element::i64;
-        default:
-            return ov::element::dynamic;
-        }
+        return GgmlOvDecoder::get_ov_type(m_inputs.at(m_input_names[index]));
     }
 
     PartialShape get_input_shape(size_t index) const {
-        std::vector<size_t> shape;
-        for (int i = GGML_MAX_DIMS - 2; i >= 0; --i) {
-            shape.push_back(static_cast<size_t>(m_inputs.at(m_input_names[index])->ne[i]));
-        }
-        return ov::PartialShape(shape);
+        return ov::PartialShape(GgmlOvDecoder::get_shape(m_inputs.at(m_input_names[index])));
     }
 
     std::vector<size_t> get_input_stride(size_t index) const {
-        std::vector<size_t> stride;
-        for (int i = GGML_MAX_DIMS - 2; i >= 0; --i) {
-            stride.push_back(static_cast<size_t>(m_inputs.at(m_input_names[index])->nb[i]));
-        }
-        return stride;
+        return GgmlOvDecoder::get_stride(m_inputs.at(m_input_names[index]));
     }
 
     std::string get_output_name() const { return m_output_names[0]; }
 
     PartialShape get_output_shape(size_t index) const {
-        std::vector<size_t> shape;
-        for (int i = GGML_MAX_DIMS - 2; i >= 0; --i) {
-            shape.push_back(static_cast<size_t>(m_outputs.at(m_output_names[index])->ne[i]));
-        }
-        return ov::PartialShape(shape);
+        return ov::PartialShape(GgmlOvDecoder::get_shape(m_outputs.at(m_output_names[index])));
     }
 
     int32_t * get_input_op_params(size_t index) const { return m_inputs.at(m_input_names[index])->op_params; }
@@ -112,26 +82,7 @@ public:
     int32_t * get_output_op_params(size_t index) const { return m_outputs.at(m_output_names[index])->op_params; }
 
     ov::element::Type get_output_type(size_t index) const {
-        switch (m_outputs.at(m_output_names[index])->type) {
-        case GGML_TYPE_F64:
-            return ov::element::f64;
-        case GGML_TYPE_F32:
-            return ov::element::f32;
-        case GGML_TYPE_F16:
-            return ov::element::f16;
-        case GGML_TYPE_BF16:
-            return ov::element::bf16;
-        case GGML_TYPE_I8:
-            return ov::element::i8;
-        case GGML_TYPE_I16:
-            return ov::element::i16;
-        case GGML_TYPE_I32:
-            return ov::element::i32;
-        case GGML_TYPE_I64:
-            return ov::element::i64;
-        default:
-            return ov::element::dynamic;
-        }
+        return GgmlOvDecoder::get_ov_type(m_outputs.at(m_output_names[index]));
     }
 
     Output<Node> get_input(int idx) const override { return m_tensor_map->at(m_input_names[idx]); }
@@ -160,7 +111,6 @@ private:
     ggml_tensor * m_node;
     std::shared_ptr<TensorMap> & m_tensor_map;
     bool m_is_static = false;
-    std::string m_op_type;
     TranslateSession * m_translate_session;
     std::vector<std::string> m_input_names;
     std::vector<std::string> m_output_names;
@@ -168,18 +118,6 @@ private:
     std::map<std::string, ggml_tensor *> m_inputs;
     std::map<std::string, ggml_tensor *> m_outputs;
     int m_op_case;
-
-    int extract_layer_from_name(const std::string & name) {
-        size_t pos1 = name.find("_l");
-        pos1 += 2;
-        size_t pos2 = name.find(' ', pos1);
-        if (pos2 == std::string::npos) {
-            pos2 = name.length();
-        }
-        std::string layer_str = name.substr(pos1, pos2 - pos1);
-        int layer = std::stoi(layer_str);
-        return layer;
-    }
 
     int compute_op_case(ggml_tensor * node) {
         int op_case = 0;
@@ -217,7 +155,7 @@ private:
                     op_case = 1;
                 } else {
                     // Permute kv cache (view)
-                    if (!(std::string(node->src[3]->name).find("swa") != std::string::npos)) {
+                    if (!(std::string(node->name).find("swa") != std::string::npos)) {
                         op_case = 2;
                     } else {
                         op_case = 3;

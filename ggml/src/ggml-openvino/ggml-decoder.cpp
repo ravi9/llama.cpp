@@ -654,19 +654,17 @@ int32_t * GgmlOvDecoder::get_output_op_params(const std::string & name) const {
     return m_outputs.at(name)->op_params;
 }
 
-void GgmlOvDecoder::visit_subgraph(std::function<void(std::shared_ptr<GgmlDecoder>, ggml_tensor * tensor, bool is_static)> node_visitor) const {
+void GgmlOvDecoder::visit_subgraph(std::function<void(ggml_tensor * tensor, bool is_static)> node_visitor) const {
     for (const auto & node : m_nodes) {
-        auto decoder = std::make_shared<GgmlOvDecoder>(node, m_cgraph, m_is_static, m_context_size, m_context_size_swa,
-                                                       0, m_num_heads_kv, m_head_size, m_swa_layers);
-        node_visitor(decoder, node, m_is_static);
+        node_visitor(node, m_is_static);
     }
 }
 
 const std::string & GgmlOvDecoder::get_op_type() const {
-    return get_op_type(m_node);
+    return get_ggml_op_type(m_node);
 }
 
-const std::string & GgmlOvDecoder::get_op_type(ggml_tensor * tensor) const {
+std::string GgmlOvDecoder::get_ggml_op_type(ggml_tensor * tensor) {
     static const std::map<ggml_op, std::string> ops = {
         {GGML_OP_NONE,           "GGML_OP_NONE"          },
         {GGML_OP_ACC,            "GGML_OP_ACC"           },

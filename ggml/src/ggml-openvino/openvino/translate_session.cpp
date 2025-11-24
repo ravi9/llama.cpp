@@ -5,7 +5,7 @@
 #include "input_model.hpp"
 #include "pass/eliminate_zp.hpp"
 #include "pass/mark_decompression_convert_constant_folding.hpp"
-#include "ggml.h"
+#include "ggml-openvino/ggml-decoder.h"
 
 #include <cstdint>
 #include <cstdlib>
@@ -190,8 +190,8 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
         (*tensor_map)[it.first] = it.second;
     }
 
-    auto node_visitor = [&](std::shared_ptr<GgmlDecoder> decoder, ggml_tensor * node, bool is_static) {
-        auto operation_type = decoder->get_op_type(node);
+    auto node_visitor = [&](ggml_tensor * node, bool is_static) {
+        auto operation_type = GgmlOvDecoder::get_ggml_op_type(node);
         if (operation_type == "GGML_OP_NONE") {
             return;
         }
@@ -203,7 +203,7 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
         NodeContext node_context(node, tensor_map, is_static, operation_type, this);
         converted_outputs = it->second(node_context);
 
-        const auto & node_output_names = decoder->get_output_names();
+        const auto & node_output_names = node_context.get_output_names();
         FRONT_END_OP_CONVERSION_CHECK(node_output_names.size() == converted_outputs.size(), "Number of ",
                                       operation_type, " outputs greater than number of converted outputs, which are ",
                                       node_output_names.size(), " and ", converted_outputs.size(), " respectively.");

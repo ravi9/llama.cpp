@@ -75,11 +75,11 @@ public:
 
     virtual const std::string & get_op_type() const override;
 
-    virtual const std::string & get_op_type(ggml_tensor * tensor) const override;
+    static std::string get_ggml_op_type(ggml_tensor * tensor);
 
     virtual const std::string & get_op_name() const override;
 
-    virtual void visit_subgraph(std::function<void(std::shared_ptr<GgmlDecoder>, ggml_tensor * tensor, bool is_static)> node_visitor) const override;
+    virtual void visit_subgraph(std::function<void(ggml_tensor * tensor, bool is_static)> node_visitor) const override;
 
     ggml_tensor * get_input_ggml_tensor(const std::string & name) const { return m_inputs.at(name); }
 
@@ -144,12 +144,14 @@ public:
 
     void clear_model_weights() { m_model_weights.clear(); }
 
+    static ov::element::Type get_ov_type(const ggml_tensor * tensor);
+
+    static std::vector<size_t> get_shape(const ggml_tensor * tensor);
+
+    static std::vector<size_t> get_stride(const ggml_tensor * tensor);
 private:
     void set_input_output(ggml_tensor * node, bool naive = false);
     void add_extra_inputs();
-    static std::vector<size_t> get_shape(const ggml_tensor * tensor);
-    static std::vector<size_t> get_stride(const ggml_tensor * tensor);
-    static ov::element::Type get_ov_type(const ggml_tensor * tensor);
 
     // set context_size, num_heads, etc
     void set_llm_params();
