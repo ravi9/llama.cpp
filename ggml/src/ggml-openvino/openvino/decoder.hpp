@@ -5,6 +5,7 @@
 #include <openvino/core/node.hpp>
 #include <openvino/frontend/decoder.hpp>
 #include <string>
+#include "ggml.h"
 
 namespace ov {
 namespace frontend {
@@ -45,13 +46,11 @@ public:
 
     virtual std::vector<std::string> get_output_names() const = 0;
 
-    virtual const std::string& get_op_type() const = 0;
+    virtual const std::string& get_op_type(ggml_tensor * tensor) const = 0;
 
     virtual const std::string& get_op_name() const = 0;
 
-    virtual void visit_subgraph(std::function<void(std::shared_ptr<GgmlDecoder>)> node_visitor) const = 0;
-
-    virtual int get_op_case() const = 0;
+    virtual void visit_subgraph(std::function<void(std::shared_ptr<GgmlDecoder>, ggml_tensor * tensor, bool is_static)> node_visitor) const = 0;
 
     virtual const std::map<std::string, std::shared_ptr<ov::Node>>& get_model_inputs() const = 0;
     virtual const std::map<std::string, std::shared_ptr<ov::Node>>& get_model_extra_inputs() const = 0;

@@ -75,15 +75,15 @@ public:
 
     virtual const std::string & get_op_type() const override;
 
+    virtual const std::string & get_op_type(ggml_tensor * tensor) const override;
+
     virtual const std::string & get_op_name() const override;
 
-    virtual void visit_subgraph(std::function<void(std::shared_ptr<GgmlDecoder>)> node_visitor) const override;
+    virtual void visit_subgraph(std::function<void(std::shared_ptr<GgmlDecoder>, ggml_tensor * tensor, bool is_static)> node_visitor) const override;
 
     ggml_tensor * get_input_ggml_tensor(const std::string & name) const { return m_inputs.at(name); }
 
     ggml_tensor * get_output_ggml_tensor(const std::string & name) const { return m_outputs.at(name); }
-
-    virtual int get_op_case() const override { return m_op_case; }
 
     virtual const std::map<std::string, std::shared_ptr<ov::Node>> & get_model_inputs() const override {
         return m_model_inputs;
@@ -164,7 +164,6 @@ private:
     std::vector<std::string> m_output_names;
     std::string m_op_name;
     mutable std::string m_name;
-    int m_op_case = 0;
     std::vector<std::pair<std::string, std::string>> m_op_node_name;
     std::map<std::string, std::shared_ptr<ov::Node>> m_model_inputs;
     std::map<std::string, std::shared_ptr<ov::Node>> m_model_extra_inputs;
