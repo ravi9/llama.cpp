@@ -55,22 +55,37 @@ env:
   LLAMA_LOG_TIMESTAMPS: 1
 
 jobs:
+  name: Build with OpenVINO
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
   windows-latest-cmake-openvino:
     runs-on: windows-2022
-  
+
     env:
       OPENVINO_VERSION_MAJOR: "2025.3"
       OPENVINO_VERSION_FULL: "2025.3.0.19807.44526285f24"
-  
+
     steps:
-      - name: Checkout
+      # Checkout the repo
+      - name: Checkout repository
         uses: actions/checkout@v4
-  
-      - name: Install Visual Studio Build Tools
+
+      # Install Visual Studio Build Tools
+      - name: Setup MSBuild / VS Build Tools
+        uses: microsoft/setup-msbuild@v1
+
+      # Install Chocolatey packages needed for building
+      - name: Install dependencies
         run: |
-          choco install visualstudio2022buildtools --yes --params "--add Microsoft.VisualStudio.Workload.VCTools --quiet"
-  
-      - name: Download and extract OpenVINO Toolkit
+          choco install cmake --yes
+
+      # Download and extract OpenVINO
+      - name: Download and extract OpenVINO Runtime
         shell: powershell
         run: |
           $url = "https://storage.openvinotoolkit.org/repositories/openvino/packages/2025.3/windows/openvino_toolkit_windows_2025.3.0.19807.44526285f24_x86_64.zip"
@@ -78,25 +93,29 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile $out
           Expand-Archive -Path $out -DestinationPath openvino_toolkit -Force
           Remove-Item $out
-  
-      - name: Initialize MSVC, OpenVINO, and Build
+
+      # Initialize OpenVINO and build
+      - name: Build with OpenVINO
         shell: cmd
         run: |
-          REM Initialize MSVC environment
-          call "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-      
-          REM Call OpenVINO setupvars.bat
-          call openvino_toolkit_windows_2025.3.0.19807.44526285f24_x86_64\openvino_toolkit_windows_2025.3.0.19807.44526285f24_x86_64\setupvars.bat
-      
-          REM Set OpenVINO_DIR to the cmake folder
+          REM Set OpenVINO_DIR to the extracted cmake folder
           set "OpenVINO_DIR=%CD%\openvino_toolkit_windows_2025.3.0.19807.44526285f24_x86_64\openvino_toolkit_windows_2025.3.0.19807.44526285f24_x86_64\runtime\cmake"
-      
-          REM Build with CMake using Visual Studio generator
+
+          REM Verify OpenVINOConfig.cmake exists
+          if not exist "%OpenVINO_DIR%\OpenVINOConfig.cmake" (
+              echo ERROR: OpenVINOConfig.cmake not found
+              exit /b 1
+          )
+
+          REM Build with Visual Studio generator
           cmake -B build\ReleaseOV -G "Visual Studio 17 2022" ^
             -A x64 ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DGGML_OPENVINO=ON ^
             -DOpenVINO_DIR="%OpenVINO_DIR%"
+
+          cmake --build build\ReleaseOV --config Release
+
       
           cmake --build build\ReleaseOV --config Release
       
