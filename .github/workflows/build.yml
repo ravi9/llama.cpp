@@ -71,12 +71,6 @@ jobs:
       - name: Setup MSBuild / VS Build Tools
         uses: microsoft/setup-msbuild@v1
 
-      - name: libCURL
-        id: get_libcurl
-        uses: ./.github/actions/windows-setup-curl
-        with:
-          architecture: ${{ matrix.arch == 'x64' && 'win64' || 'win64a' }}
-
       # Install Chocolatey packages needed for building
       - name: Install dependencies
         run: |
@@ -108,8 +102,7 @@ jobs:
             -A x64 ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DGGML_OPENVINO=ON ^
-            -DCURL_LIBRARY="$env:CURL_PATH/lib/libcurl.dll.a" ^
-            -DCURL_INCLUDE_DIR="$env:CURL_PATH/include" ^
+            -DLLAMA_CURL=OFF ^
             -DOpenVINO_DIR="%OpenVINO_DIR%"
       
           cmake --build build\ReleaseOV --config Release -- /m
