@@ -55,14 +55,6 @@ env:
   LLAMA_LOG_TIMESTAMPS: 1
 
 jobs:
-  name: Build with OpenVINO
-
-on:
-  push:
-    branches: [ main ]
-  pull_request:
-
-jobs:
   windows-latest-cmake-openvino:
     runs-on: windows-2022
 
