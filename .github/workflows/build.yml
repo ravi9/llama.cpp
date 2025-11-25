@@ -84,18 +84,19 @@ jobs:
         run: |
           REM Initialize MSVC environment
           call "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-  
-          REM Initialize OpenVINO environment
-          call "C:\Program Files (x86)\Intel\openvino_2025.3.0\setupvars.bat"
-  
-          REM Set OpenVINO_DIR to the folder containing OpenVINOConfig.cmake
-          set OpenVINO_DIR=C:\Program Files (x86)\Intel\openvino_2025.3.0\deployment_tools\openvino\share\openvino\cmake
-  
+      
+          REM Call OpenVINO setupvars.bat
+          call openvino_toolkit_windows_2025.3.0.19807.44526285f24_x86_64\openvino_toolkit_windows_2025.3.0.19807.44526285f24_x86_64\setupvars.bat
+      
+          REM Set OpenVINO_DIR to the cmake folder
+          set "OpenVINO_DIR=%CD%\openvino_toolkit_windows_2025.3.0.19807.44526285f24_x86_64\openvino_toolkit_windows_2025.3.0.19807.44526285f24_x86_64\runtime\cmake"
+      
           REM Build with CMake using Visual Studio generator
           cmake -B build\ReleaseOV -G "Visual Studio 17 2022" ^
             -A x64 ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DGGML_OPENVINO=ON ^
-            -DOpenVINO_DIR=%OpenVINO_DIR%
-  
+            -DOpenVINO_DIR="%OpenVINO_DIR%"
+      
           cmake --build build\ReleaseOV --config Release
+      
