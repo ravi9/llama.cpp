@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  workflow_dispatch: # allows manual triggering
+  push:
+    branches:
+      - I-N-T-E-L_CI_windows_openvino_patch
+    paths: [
+              '.github/workflows/build.yml',
+              '.github/workflows/build-linux-cross.yml',
+              '.github/workflows/build-cmake-pkg.yml',
+              '**/CMakeLists.txt',
+              '**/.cmake',
+              '**/*.h',
+              '**/*.hpp',
+              '**/*.c',
+              '**/*.cpp',
+              '**/*.cu',
+              '**/*.cuh',
+              '**/*.swift',
+              '**/*.m',
+              '**/*.metal',
+              '**/*.comp'
+            ]
+
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths: [
+              '.github/workflows/build.yml',
+              '.github/workflows/build-linux-cross.yml',
+              '.github/workflows/build-cmake-pkg.yml',
+              '**/CMakeLists.txt',
+              '**/.cmake',
+              '**/*.h',
+              '**/*.hpp',
+              '**/*.c',
+              '**/*.cpp',
+              '**/*.cu',
+              '**/*.cuh',
+              '**/*.swift',
+              '**/*.m',
+              '**/*.metal',
+              '**/*.comp'
+            ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  GGML_NLOOP: 3
+  GGML_N_THREADS: 1
+  LLAMA_LOG_COLORS: 1
+  LLAMA_LOG_PREFIX: 1
+  LLAMA_LOG_TIMESTAMPS: 1
+
+jobs:
+  windows-latest-cmake-openvino:
+    runs-on: windows-2022
+  
+    env:
+      OPENVINO_VERSION_MAJOR: "2025.3"
+      OPENVINO_VERSION_FULL: "2025.3.0.19807.44526285f24"
+  
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+  
+      - name: Install dependencies
+        run: |
+          choco install ninja --yes
+          choco install visualstudio2022buildtools --yes --params "--add Microsoft.VisualStudio.Workload.VCTools --quiet"
+  
+      - name: Download OpenVINO Runtime
+        run: |
+          $url = "https://storage.openvinotoolkit.org/repositories/openvino/packages/${{ env.OPENVINO_VERSION_MAJOR }}/windows/openvino_runtime_${{ env.OPENVINO_VERSION_FULL }}_x86_64.zip"
+          Invoke-WebRequest -Uri $url -OutFile "openvino.zip"
+          Expand-Archive -Path "openvino.zip" -DestinationPath "openvino_toolkit"
+          Remove-Item "openvino.zip"
+  
+      - name: Initialize OpenVINO + Build
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+  
+          call openvino_toolkit\runtime\bin\setupvars.bat
+  
+          set OpenVINO_DIR=%CD%\openvino_toolkit\runtime\cmake
+  
+          cmake -B build\ReleaseOV -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DGGML_OPENVINO=ON ^
+            -DOpenVINO_DIR=%OpenVINO_DIR%
+  
+          cmake --build build\ReleaseOV --config Release
+  
