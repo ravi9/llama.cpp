@@ -63,20 +63,12 @@ jobs:
       OPENVINO_VERSION_FULL: "2025.3.0.19807.44526285f24"
 
     steps:
-      # Checkout the repo
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Install Visual Studio Build Tools
       - name: Setup MSBuild / VS Build Tools
         uses: microsoft/setup-msbuild@v1
 
-      # # Install Chocolatey packages needed for building
-      # - name: Install dependencies
-      #   run: |
-      #     choco install cmake --yes
-
-      # Download and extract OpenVINO
       - name: Download and extract OpenVINO Runtime
         shell: powershell
         run: |
@@ -106,5 +98,3 @@ jobs:
             -DOpenVINO_DIR="%OpenVINO_DIR%"
       
           cmake --build build\ReleaseOV --config Release -- /m
-
-      
