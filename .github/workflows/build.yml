@@ -75,7 +75,6 @@ jobs:
       - name: Install dependencies
         run: |
           choco install cmake --yes
-          choco install curl --yes
 
       # Download and extract OpenVINO
       - name: Download and extract OpenVINO Runtime
@@ -103,6 +102,7 @@ jobs:
             -A x64 ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DGGML_OPENVINO=ON ^
+            -DLLAMA_CURL=OFF ^
             -DOpenVINO_DIR="%OpenVINO_DIR%"
       
           cmake --build build\ReleaseOV --config Release
