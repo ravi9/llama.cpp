@@ -4,44 +4,44 @@ on:
   workflow_dispatch: # allows manual triggering
   push:
     branches:
-      - master
+      - master, I-N-T-E-L_CI_windows_openvino_patch
     paths: [
-      '.github/workflows/build.yml',
-      '.github/workflows/build-linux-cross.yml',
-      '.github/workflows/build-cmake-pkg.yml',
-      '**/CMakeLists.txt',
-      '**/.cmake',
-      '**/*.h',
-      '**/*.hpp',
-      '**/*.c',
-      '**/*.cpp',
-      '**/*.cu',
-      '**/*.cuh',
-      '**/*.swift',
-      '**/*.m',
-      '**/*.metal',
-      '**/*.comp'
-    ]
+              '.github/workflows/build.yml',
+              '.github/workflows/build-linux-cross.yml',
+              '.github/workflows/build-cmake-pkg.yml',
+              '**/CMakeLists.txt',
+              '**/.cmake',
+              '**/*.h',
+              '**/*.hpp',
+              '**/*.c',
+              '**/*.cpp',
+              '**/*.cu',
+              '**/*.cuh',
+              '**/*.swift',
+              '**/*.m',
+              '**/*.metal',
+              '**/*.comp'
+            ]
 
   pull_request:
     types: [opened, synchronize, reopened]
     paths: [
-      '.github/workflows/build.yml',
-      '.github/workflows/build-linux-cross.yml',
-      '.github/workflows/build-cmake-pkg.yml',
-      '**/CMakeLists.txt',
-      '**/.cmake',
-      '**/*.h',
-      '**/*.hpp',
-      '**/*.c',
-      '**/*.cpp',
-      '**/*.cu',
-      '**/*.cuh',
-      '**/*.swift',
-      '**/*.m',
-      '**/*.metal',
-      '**/*.comp'
-    ]
+              '.github/workflows/build.yml',
+              '.github/workflows/build-linux-cross.yml',
+              '.github/workflows/build-cmake-pkg.yml',
+              '**/CMakeLists.txt',
+              '**/.cmake',
+              '**/*.h',
+              '**/*.hpp',
+              '**/*.c',
+              '**/*.cpp',
+              '**/*.cu',
+              '**/*.cuh',
+              '**/*.swift',
+              '**/*.m',
+              '**/*.metal',
+              '**/*.comp'
+            ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
