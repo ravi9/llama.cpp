@@ -71,10 +71,10 @@ jobs:
       - name: Setup MSBuild / VS Build Tools
         uses: microsoft/setup-msbuild@v1
 
-      # Install Chocolatey packages needed for building
-      - name: Install dependencies
-        run: |
-          choco install cmake --yes
+      # # Install Chocolatey packages needed for building
+      # - name: Install dependencies
+      #   run: |
+      #     choco install cmake --yes
 
       # Download and extract OpenVINO
       - name: Download and extract OpenVINO Runtime
