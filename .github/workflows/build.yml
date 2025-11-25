@@ -1130,16 +1130,22 @@ jobs:
           shell: cmd
           run: |
             call "%VSINSTALLDIR%\VC\Auxiliary\Build\vcvarsall.bat" x64
-            call openvino_toolkit\setupvars.bat
         
-            set OpenVINO_DIR=openvino_toolkit\deployment_tools\openvino\share\openvino\cmake
+            REM Correct path for OpenVINO 2025.x
+            call openvino_toolkit\runtime\bin\setupvars.bat
+        
+            REM Correct CMake module directory
+            set OpenVINO_DIR=openvino_toolkit\runtime\cmake
+        
             cmake -B build\ReleaseOV -G Ninja ^
               -DCMAKE_BUILD_TYPE=Release ^
               -DGGML_OPENVINO=ON ^
               -DGGML_CPU_REPACK=OFF ^
               -DLLAMA_CURL=OFF ^
               -DOpenVINO_DIR=%OpenVINO_DIR%
+        
             cmake --build build\ReleaseOV --config Release
+
 
   ubuntu-latest-cmake-cuda:
     runs-on: ubuntu-latest
