@@ -115,7 +115,4 @@ jobs:
             -DOpenVINO_DIR="%OpenVINO_DIR%"
 
           cmake --build build\ReleaseOV --config Release
-
-      
-          cmake --build build\ReleaseOV --config Release
       
