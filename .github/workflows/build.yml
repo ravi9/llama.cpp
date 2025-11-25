@@ -83,18 +83,22 @@ jobs:
       - name: Initialize OpenVINO + Build
         shell: cmd
         run: |
-          REM Correct MSVC environment
-          call "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-  
-          REM Correct OpenVINO setup
-          call openvino_toolkit\runtime\bin\setupvars.bat
-          set OpenVINO_DIR=%CD%\openvino_toolkit\runtime\cmake
-  
-          REM Build with CMake + Ninja
+          REM Find MSVC environment installed by Chocolatey
+          for /f "delims=" %%i in ('dir /s /b "%ProgramFiles%\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"') do set VCVARS=%%i
+          call "%VCVARS%"
+      
+          REM Call correct setupvars.bat after checking extracted folder
+          call openvino_toolkit\deployment_tools\openvino\setupvars.bat
+      
+          REM Set OpenVINO_DIR to cmake folder
+          set OpenVINO_DIR=%CD%\openvino_toolkit\deployment_tools\openvino\share\openvino\cmake
+      
+          REM Build
           cmake -B build\ReleaseOV -G Ninja ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DGGML_OPENVINO=ON ^
             -DOpenVINO_DIR=%OpenVINO_DIR%
-  
+      
           cmake --build build\ReleaseOV --config Release
-  
+      
+        
