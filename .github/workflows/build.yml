@@ -66,15 +66,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
   
-      - name: Install dependencies
+      - name: Install Visual Studio Build Tools & Ninja
         run: |
           choco install ninja --yes
           choco install visualstudio2022buildtools --yes --params "--add Microsoft.VisualStudio.Workload.VCTools --quiet"
   
-      - name: Download OpenVINO Runtime
+      - name: Download and extract OpenVINO Runtime
         shell: powershell
         run: |
-          $url = "https://storage.openvinotoolkit.org/repositories/openvino/packages/2025.3/windows/openvino_toolkit_windows_2025.3.0.19807.44526285f24_x86_64.zip"
+          $url = "https://storage.openvinotoolkit.org/repositories/openvino/packages/2025.3/windows/openvino_runtime_2025.3.0.19807.44526285f24_x86_64.zip"
           $out = "openvino.zip"
           Invoke-WebRequest -Uri $url -OutFile $out
           Expand-Archive -Path $out -DestinationPath openvino_toolkit -Force
@@ -83,12 +83,14 @@ jobs:
       - name: Initialize OpenVINO + Build
         shell: cmd
         run: |
-          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          REM Correct MSVC environment
+          call "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
   
+          REM Correct OpenVINO setup
           call openvino_toolkit\runtime\bin\setupvars.bat
-  
           set OpenVINO_DIR=%CD%\openvino_toolkit\runtime\cmake
   
+          REM Build with CMake + Ninja
           cmake -B build\ReleaseOV -G Ninja ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DGGML_OPENVINO=ON ^
