@@ -56,7 +56,7 @@ env:
 
 jobs:
   windows-latest-cmake-openvino:
-    runs-on: windows-2022
+    runs-on: windows-latest
 
     env:
       OPENVINO_VERSION_MAJOR: "2025.3"
@@ -70,6 +70,12 @@ jobs:
       # Install Visual Studio Build Tools
       - name: Setup MSBuild / VS Build Tools
         uses: microsoft/setup-msbuild@v1
+
+      - name: libCURL
+        id: get_libcurl
+        uses: ./.github/actions/windows-setup-curl
+        with:
+          architecture: ${{ matrix.arch == 'x64' && 'win64' || 'win64a' }}
 
       # Install Chocolatey packages needed for building
       - name: Install dependencies
@@ -102,9 +108,10 @@ jobs:
             -A x64 ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DGGML_OPENVINO=ON ^
-            -DLLAMA_CURL=OFF ^
+            -DCURL_LIBRARY="$env:CURL_PATH/lib/libcurl.dll.a" ^
+            -DCURL_INCLUDE_DIR="$env:CURL_PATH/include" ^
             -DOpenVINO_DIR="%OpenVINO_DIR%"
       
-          cmake --build build\ReleaseOV --config Release
+          cmake --build build\ReleaseOV --config Release -- /m
 
       
