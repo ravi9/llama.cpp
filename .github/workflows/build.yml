@@ -74,7 +74,7 @@ jobs:
       - name: Download OpenVINO Runtime
         shell: powershell
         run: |
-          $url = "https://storage.openvinotoolkit.org/repositories/openvino/packages/2025.3/windows/openvino_runtime_2025.3.0.19807.44526285f24_x86_64.zip"
+          $url = "https://storage.openvinotoolkit.org/repositories/openvino/packages/2025.3/windows/openvino_toolkit_windows_2025.3.0.19807.44526285f24_x86_64.zip"
           $out = "openvino.zip"
           Invoke-WebRequest -Uri $url -OutFile $out
           Expand-Archive -Path $out -DestinationPath openvino_toolkit -Force
