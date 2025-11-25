@@ -75,6 +75,7 @@ jobs:
       - name: Install dependencies
         run: |
           choco install cmake --yes
+          choco install curl --yes
 
       # Download and extract OpenVINO
       - name: Download and extract OpenVINO Runtime
