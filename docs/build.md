@@ -633,18 +633,14 @@ Follow the instructions below to install OpenVINO runtime and build llama.cpp wi
     ```
     </details>
 
-- **Windows:**
-  - "C:\Program Files (x86)\Intel\openvino_2025.3.0\runtime\cmake" is to be added to user path after installation.
+    - Verify OpenVINO is initialized properly
+        - **Linux:**
+            ```bash
+            echo $OpenVINO_DIR
+            ```
 
-- Verify OpenVINO is initialized properly
-    - **Linux:**
-        ```bash
-        echo $OpenVINO_DIR
-        ```
-    - **Windows:**
-        ```bash
-        echo %OpenVINO_DIR%
-        ```
+- **Windows:**
+  - Add "C:\Program Files (x86)\Intel\openvino_2025.3.0\runtime\cmake" to user path after installation.
 
 ### 2. Build llama.cpp with OpenVINO Backend
 
