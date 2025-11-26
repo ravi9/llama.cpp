@@ -614,6 +614,7 @@ Follow the instructions below to install OpenVINO runtime and build llama.cpp wi
 - **Windows:**
     - Download Microsoft.VisualStudio.2022.BuildTools [Visual_Studio_Build_Tools]https://aka.ms/vs/17/release/vs_BuildTools.exe Select "Desktop development with C++" under workloads.
     - Install git
+    - Use "x64 Native Tools Command Prompt" for Build
 
 ### 1. Install OpenVINO Runtime
 
