@@ -190,7 +190,7 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
         }
     };
 
-    if (!m_naive) {
+    if (!m_naive && ggml_model_decoder->is_full_model()) {
         preprocess(*tensor_map, *ggml_model_decoder);
     }
     ggml_model_decoder->visit_subgraph(node_visitor);

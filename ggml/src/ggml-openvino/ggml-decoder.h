@@ -202,8 +202,11 @@ public:
 
     void set_compute_params(const ComputeParams & compute_params) { m_compute_params = compute_params; }
 
+    virtual bool is_full_model() const override {return m_is_full_model; }
+
     bool m_is_static = false;
     bool m_is_prefill = false;
+    bool m_is_full_model = true;
     int m_prefill_chunk_size = 0;
 
     static std::vector<size_t> get_shape(const ggml_tensor * tensor);
@@ -228,6 +231,9 @@ private:
     std::map<std::string, std::shared_ptr<ov::Node>> m_model_weights;
     std::map<std::string, ggml_tensor *> m_model_outputs;
     std::vector<NodeInfo> m_node_info_list;
+
+    bool has_inp_tokens = false;
+    bool has_output = false;
 
     ModelParams m_model_params;
     ComputeParams m_compute_params;

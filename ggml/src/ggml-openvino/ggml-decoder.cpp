@@ -66,6 +66,8 @@ GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph,
         set_input_output(cur_node);
     }
 
+    m_is_full_model = has_inp_tokens && has_output;
+
     for (int node_n = 0; node_n < cgraph->n_nodes; node_n++) {
         m_node_info_list[node_n].node_op_case = compute_op_case(m_node_info_list[node_n].node);
         m_node_info_list[node_n].node_op_type = compute_op_type(m_node_info_list[node_n].node);
@@ -150,6 +152,10 @@ void GgmlOvDecoder::set_input_output(ggml_tensor * node, bool naive) {
         current_node_info.node_inputs[src_name] = src;
         current_node_info.node_inputs_names.push_back(src_name);
 
+        if (src_name == "inp_tokens") {
+            has_inp_tokens = true;
+        }
+
         // Add model inputs
         if (!naive && !src->view_src) {
             ggml_backend_buffer * buffer = src->buffer;
@@ -176,6 +182,9 @@ void GgmlOvDecoder::set_input_output(ggml_tensor * node, bool naive) {
     if (!naive) {
         // Model outputs are tensors with GGML_TENSOR_FLAG_OUTPUT flag and kv_caches
         static std::set<std::string> debug_output_names = {};
+        if (node_output_name.find("output") != std::string::npos) {
+            has_output = true;
+        }
         // Workaround: the final tensor "result_output" does not have GGML_TENSOR_FLAG_OUTPUT flag set in cgraph
         if (node->op == GGML_OP_SET_ROWS || node->flags & GGML_TENSOR_FLAG_OUTPUT ||
             node_output_name.find("output") != std::string::npos || debug_output_names.count(node_output_name)) {
