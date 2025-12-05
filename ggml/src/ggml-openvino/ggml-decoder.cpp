@@ -59,7 +59,6 @@ GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph,
     }
 
     validate_cgraph();
-
     for (int node_n = 0; node_n < cgraph->n_nodes; node_n++) {
         auto * cur_node = cgraph->nodes[node_n];
         m_nodes.push_back(cur_node);
@@ -67,6 +66,11 @@ GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph,
     }
 
     m_is_full_model = has_inp_tokens && has_output;
+    if (!m_is_full_model) {
+        compute_cgraph_dynamic_dims();
+        add_extra_model_inputs_for_fallback();
+        add_extra_model_outputs_for_fallback();
+    }
 
     for (int node_n = 0; node_n < cgraph->n_nodes; node_n++) {
         m_node_info_list[node_n].node_op_case = compute_op_case(m_node_info_list[node_n].node);
@@ -368,7 +372,7 @@ void GgmlOvDecoder::validate_cgraph() const {
     }
 }
 
-ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op, const ggml_tensor * input) const {
+ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op, const ggml_tensor * input, int dynamic_dim_index) const {
     auto name = std::string(input->name);
     ov::PartialShape input_shape;
 
@@ -399,6 +403,9 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op, co
 
     } else {
         input_shape = ov::PartialShape{get_shape(input)};
+    }
+    if (dynamic_dim_index != -1) {
+        input_shape[3-dynamic_dim_index] = -1;
     }
     return input_shape;
 }
@@ -871,4 +878,149 @@ const std::string & GgmlOvDecoder::get_op_type(int node_idx) const {
 const std::string & GgmlOvDecoder::get_op_type() const {
     static const std::string unknown_op = "UNKNOWN_GGML_OP";
     return unknown_op;
+}
+
+void GgmlOvDecoder::compute_cgraph_dynamic_dims() {
+    // lambda递归查找所有输入节点
+    auto visit_node = [&](auto && self, ggml_tensor * node) -> void {
+        if (!node) {
+            return;
+        }
+
+        if (node->op == GGML_OP_CPY) {
+            m_node_dynamic_dims[node] = -1;
+        }
+
+        if (m_node_dynamic_dims.count(node)) {
+            return;
+        }
+        // 这里可以根据实际需求设置dynamic dim，这里用ne[0]举例
+        for (int i = 0; i < GGML_MAX_SRC; i++) {
+            ggml_tensor * src = node->src[i];
+            if (src) {
+                self(self, src);
+            }
+        }
+        switch (node->op) {
+        case GGML_OP_NONE:
+            m_node_dynamic_dims[node] = -1;
+            if (std::string(node->name) == "inp_tokens" || std::string(node->name) == "inp_pos" ||
+                std::string(node->name) == "inp_out_ids") {
+                m_node_dynamic_dims[node] = 0;
+            }
+            break;
+        case GGML_OP_GET_ROWS:
+            m_node_dynamic_dims[node] = -1;
+            if (m_node_dynamic_dims[node->src[1]] != -1) {
+                m_node_dynamic_dims[node] = 1;
+            }
+            break;
+        case GGML_OP_MUL:
+        case GGML_OP_MUL_MAT:
+            m_node_dynamic_dims[node] = -1;
+            if (m_node_dynamic_dims[node->src[0]] != -1) {
+                m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[0]];
+            }
+            if (m_node_dynamic_dims[node->src[1]] != -1) {
+                m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[1]];
+            }
+            break;
+        case GGML_OP_VIEW:
+        case GGML_OP_FLASH_ATTN_EXT:
+        case GGML_OP_PERMUTE:
+        case GGML_OP_RESHAPE:
+            m_node_dynamic_dims[node] = -1;
+            if (m_node_dynamic_dims[node->src[0]] != -1) {
+                auto dynamic_dim_idx = m_node_dynamic_dims[node->src[0]];
+                auto dynamic_dim_value = node->src[0]->ne[dynamic_dim_idx];
+                int same_dim_count = 0;
+                for (int i = 0; i < 4; i++) {
+                    if (node->ne[i] == dynamic_dim_value) {
+                        m_node_dynamic_dims[node] = i;
+                        same_dim_count++;
+                    }
+                }
+                if (same_dim_count != 1) {
+                    std::cout << "Cannot determine dynamic dim for node: " << node->name << std::endl;
+                }
+            }
+            break;
+        case GGML_OP_RMS_NORM:
+        case GGML_OP_ADD:
+        case GGML_OP_GLU:
+        case GGML_OP_ROPE:
+            m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[0]];
+            break;
+        case GGML_OP_CPY:
+        case GGML_OP_SET_ROWS:
+            m_node_dynamic_dims[node] = -1;
+            break;
+        default:
+            std::cout << "Doesn't handle node name: " << node->name << " op: " << ggml_op_name(node->op) << std::endl;
+            break;
+        }
+    };
+
+    // 对所有节点递归处理
+    for (int i = 0; i < m_cgraph->n_nodes; i++) {
+        ggml_tensor * node = m_cgraph->nodes[i];
+        visit_node(visit_node, node);
+    }
+}
+
+void GgmlOvDecoder::add_extra_model_outputs_for_fallback() {
+    std::map<void *, ggml_tensor *> address_map;
+    for (int i = 0; i < m_cgraph->n_nodes; i++) {
+        ggml_tensor * node = m_cgraph->nodes[i];
+        address_map[node->data] = node;
+    }
+
+    for (const auto & pair : address_map) {
+        const std::string & name = pair.second->name;
+        if (m_model_outputs.find(name) == m_model_outputs.end() &&
+            name.find("view") == std::string::npos &&
+            name.find("ffn") == std::string::npos) {
+            m_model_outputs[name] = pair.second;
+        }
+    }
+}
+
+void GgmlOvDecoder::add_extra_model_inputs_for_fallback() {
+    for (int i = 0; i < m_cgraph->n_nodes; i++) {
+        ggml_tensor * node = m_cgraph->nodes[i];
+        for (int i = 0; i < GGML_MAX_SRC; i++) {
+            auto * src = node->src[i];
+            if (src == nullptr) {
+                continue;
+            }
+            if (src->view_src) {
+                continue;
+            }
+            std::string src_name = std::string(src->name);
+            if (m_model_weights.find(src_name) != m_model_weights.end()) {
+                continue;
+            }
+            // 在m_node_info_list的node_name中找src->name，如果找到了，说明src是中间节点，不是输入节点
+            bool is_intermediate_node = false;
+            for (const auto & node_info : m_node_info_list) {
+                if (node_info.node_name == src_name) {
+                    is_intermediate_node = true;
+                    break;
+                }
+            }
+            if (is_intermediate_node) {
+                continue;
+            }
+            if (m_model_inputs.find(src_name) != m_model_inputs.end()) {
+                continue;
+            }
+
+            m_inputs[src_name] = src;
+            auto param_node = std::make_shared<ov::op::v0::Parameter>(
+                get_ov_type(src), get_graph_input_shape(node, src, m_node_dynamic_dims[src]));
+            param_node->set_friendly_name(src_name);
+            param_node->output(0).get_tensor().set_names({src_name});
+            m_model_inputs[src_name] = param_node;
+        }
+    }
 }

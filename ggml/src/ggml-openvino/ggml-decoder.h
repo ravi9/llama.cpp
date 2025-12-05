@@ -175,7 +175,7 @@ public:
 
     virtual bool is_static() const override { return m_is_static; }
 
-    ov::PartialShape get_graph_input_shape(const ggml_tensor * op, const ggml_tensor * input) const;
+    ov::PartialShape get_graph_input_shape(const ggml_tensor * op, const ggml_tensor * input, int dynamic_dim_index=-1) const;
 
     static void dump_cgraph(const ggml_cgraph * cgraph, std::string & filename);
 
@@ -208,6 +208,7 @@ public:
     bool m_is_prefill = false;
     bool m_is_full_model = true;
     int m_prefill_chunk_size = 0;
+    bool m_xuejun = false;
 
     static std::vector<size_t> get_shape(const ggml_tensor * tensor);
     static std::vector<size_t> get_stride(const ggml_tensor * tensor);
@@ -218,6 +219,9 @@ public:
 private:
     void set_input_output(ggml_tensor * node, bool naive = false);
     int compute_op_case(const ggml_tensor * node) const;
+    void compute_cgraph_dynamic_dims();
+    void add_extra_model_outputs_for_fallback();
+    void add_extra_model_inputs_for_fallback();
 
     void validate_cgraph() const;
 
@@ -231,6 +235,7 @@ private:
     std::map<std::string, std::shared_ptr<ov::Node>> m_model_weights;
     std::map<std::string, ggml_tensor *> m_model_outputs;
     std::vector<NodeInfo> m_node_info_list;
+    std::map<ggml_tensor *, int> m_node_dynamic_dims;
 
     bool has_inp_tokens = false;
     bool has_output = false;
