@@ -208,7 +208,6 @@ public:
     bool m_is_prefill = false;
     bool m_is_full_model = true;
     int m_prefill_chunk_size = 0;
-    bool m_xuejun = false;
 
     static std::vector<size_t> get_shape(const ggml_tensor * tensor);
     static std::vector<size_t> get_stride(const ggml_tensor * tensor);

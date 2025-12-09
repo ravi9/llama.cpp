@@ -881,7 +881,6 @@ const std::string & GgmlOvDecoder::get_op_type() const {
 }
 
 void GgmlOvDecoder::compute_cgraph_dynamic_dims() {
-    // lambda递归查找所有输入节点
     auto visit_node = [&](auto && self, ggml_tensor * node) -> void {
         if (!node) {
             return;
@@ -894,7 +893,6 @@ void GgmlOvDecoder::compute_cgraph_dynamic_dims() {
         if (m_node_dynamic_dims.count(node)) {
             return;
         }
-        // 这里可以根据实际需求设置dynamic dim，这里用ne[0]举例
         for (int i = 0; i < GGML_MAX_SRC; i++) {
             ggml_tensor * src = node->src[i];
             if (src) {
@@ -961,7 +959,6 @@ void GgmlOvDecoder::compute_cgraph_dynamic_dims() {
         }
     };
 
-    // 对所有节点递归处理
     for (int i = 0; i < m_cgraph->n_nodes; i++) {
         ggml_tensor * node = m_cgraph->nodes[i];
         visit_node(visit_node, node);
@@ -1000,7 +997,7 @@ void GgmlOvDecoder::add_extra_model_inputs_for_fallback() {
             if (m_model_weights.find(src_name) != m_model_weights.end()) {
                 continue;
             }
-            // 在m_node_info_list的node_name中找src->name，如果找到了，说明src是中间节点，不是输入节点
+
             bool is_intermediate_node = false;
             for (const auto & node_info : m_node_info_list) {
                 if (node_info.node_name == src_name) {
