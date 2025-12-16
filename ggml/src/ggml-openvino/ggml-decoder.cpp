@@ -969,14 +969,15 @@ void GgmlOvDecoder::add_extra_model_outputs_for_fallback() {
     std::map<void *, ggml_tensor *> address_map;
     for (int i = 0; i < m_cgraph->n_nodes; i++) {
         ggml_tensor * node = m_cgraph->nodes[i];
+        if (node->op == GGML_OP_VIEW) {
+            continue;
+        }
         address_map[node->data] = node;
     }
 
     for (const auto & pair : address_map) {
         const std::string & name = pair.second->name;
-        if (m_model_outputs.find(name) == m_model_outputs.end() &&
-            name.find("view") == std::string::npos &&
-            name.find("ffn") == std::string::npos) {
+        if (m_model_outputs.find(name) == m_model_outputs.end()) {
             m_model_outputs[name] = pair.second;
         }
     }
@@ -988,9 +989,6 @@ void GgmlOvDecoder::add_extra_model_inputs_for_fallback() {
         for (int i = 0; i < GGML_MAX_SRC; i++) {
             auto * src = node->src[i];
             if (src == nullptr) {
-                continue;
-            }
-            if (src->view_src) {
                 continue;
             }
             std::string src_name = std::string(src->name);
