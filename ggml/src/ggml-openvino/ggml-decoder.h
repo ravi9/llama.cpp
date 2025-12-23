@@ -206,7 +206,7 @@ public:
 
     bool m_is_static = false;
     bool m_is_prefill = false;
-    bool m_is_full_model = true;
+    bool m_is_full_model = true; // label the cgraph is splited or not
     int m_prefill_chunk_size = 0;
 
     static std::vector<size_t> get_shape(const ggml_tensor * tensor);
@@ -218,8 +218,12 @@ public:
 private:
     void set_input_output(ggml_tensor * node, bool naive = false);
     int compute_op_case(const ggml_tensor * node) const;
+
+    // @brief Computes the dynamic dimensions for the computation graph nodes to support fallback mechanisms.
     void compute_cgraph_dynamic_dims();
+    // @brief Adds extra model outputs to support fallback mechanisms.
     void add_extra_model_outputs_for_fallback();
+    // @brief Adds extra model inputs to support fallback mechanisms.
     void add_extra_model_inputs_for_fallback();
 
     void validate_cgraph() const;
@@ -234,7 +238,7 @@ private:
     std::map<std::string, std::shared_ptr<ov::Node>> m_model_weights;
     std::map<std::string, ggml_tensor *> m_model_outputs;
     std::vector<NodeInfo> m_node_info_list;
-    std::map<ggml_tensor *, int> m_node_dynamic_dims;
+    std::map<ggml_tensor *, int> m_node_dynamic_dims; // map from ggml_tensor to its dynamic dimension index, -1 means static
 
     bool has_inp_tokens = false;
     bool has_output = false;

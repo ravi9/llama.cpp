@@ -489,7 +489,7 @@ ov::Tensor convert_ggml_input_to_ov(std::shared_ptr<GgmlOvDecoder> ggml_decoder,
     }
 
     // If the tensor is a result of PERMUTE operation, use ggml_cont to make it contiguous
-    if (ggml_tensor->op == GGML_OP_PERMUTE) {
+    if (ggml_tensor->op == GGML_OP_PERMUTE && !ggml_decoder->is_full_model()) {
         // Create a temporary context for ggml_cont operation
         // Need space for: tensor overhead, tensor data, graph structure, and work buffer
         size_t mem_size = ggml_tensor_overhead() * 4 + ggml_nbytes(ggml_tensor) * 2 + 1024 * 1024;

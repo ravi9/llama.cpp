@@ -65,6 +65,7 @@ GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph,
         set_input_output(cur_node);
     }
 
+    // 
     m_is_full_model = has_inp_tokens && has_output;
     if (!m_is_full_model) {
         compute_cgraph_dynamic_dims();
@@ -880,6 +881,27 @@ const std::string & GgmlOvDecoder::get_op_type() const {
     return unknown_op;
 }
 
+/**
+ * @brief Computes the dynamic dimensions for the computation graph nodes to support fallback mechanisms.
+ *
+ * This function traverses the computation graph and determines the dynamic dimensions
+ * for each node based on its operation type and dependencies. The dynamic dimension
+ * is stored in the `m_node_dynamic_dims` map, where a value of -1 indicates no dynamic
+ * dimension. Specific operations such as GGML_OP_GET_ROWS, GGML_OP_MUL, GGML_OP_VIEW,
+ * etc., are handled to compute the dynamic dimension index.
+ *
+ * Key behaviors:
+ * - Nodes with operations like GGML_OP_NONE, GGML_OP_GET_ROWS, GGML_OP_MUL, and others
+ *   are analyzed to determine their dynamic dimensions.
+ * - Nodes with specific names (e.g., "inp_tokens", "inp_pos", "inp_out_ids") are
+ *   explicitly assigned a dynamic dimension index of 0.
+ * - For operations like GGML_OP_VIEW and GGML_OP_RESHAPE, the function ensures that
+ *   the dynamic dimension is uniquely determined; otherwise, a warning is printed.
+ * - Unhandled operations print a message indicating the node name and operation type.
+ *
+ * This function is critical for preparing the computation graph for execution, ensuring
+ * that dynamic dimensions are correctly propagated and resolved.
+ */
 void GgmlOvDecoder::compute_cgraph_dynamic_dims() {
     auto visit_node = [&](auto && self, ggml_tensor * node) -> void {
         if (!node) {
@@ -965,6 +987,23 @@ void GgmlOvDecoder::compute_cgraph_dynamic_dims() {
     }
 }
 
+/**
+ * @brief Adds extra model outputs to support fallback mechanisms.
+ *
+ * This function ensures that all relevant nodes in the computation graph are included
+ * as model outputs for fallback scenarios. It creates a mapping of tensor data addresses
+ * to their corresponding nodes, excluding nodes with the GGML_OP_VIEW operation.
+ *
+ * Key behaviors:
+ * - Iterates through all nodes in the computation graph and maps their data addresses
+ *   to the corresponding tensor nodes, skipping nodes with GGML_OP_VIEW.
+ * - Adds nodes to the `m_model_outputs` map if they are not already present, using
+ *   the tensor's name as the key.
+ *
+ * This function is essential for ensuring that fallback mechanisms have access to all
+ * necessary model outputs, particularly in scenarios where certain outputs are not
+ * explicitly defined in the original model configuration.
+ */
 void GgmlOvDecoder::add_extra_model_outputs_for_fallback() {
     std::map<void *, ggml_tensor *> address_map;
     for (int i = 0; i < m_cgraph->n_nodes; i++) {
@@ -983,6 +1022,25 @@ void GgmlOvDecoder::add_extra_model_outputs_for_fallback() {
     }
 }
 
+/**
+* @brief Adds extra model inputs to support fallback mechanisms.
+*
+* This function ensures that all necessary input nodes in the computation graph are
+* included as model inputs for fallback scenarios. It iterates through the source nodes
+* of each computation graph node and adds them to the `m_model_inputs` map if they meet
+* specific criteria.
+*
+* Key behaviors:
+* - Skips source nodes that are already present in `m_model_weights` or `m_model_inputs`.
+* - Excludes intermediate nodes that are part of `m_node_info_list`.
+* - For eligible source nodes, creates OpenVINO parameter nodes with appropriate types
+*   and shapes, and assigns them friendly names.
+* - Updates the `m_inputs` and `m_model_inputs` maps with the new parameter nodes.
+*
+* This function is critical for ensuring that fallback mechanisms have access to all
+* required model inputs, particularly in scenarios where certain inputs are not
+* explicitly defined in the original model configuration.
+*/
 void GgmlOvDecoder::add_extra_model_inputs_for_fallback() {
     for (int i = 0; i < m_cgraph->n_nodes; i++) {
         ggml_tensor * node = m_cgraph->nodes[i];
