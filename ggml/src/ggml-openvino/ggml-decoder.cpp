@@ -65,7 +65,6 @@ GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph,
         set_input_output(cur_node);
     }
 
-    // 
     m_is_full_model = has_inp_tokens && has_output;
     if (!m_is_full_model) {
         compute_cgraph_dynamic_dims();
@@ -278,6 +277,9 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
                 throw std::runtime_error("Unsupported VIEW case");
             }
             op_case = 2;
+            if (!m_is_full_model && m_model_inputs.find(std::string(src->name)) != m_model_inputs.end()) {
+                op_case = 0;
+            }
         }
         break;
     }
@@ -969,6 +971,7 @@ void GgmlOvDecoder::compute_cgraph_dynamic_dims() {
         case GGML_OP_ADD:
         case GGML_OP_GLU:
         case GGML_OP_ROPE:
+        case GGML_OP_SCALE:
             m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[0]];
             break;
         case GGML_OP_CPY:
@@ -1056,7 +1059,7 @@ void GgmlOvDecoder::add_extra_model_inputs_for_fallback() {
 
             bool is_intermediate_node = false;
             for (const auto & node_info : m_node_info_list) {
-                if (node_info.node_name == src_name) {
+                if (node_info.node == src) {
                     is_intermediate_node = true;
                     break;
                 }
