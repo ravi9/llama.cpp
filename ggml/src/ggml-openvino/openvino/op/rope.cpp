@@ -104,8 +104,12 @@ OutputVector translate_rope(const NodeContext & context) {
             ov::element::i64, {4}, std::vector<int64_t>{1, -1, (int64_t) output_shape[2], (int64_t) output_shape[3]});
         res = std::make_shared<ov::op::v1::Reshape>(stack, data_shape, false);
     } else if (mode == ROPE_TYPE_NEOX) {
+        int32_t split_dim = 3;
+        if (context.is_stateful()) {
+            split_dim = 2;
+        }
         auto data_split = std::make_shared<ov::op::v1::Split>(
-            data_node, ov::op::v0::Constant::create(ov::element::i64, ov::Shape{}, {3}), 2);
+            data_node, ov::op::v0::Constant::create(ov::element::i64, ov::Shape{}, {split_dim}), 2);
         Output<Node> slice_data_node_0 = data_split->outputs()[0];
         Output<Node> slice_data_node_1 = data_split->outputs()[1];
 
@@ -117,9 +121,10 @@ OutputVector translate_rope(const NodeContext & context) {
             std::make_shared<ov::op::v1::Multiply>(slice_data_node_0, sin_theta_node),
             std::make_shared<ov::op::v1::Multiply>(slice_data_node_1, cos_theta_node));
 
+        // TODO: Will it work if we set it to "-1" for all cases?
         int32_t concat_dim = 3;
         if (context.is_stateful()) {
-            concat_dim = 2;
+            concat_dim = -1;
         }
         res = std::make_shared<ov::op::v0::Concat>(ov::OutputVector{first_half_node, second_half_node}, concat_dim);
     }
