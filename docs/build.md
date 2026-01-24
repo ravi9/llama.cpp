@@ -775,7 +775,7 @@ git switch dev_backend_openvino
 
 - **Windows:**
     ```bash
-    "C:\Program Files (x86)\Intel\openvino_2025.3.0\setupvars.bat"
+    "<OPENVINO_INSTALLATION_DIR>\setupvars.bat"
     cmake -B build\ReleaseOV -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_OPENVINO=ON -DGGML_CPU_REPACK=OFF -DLLAMA_CURL=OFF -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
     cmake --build build\ReleaseOV --parallel
     ```
