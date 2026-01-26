@@ -26,12 +26,7 @@ OutputVector translate_glu_swiglu(const NodeContext & context) {
         src1 = context.get_input(1);
     } else {
         auto combined = context.get_input(0);
-       // TODO: Will it work if we set it to "-1" for all cases?
-        int32_t split_dim = 3;
-        if (context.is_stateful()) {
-            split_dim = -1;
-        }
-        auto split_axis = ov::op::v0::Constant::create(ov::element::i64, {}, {split_dim});
+        auto split_axis = ov::op::v0::Constant::create(ov::element::i64, {}, {-1});
         auto split = std::make_shared<ov::op::v1::Split>(combined, split_axis, 2);
         src0 = split->output(0);
         src1 = split->output(1);

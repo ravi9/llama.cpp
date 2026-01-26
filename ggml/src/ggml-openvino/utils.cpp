@@ -103,10 +103,12 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::strin
             ggml_decoder->add_extra_inputs();
             infer_request = infer_request_cache[key];
 
-            auto * inp_pos = get_inp_pos_tensor(cgraph);
-            int32_t * pos_data = (int32_t *) inp_pos->data;
-            if (pos_data[0] == 0) {
-                infer_request->reset_state();
+            if (stateful) {
+                auto * inp_pos = get_inp_pos_tensor(cgraph);
+                int32_t * pos_data = (int32_t *) inp_pos->data;
+                if (pos_data[0] == 0) {
+                    infer_request->reset_state();
+                }
             }
 
             decoder_end_time = ggml_time_us();
@@ -351,7 +353,8 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph) {
             }
 
             for (size_t i = 0; i < ov_output_names.size(); i++) {
-                auto output_tensor = get_ov_output_tensor(ggml_decoder, ov_output_names[i]);
+                auto * ggml_tensor = ggml_decoder->get_model_outputs().at(ov_output_names[i]);
+                ov::Tensor output_tensor(infer_request->get_output_tensor(i).get_element_type(), infer_request->get_output_tensor(i).get_shape(), ggml_tensor->data);
                 infer_request->set_output_tensor(i, output_tensor);
             }
 
@@ -378,7 +381,8 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph) {
         }
 
         for (size_t i = 0; i < ov_output_names.size(); i++) {
-            auto output_tensor = get_ov_output_tensor(ggml_decoder, ov_output_names[i]);
+            auto * ggml_tensor = ggml_decoder->get_model_outputs().at(ov_output_names[i]);
+            ov::Tensor output_tensor(infer_request->get_output_tensor(i).get_element_type(), infer_request->get_output_tensor(i).get_shape(), ggml_tensor->data);
             infer_request->set_output_tensor(i, output_tensor);
         }
 
@@ -614,20 +618,8 @@ ov::Tensor get_ov_output_tensor(std::shared_ptr<GgmlOvDecoder> ggml_decoder, con
     auto output_type = ggml_decoder->get_ov_type(ggml_tensor);
     auto output_shape = ggml_decoder->get_shape(ggml_tensor);
 
-    if (ggml_decoder->is_static() && (result_name == "result_output" || result_name == "result_norm") && output_shape[2] == 0) {
-        output_shape[2] = 1;
-    }
-    if (ggml_decoder->is_stateful() && (result_name == "result_output" || result_name == "result_norm")) {
-        std::vector<long unsigned int> output_shape_3d;
-        for (size_t i=1; i<output_shape.size(); i++) {
-            output_shape_3d.push_back(output_shape[i]);
-        }
-        ov::Tensor output_tensor(output_type, output_shape_3d, ggml_tensor->data);
-        return output_tensor;
-    } else {
-        ov::Tensor output_tensor(output_type, output_shape, ggml_tensor->data);
-        return output_tensor;
-    }
+    ov::Tensor output_tensor(output_type, output_shape, ggml_tensor->data);
+    return output_tensor;
 }
 
 size_t checksum(const void * data, size_t size) {
