@@ -53,6 +53,8 @@ public:
 
     virtual int get_op_case(int node_idx) const = 0;
 
+    virtual bool is_full_model() const = 0;
+
     virtual const std::map<std::string, std::shared_ptr<ov::Node>>& get_model_inputs() const = 0;
     virtual const std::map<std::string, std::shared_ptr<ov::Node>>& get_model_extra_inputs() const = 0;
     virtual const std::map<std::string, std::shared_ptr<ov::Node>>& get_model_weights() const = 0;
