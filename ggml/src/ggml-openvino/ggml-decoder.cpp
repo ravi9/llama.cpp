@@ -71,6 +71,13 @@ GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph,
         set_input_output(cur_node);
     }
 
+    m_is_full_model = has_inp_tokens && has_output;
+    if (!m_is_full_model) {
+        compute_cgraph_dynamic_dims();
+        add_extra_model_inputs_for_fallback();
+        add_extra_model_outputs_for_fallback();
+    }
+
     for (int node_n = 0; node_n < cgraph->n_nodes; node_n++) {
         m_node_info_list[node_n].node_op_case = compute_op_case(m_node_info_list[node_n].node);
         m_node_info_list[node_n].node_op_type = compute_op_type(m_node_info_list[node_n].node);
@@ -168,6 +175,10 @@ void GgmlOvDecoder::set_input_output(ggml_tensor * node, bool naive) {
         current_node_info.node_inputs[src_name] = src;
         current_node_info.node_inputs_names.push_back(src_name);
 
+        if (is_inp_tok(src, node)) {
+            has_inp_tokens = true;
+        }
+
         // Add model inputs
         if (!naive && !src->view_src) {
             ggml_backend_buffer * buffer = src->buffer;
@@ -209,6 +220,9 @@ void GgmlOvDecoder::set_input_output(ggml_tensor * node, bool naive) {
     if (!naive) {
         // Model outputs are tensors with GGML_TENSOR_FLAG_OUTPUT flag and kv_caches
         static std::set<std::string> debug_output_names = {};
+        if (node->flags & GGML_TENSOR_FLAG_OUTPUT) {
+            has_output = true;
+        }
         // Workaround: the final tensor "result_output" does not have GGML_TENSOR_FLAG_OUTPUT flag set in cgraph
         if (node->op == GGML_OP_SET_ROWS || node->flags & GGML_TENSOR_FLAG_OUTPUT ||
             debug_output_names.count(node_output_name)) {
@@ -297,6 +311,9 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
                 throw std::runtime_error("Unsupported VIEW case");
             }
             op_case = 2;
+            if (!m_is_full_model && m_model_inputs.find(std::string(src->name)) != m_model_inputs.end()) {
+                op_case = 0;
+            }
         }
         break;
     }
@@ -393,7 +410,7 @@ void GgmlOvDecoder::validate_cgraph() const {
     }
 }
 
-ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op, const ggml_tensor * input) const {
+ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op, const ggml_tensor * input, int dynamic_dim_index) const {
     auto name = std::string(input->name);
     ov::PartialShape input_shape;
 
@@ -431,6 +448,9 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op, co
 
     } else {
         input_shape = ov::PartialShape{get_shape(input)};
+    }
+    if (dynamic_dim_index != -1) {
+        input_shape[3-dynamic_dim_index] = -1;
     }
     return input_shape;
 }
@@ -913,4 +933,222 @@ const std::string & GgmlOvDecoder::get_op_type(int node_idx) const {
 const std::string & GgmlOvDecoder::get_op_type() const {
     static const std::string unknown_op = "UNKNOWN_GGML_OP";
     return unknown_op;
+}
+
+/**
+ * @brief Computes the dynamic dimensions for the computation graph nodes to support fallback mechanisms.
+ *
+ * This function traverses the computation graph and determines the dynamic dimensions
+ * for each node based on its operation type and dependencies. The dynamic dimension
+ * is stored in the `m_node_dynamic_dims` map, where a value of -1 indicates no dynamic
+ * dimension. Specific operations such as GGML_OP_GET_ROWS, GGML_OP_MUL, GGML_OP_VIEW,
+ * etc., are handled to compute the dynamic dimension index.
+ *
+ * Key behaviors:
+ * - Nodes with operations like GGML_OP_NONE, GGML_OP_GET_ROWS, GGML_OP_MUL, and others
+ *   are analyzed to determine their dynamic dimensions.
+ * - Nodes with specific names (e.g., "inp_tokens", "inp_pos", "inp_out_ids") are
+ *   explicitly assigned a dynamic dimension index of 0.
+ * - For operations like GGML_OP_VIEW and GGML_OP_RESHAPE, the function ensures that
+ *   the dynamic dimension is uniquely determined; otherwise, a warning is printed.
+ * - Unhandled operations print a message indicating the node name and operation type.
+ *
+ * This function is critical for preparing the computation graph for execution, ensuring
+ * that dynamic dimensions are correctly propagated and resolved.
+ */
+void GgmlOvDecoder::compute_cgraph_dynamic_dims() {
+    auto visit_node = [&](auto && self, ggml_tensor * node) -> void {
+        if (!node) {
+            return;
+        }
+
+        if (node->op == GGML_OP_CPY) {
+            m_node_dynamic_dims[node] = -1;
+        }
+
+        if (m_node_dynamic_dims.count(node)) {
+            return;
+        }
+        for (int i = 0; i < GGML_MAX_SRC; i++) {
+            ggml_tensor * src = node->src[i];
+            if (src == nullptr) {
+                continue;
+            }
+            if (src->org_src) {
+                if (is_inp_tok(src->org_src, node) || is_inp_pos(src->org_src, node) || is_output_idx(src->org_src, node)) {
+                    m_node_dynamic_dims[src->org_src] = 0;
+                    m_node_dynamic_dims[src] = m_node_dynamic_dims[src->org_src];
+                    continue;
+                }
+                self(self, src->org_src);
+                m_node_dynamic_dims[src] = m_node_dynamic_dims[src->org_src];
+            } else {
+                if (is_inp_tok(src, node) || is_inp_pos(src, node) || is_output_idx(src, node)) {
+                    m_node_dynamic_dims[src] = 0;
+                    continue;
+                }
+                self(self, src);
+            }
+        }
+        switch (node->op) {
+        case GGML_OP_NONE:
+            m_node_dynamic_dims[node] = -1;
+            // if (std::string(node->name) == "inp_tokens" || std::string(node->name) == "inp_pos" ||
+            //     std::string(node->name) == "inp_out_ids") {
+            //     m_node_dynamic_dims[node] = 0;
+            // }
+            break;
+        case GGML_OP_GET_ROWS:
+            m_node_dynamic_dims[node] = -1;
+            if (m_node_dynamic_dims[node->src[1]] != -1) {
+                m_node_dynamic_dims[node] = 1;
+            }
+            break;
+        case GGML_OP_MUL:
+        case GGML_OP_MUL_MAT:
+            m_node_dynamic_dims[node] = -1;
+            if (m_node_dynamic_dims[node->src[0]] != -1) {
+                m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[0]];
+            }
+            if (m_node_dynamic_dims[node->src[1]] != -1) {
+                m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[1]];
+            }
+            break;
+        case GGML_OP_VIEW:
+        case GGML_OP_FLASH_ATTN_EXT:
+        case GGML_OP_PERMUTE:
+        case GGML_OP_RESHAPE:
+            m_node_dynamic_dims[node] = -1;
+            if (m_node_dynamic_dims[node->src[0]] != -1) {
+                auto dynamic_dim_idx = m_node_dynamic_dims[node->src[0]];
+                auto dynamic_dim_value = node->src[0]->ne[dynamic_dim_idx];
+                int same_dim_count = 0;
+                for (int i = 0; i < 4; i++) {
+                    if (node->ne[i] == dynamic_dim_value) {
+                        m_node_dynamic_dims[node] = i;
+                        same_dim_count++;
+                    }
+                }
+                if (same_dim_count != 1) {
+                    std::cout << "Cannot determine dynamic dim for node: " << node->name << std::endl;
+                }
+            }
+            break;
+        case GGML_OP_RMS_NORM:
+        case GGML_OP_ADD:
+        case GGML_OP_GLU:
+        case GGML_OP_ROPE:
+        case GGML_OP_SCALE:
+            m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[0]];
+            break;
+        case GGML_OP_CPY:
+        case GGML_OP_SET_ROWS:
+            m_node_dynamic_dims[node] = -1;
+            break;
+        default:
+            std::cout << "Doesn't handle node name: " << node->name << " op: " << ggml_op_name(node->op) << std::endl;
+            break;
+        }
+    };
+
+    for (int i = 0; i < m_cgraph->n_nodes; i++) {
+        ggml_tensor * node = m_cgraph->nodes[i];
+        visit_node(visit_node, node);
+    }
+}
+
+/**
+ * @brief Adds extra model outputs to support fallback mechanisms.
+ *
+ * This function ensures that all relevant nodes in the computation graph are included
+ * as model outputs for fallback scenarios. It creates a mapping of tensor data addresses
+ * to their corresponding nodes, excluding nodes with the GGML_OP_VIEW operation.
+ *
+ * Key behaviors:
+ * - Iterates through all nodes in the computation graph and maps their data addresses
+ *   to the corresponding tensor nodes, skipping nodes with GGML_OP_VIEW.
+ * - Adds nodes to the `m_model_outputs` map if they are not already present, using
+ *   the tensor's name as the key.
+ *
+ * This function is essential for ensuring that fallback mechanisms have access to all
+ * necessary model outputs, particularly in scenarios where certain outputs are not
+ * explicitly defined in the original model configuration.
+ */
+void GgmlOvDecoder::add_extra_model_outputs_for_fallback() { 
+    std::map<void *, ggml_tensor *> address_map;
+    for (int i = 0; i < m_cgraph->n_nodes; i++) {
+        ggml_tensor * node = m_cgraph->nodes[i];
+
+        if (node->flags & GGML_TENSOR_FLAG_OUTPUT) {
+            return;
+        }
+
+        if (node->op == GGML_OP_VIEW) {
+            continue;
+        }
+        address_map[node->data] = node;
+    }
+
+    for (const auto & pair : address_map) {
+        const std::string & name = pair.second->name;
+        if (m_model_outputs.find(name) == m_model_outputs.end()) {
+            m_model_outputs[name] = pair.second;
+        }
+    }
+}
+
+/**
+* @brief Adds extra model inputs to support fallback mechanisms.
+*
+* This function ensures that all necessary input nodes in the computation graph are
+* included as model inputs for fallback scenarios. It iterates through the source nodes
+* of each computation graph node and adds them to the `m_model_inputs` map if they meet
+* specific criteria.
+*
+* Key behaviors:
+* - Skips source nodes that are already present in `m_model_weights` or `m_model_inputs`.
+* - Excludes intermediate nodes that are part of `m_node_info_list`.
+* - For eligible source nodes, creates OpenVINO parameter nodes with appropriate types
+*   and shapes, and assigns them friendly names.
+* - Updates the `m_inputs` and `m_model_inputs` maps with the new parameter nodes.
+*
+* This function is critical for ensuring that fallback mechanisms have access to all
+* required model inputs, particularly in scenarios where certain inputs are not
+* explicitly defined in the original model configuration.
+*/
+void GgmlOvDecoder::add_extra_model_inputs_for_fallback() {
+    for (int i = 0; i < m_cgraph->n_nodes; i++) {
+        ggml_tensor * node = m_cgraph->nodes[i];
+        for (int i = 0; i < GGML_MAX_SRC; i++) {
+            auto * src = node->src[i];
+            if (src == nullptr) {
+                continue;
+            }
+            std::string src_name = std::string(src->name);
+            if (m_model_weights.find(src_name) != m_model_weights.end()) {
+                continue;
+            }
+
+            bool is_intermediate_node = false;
+            for (const auto & node_info : m_node_info_list) {
+                if (node_info.node == src) {
+                    is_intermediate_node = true;
+                    break;
+                }
+            }
+            if (is_intermediate_node) {
+                continue;
+            }
+            if (m_model_inputs.find(src_name) != m_model_inputs.end()) {
+                continue;
+            }
+
+            m_inputs[src_name] = src;
+            auto param_node = std::make_shared<ov::op::v0::Parameter>(
+                get_ov_type(src), get_graph_input_shape(node, src, m_node_dynamic_dims[src]));
+            param_node->set_friendly_name(src_name);
+            param_node->output(0).get_tensor().set_names({src_name});
+            m_model_inputs[src_name] = param_node;
+        }
+    }
 }
