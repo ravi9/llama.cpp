@@ -382,12 +382,6 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
     if (is_static && compute_params.output_len == 0) {
         compute_params.output_len = 1;
     }
-    auto * output_tensor = cgraph->nodes[cgraph->n_nodes - 1];
-    compute_params.output_len = output_tensor->ne[1];
-    // for NPU, output_len is always 1 except for llama-perplexity
-    if (is_static && compute_params.output_len == 0) {
-        compute_params.output_len = 1;
-    }
     model_params.ctx = model_params.ctx_per_seq * model_params.n_seq;
     model_params.ctx_swa = model_params.ctx_per_seq_swa * model_params.n_seq;
     return {model_params, compute_params};
