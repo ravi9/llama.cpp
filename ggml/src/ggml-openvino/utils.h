@@ -20,7 +20,8 @@ struct graph_key {
     }
 
     bool operator==(const graph_key & other) const {
-        return n_nodes == other.n_nodes && cache_k_l0 == other.cache_k_l0;
+        return n_nodes == other.n_nodes && first_node_name == other.first_node_name &&
+               last_node_name == other.last_node_name;
     }
 };
 
