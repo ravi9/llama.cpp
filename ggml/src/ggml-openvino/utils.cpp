@@ -118,7 +118,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::strin
                     for (auto state : states) {
                         auto state_tensor = state.get_state();
                         ov::Coordinate begin = {0, 0, 0, 0};
-                        ov::Coordinate end = {state_tensor.get_shape()[0], pos_data[0], state_tensor.get_shape()[2], state_tensor.get_shape()[3]};
+                        ov::Coordinate end = {state_tensor.get_shape()[0], static_cast<uint32_t>(pos_data[0]), state_tensor.get_shape()[2], state_tensor.get_shape()[3]};
                         ov::Tensor new_state_tensor(state_tensor, begin, end);
                         state.set_state(new_state_tensor);
                     }

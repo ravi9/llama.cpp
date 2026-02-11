@@ -658,7 +658,7 @@ std::shared_ptr<ov::Node> process_weight_tensor(const ggml_tensor * tensor, cons
         } else {
             // Requant to quantized format (Q4_0_128, Q8_0_32, etc.)
             ov::element::Type weight_type = layout.is_u4 ? ov::element::u4 : ov::element::u8;
-            ov::Shape scale_shape = {node_shape[0], node_shape[1] / layout.weights_per_block};
+            ov::Shape scale_shape = {node_shape[0], node_shape[1] / static_cast<uint32_t>(layout.weights_per_block)};
             // For symmetric quantization, biases are a single value instead of per-block
             ov::Shape bias_shape = layout.is_symmetric ? ov::Shape{} : scale_shape;
 
@@ -680,7 +680,7 @@ std::shared_ptr<ov::Node> process_weight_tensor(const ggml_tensor * tensor, cons
     } else {
         // Normal extraction path (no requant)
         ov::element::Type weight_type = layout.is_u4 ? ov::element::u4 : ov::element::u8;
-        ov::Shape scale_shape = {node_shape[0], node_shape[1] / layout.weights_per_block};
+        ov::Shape scale_shape = {node_shape[0], node_shape[1] / static_cast<uint32_t>(layout.weights_per_block)};
         // For symmetric quantization, biases are a single value instead of per-block
         ov::Shape bias_shape = layout.is_symmetric ? ov::Shape{} : scale_shape;
 
