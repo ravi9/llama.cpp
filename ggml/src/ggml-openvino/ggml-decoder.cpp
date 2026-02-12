@@ -102,9 +102,6 @@ GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph, std::map<std::string, std::sh
     m_model_weights = model_weights;
     for (int node_n = 0; node_n < cgraph->n_nodes; node_n++) {
         auto * cur_node = cgraph->nodes[node_n];
-        if (cur_node->op == GGML_OP_NONE) {
-            continue;
-        }
         set_input_output(cur_node, true);
     }
     for (int node_n = 0; node_n < cgraph->n_nodes; node_n++) {
@@ -117,6 +114,9 @@ GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph, std::map<std::string, std::sh
     std::map<void *, ggml_tensor *> data_addr_map;
     std::unordered_set<std::string> output_name_set;
     for (const auto & node_info : m_node_info_list) {
+        if (node_info.node->op == GGML_OP_NONE) {
+            continue;
+        }
         for (const auto & it : node_info.node_inputs) {
             const auto & src_name = it.first;
             const auto & src_node = it.second;
@@ -167,7 +167,11 @@ void GgmlOvDecoder::set_input_output(ggml_tensor * node, bool naive) {
         if (src == nullptr) {
             continue;
         }
-        std::string src_name = std::string(src->name);
+        auto src_name = std::string(src->name);
+        if (src->flags & GGML_TENSOR_FLAG_INPUT) {
+            src_name = get_graph_input_ov_name(src, node);
+        }
+        m_inputs[src_name] = src;
         current_node_info.node_inputs[src_name] = src;
         current_node_info.node_inputs_names.push_back(src_name);
 
@@ -201,7 +205,6 @@ void GgmlOvDecoder::set_input_output(ggml_tensor * node, bool naive) {
                 if (m_model_inputs.find(src_name) != m_model_inputs.end()) {
                     continue;
                 }
-                m_inputs[src_name] = src;
                 assert(stateful_kv_shape.rank().is_static());
                 ov::PartialShape param_shape =
                     (stateful_kv_shape.rank().get_length() != 0) ? stateful_kv_shape : get_graph_input_shape(node, src);
@@ -275,7 +278,7 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
             } else {
                 op_case = 3;
             }
-        } else if (node->src[0]->src[0]->op == GGML_OP_ROPE || node->src[0]->src[0]->src[0]->op == GGML_OP_ROPE) {
+        } else {
             // rope'ed query tensor
             op_case = 4;
         }
@@ -389,6 +392,15 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
         if (node->op == GGML_OP_ROPE) {
             memcpy(model_params.rope_params, node->op_params, sizeof(int32_t) * 15);
         }
+        if (node->op == GGML_OP_ROPE) {
+            memcpy(model_params.rope_params, node->op_params, sizeof(int32_t) * 15);
+        }
+    }
+    auto * output_tensor = cgraph->nodes[cgraph->n_nodes - 1];
+    compute_params.output_len = output_tensor->ne[1];
+    // for NPU, output_len is always 1 except for llama-perplexity
+    if (is_static && compute_params.output_len == 0) {
+        compute_params.output_len = 1;
     }
     auto * output_tensor = cgraph->nodes[cgraph->n_nodes - 1];
     compute_params.output_len = output_tensor->ne[1];
@@ -571,13 +583,13 @@ std::map<std::string, std::shared_ptr<ov::Node>> GgmlOvDecoder::create_weight_no
 }
 
 std::shared_ptr<ov::Node> GgmlOvDecoder::create_weight_node(ggml_tensor * tensor) {
+    const bool is_ov_buffer = ggml_backend_buffer_is_openvino(tensor->buffer);
+
     // Check if we have a pre-built constant from the OpenVINO backend buffer
     // This is set during ggml_backend_openvino_buffer_set_tensor
     if (tensor->extra) {
-        if (!ggml_backend_buffer_is_openvino(tensor->buffer)) {
-            OPENVINO_ASSERT(false, "Unsupported weight tensor: " + std::string(tensor->name) +
-                                       " Possibly this is a cpu backend repacked quantized weights");
-        }
+        OPENVINO_ASSERT(is_ov_buffer, "Unsupported weight tensor: " + std::string(tensor->name) +
+                                          " Possibly this is a cpu backend repacked quantized weights");
         // Cast to our extra base type and check the type
         auto * extra_base = static_cast<ggml_openvino_extra_base *>(tensor->extra);
 
@@ -598,12 +610,7 @@ std::shared_ptr<ov::Node> GgmlOvDecoder::create_weight_node(ggml_tensor * tensor
         }
     }
 
-    // Fallback: tensor doesn't have a pre-built extra. The buffer type can only be
-    // openvino_host_buffer_type, which has enough space (get_alloc_size returns
-    // layout.total_size for quantized 2D tensors) to store extracted data in-place.
-    // Build the weight node and store it in tensor->extra for future reuse.
     GGML_LOG_DEBUG("%s: creating new weight node for %s\n", __func__, tensor->name);
-
     static const std::set<ggml_type> weight_types = {GGML_TYPE_F32,  GGML_TYPE_F16,  GGML_TYPE_BF16,
                                                      GGML_TYPE_Q8_0, GGML_TYPE_Q4_0, GGML_TYPE_Q4_1,
                                                      GGML_TYPE_Q4_K, GGML_TYPE_Q5_K, GGML_TYPE_Q6_K};
@@ -614,14 +621,18 @@ std::shared_ptr<ov::Node> GgmlOvDecoder::create_weight_node(ggml_tensor * tensor
 
     OvWeight ov_weight;
     if (ggml_is_quantized(tensor->type)) {
-        // For quantized weights, copy raw data to a temp buffer first because
-        // process_weight_tensor reads from data and writes extracted results
-        // (weights/scales/zp) to output_base_ptr — they would overlap if both
-        // point to tensor->data.
-        size_t raw_size = ggml_nbytes(tensor);
-        std::vector<uint8_t> tmp(raw_size);
-        memcpy(tmp.data(), tensor->data, raw_size);
-        ov_weight = process_weight_tensor(tensor, tmp.data(), tensor->data);
+        if (is_ov_buffer) {
+            // For quantized weights, copy raw data to a temp buffer first because
+            // process_weight_tensor reads from data and writes extracted results
+            // (weights/scales/zp) to output_base_ptr — they would overlap if both
+            // point to tensor->data.
+            size_t raw_size = ggml_nbytes(tensor);
+            std::vector<uint8_t> tmp(raw_size);
+            memcpy(tmp.data(), tensor->data, raw_size);
+            ov_weight = process_weight_tensor(tensor, tmp.data(), tensor->data);
+        } else {
+            ov_weight = process_weight_tensor(tensor, tensor->data, nullptr);
+        }
     } else {
         // For non-quantized weights (F16/F32/BF16), data is already in tensor->data.
         // process_weight_tensor will create an ov::Tensor wrapping tensor->data directly.
@@ -629,6 +640,10 @@ std::shared_ptr<ov::Node> GgmlOvDecoder::create_weight_node(ggml_tensor * tensor
     }
 
     ov_weight.weight_node->set_friendly_name(tensor->name);
+    if (!is_ov_buffer) {
+        return ov_weight.weight_node;
+    }
+    ggml_openvino_buffer_register_extra(tensor, extra);
 
     ggml_openvino_extra_base * extra;
     if (ov_weight.is_quantized()) {
@@ -854,6 +869,9 @@ int32_t * GgmlOvDecoder::get_output_op_params(int node_idx) const {
 
 void GgmlOvDecoder::visit_subgraph(std::function<void(std::shared_ptr<GgmlDecoder>, int node_idx)> node_visitor) const {
     for (int node_idx = 0; node_idx < m_cgraph->n_nodes; node_idx++) {
+        if (m_cgraph->nodes[node_idx]->op == GGML_OP_NONE) {
+            continue;
+        }
         node_visitor(std::make_shared<GgmlOvDecoder>(*this), node_idx);
     }
 }
