@@ -23,6 +23,10 @@ RUN apt-get update && \
         ninja-build \
         build-essential \
         libtbb12 \
+        ocl-icd-opencl-dev \
+        opencl-headers \
+        opencl-clhpp-headers \
+        intel-opencl-icd \
         libcurl4-openssl-dev && \
     rm -rf /var/lib/apt/lists/*
 
