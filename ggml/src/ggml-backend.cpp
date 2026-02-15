@@ -871,10 +871,10 @@ static void ggml_backend_sched_print_assignments(ggml_backend_sched_t sched, str
             cur_split++;
         }
         struct ggml_tensor * node = graph->nodes[i];
-        if (ggml_is_view_op(node->op)) {
-            continue;
-        }
-        if (sched->debug > 1) {
+        // if (ggml_is_view_op(node->op)) {
+        //     continue;
+        // }
+        if (2 > 1) {
             ggml_backend_t tensor_backend = ggml_backend_sched_get_tensor_backend(sched, node);
             GGML_LOG_DEBUG("node #%3d (%10.10s): %20.20s (%5.5s) [%5.5s %8.8s] use=%d,c=%d:", i, ggml_op_name(node->op), node->name,
                 fmt_size(ggml_nbytes(node)), tensor_backend ? ggml_backend_name(tensor_backend) : "NULL", GET_CAUSE(node),
@@ -1088,9 +1088,16 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
                         }
                     }
                     if (n_supported > n_supported_best) {
-                        n_supported_best = n_supported;
-                        *node_backend_id = b;
-                        SET_CAUSE(node, "3.best");
+                        if (*node_backend_id == -1) {
+                            *node_backend_id = b;
+                            SET_CAUSE(node, "3.best");
+                        } else {
+                            // choose higher prio backend if there are another supported backends exclude cpu
+                            if (b != sched->n_backends - 1) {
+                                *node_backend_id = b;
+                                SET_CAUSE(node, "3.best");
+                            }
+                        }
                     }
                 }
             }
@@ -1171,7 +1178,12 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
             struct ggml_tensor * node = graph->nodes[i];
 
             if (ggml_is_view_op(node->op)) {
-                continue;
+                if (tensor_backend_id(node) != cur_backend_id) {
+                    tensor_backend_id(node) = cur_backend_id;
+                }
+                if (tensor_backend_id(node->view_src) == cur_backend_id) {
+                    continue;
+                }
             }
 
             const int node_backend_id = tensor_backend_id(node);
@@ -1285,6 +1297,7 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
         sched->n_splits = i_split + 1;
     }
 
+    ggml_backend_sched_print_assignments(sched, graph);
     if (sched->debug) {
         ggml_backend_sched_print_assignments(sched, graph);
     }

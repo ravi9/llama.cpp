@@ -269,7 +269,7 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
     case GGML_OP_PERMUTE: {
         if (node->src[0]->op != GGML_OP_VIEW) {
             op_case = 1;
-        } else if (node->src[0]->src[0]->op == GGML_OP_NONE) {
+        } else if ((node->src[0]->src[0]->org_src == NULL) && (node->src[0]->src[0]->op == GGML_OP_NONE)) {
             // kv cache tensor
             std::string src_name(node->view_src->name);
             int layer = extract_layer_from_name(src_name);

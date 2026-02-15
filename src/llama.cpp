@@ -973,6 +973,7 @@ static struct llama_model * llama_model_load_from_file_impl(
         model->devices.insert(model->devices.end(), gpus.begin(), gpus.end());
 
         // add integrated GPUs only if no other devices were found
+        model->devices.insert(model->devices.end(), igpus.begin(), igpus.end());
         if (model->devices.empty()) {
             model->devices.insert(model->devices.end(), igpus.begin(), igpus.end());
         }

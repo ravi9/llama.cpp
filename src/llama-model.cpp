@@ -2645,6 +2645,15 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
         std::copy(tensor_split, tensor_split + n_devices(), splits.begin());
     }
 
+    // if devices[0] name is OpenVINO0, set splits[0] = 1, the others to 0
+    ggml_backend_dev_t first_dev = devices[0];
+    if (first_dev && std::string(ggml_backend_dev_name(first_dev)) == "OPENVINO0") {
+        splits[0] = 1.0f;
+        for (size_t i = 1; i < n_devices(); ++i) {
+            splits[i] = 0.0f;
+        }
+    }
+
     // sum and normalize the splits to get the split points
     float split_sum = 0.0f;
     for (size_t i = 0; i < n_devices(); ++i) {
@@ -2665,7 +2674,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
         }
         const int layer_gpu = std::upper_bound(splits.begin(), splits.begin() + n_devices(), float(il - i_gpu_start)/act_gpu_layers) - splits.begin();
         auto * dev = devices.at(layer_gpu);
-        LLAMA_LOG_DEBUG("load_tensors: layer %3d assigned to device %s, is_swa = %d\n", il, ggml_backend_dev_name(dev), is_swa);
+        LLAMA_LOG_INFO("load_tensors: layer %3d assigned to device %s, is_swa = %d\n", il, ggml_backend_dev_name(dev), is_swa);
         return {dev, &pimpl->gpu_buft_list.at(dev)};
     };
 
