@@ -353,6 +353,15 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op, co
             // do not fix ctx size to make llama-bench work across test params
             input_shape[2] = -1;
         }
+        if (is_stateful()) {
+            // Convert stateless KV cache layout [1, 1, seq, n_heads_kv * head_size]
+            // to stateful layout [1, seq, n_heads_kv, head_size].
+            assert(input_shape.size() == 4 && input_shape[0] == 1 && input_shape[1] == 1 &&
+                   input_shape[2].is_dynamic() &&
+                   input_shape[3] == (m_model_params.n_heads_kv * m_model_params.head_size));
+            input_shape = {input_shape[0], ov::Dimension::dynamic(), m_model_params.n_heads_kv,
+                           m_model_params.head_size};
+        }
 
     } else if (is_kv_idx(input, op)) {
         // kv update index
@@ -423,8 +432,6 @@ void GgmlOvDecoder::compute_model_inputs() {
             std::string node_name(node->name);
             if (m_model_weights.find(node_name) == m_model_weights.end()) {
                 m_inputs[node_name] = node;
-                // for debugging, print name and shape of the input parameters
-                std::cout << "[TEST] Model input: " << node_name << ", shape: " << get_graph_input_shape(node, nullptr) << std::endl;
                 auto param_node =
                     std::make_shared<ov::op::v0::Parameter>(get_ov_type(node), get_graph_input_shape(node, nullptr));
                 param_node->set_friendly_name(node_name);
@@ -463,27 +470,14 @@ void GgmlOvDecoder::compute_model_inputs() {
             m_inputs[src_name] = src;
 
             ggml_backend_buffer * buffer = src->buffer;
-            ov::PartialShape stateful_kv_shape;
             // GGML_BACKEND_BUFFER_USAGE_ANY are kv caches
             if (buffer->usage == GGML_BACKEND_BUFFER_USAGE_ANY) {
                 if (auto it = std::find(m_model_params.kv_names.begin(), m_model_params.kv_names.end(), src_name);
                     it == m_model_params.kv_names.end()) {
                     m_model_params.kv_names.push_back(src_name);
-                    if (is_stateful()) {
-                        // TODO: The shape modification for stateful model below is not validated for all supported models yet. More generic solution might be needed
-                        // to enable additional cases. Ideally, this could be removed from decoder and done as part of a transformation later.
-                        auto stateless_kv_shape = get_graph_input_shape(node, src);
-                        assert(stateless_kv_shape.size() == 4 && stateless_kv_shape[0] == 1 &&
-                               stateless_kv_shape[1] == 1 && stateless_kv_shape[2].is_dynamic() &&
-                               stateless_kv_shape[3] == (m_model_params.n_heads_kv * m_model_params.head_size));
-                        stateful_kv_shape = {stateless_kv_shape[0], ov::Dimension::dynamic(), m_model_params.n_heads_kv,
-                                             m_model_params.head_size};
-                    }
                 }
             }
-            assert(stateful_kv_shape.rank().is_static());
-            ov::PartialShape param_shape =
-                (stateful_kv_shape.rank().get_length() != 0) ? stateful_kv_shape : get_graph_input_shape(node, src);
+            ov::PartialShape param_shape = get_graph_input_shape(node, src);
             auto param_node = std::make_shared<ov::op::v0::Parameter>(get_ov_type(src), param_shape);
             param_node->set_friendly_name(src_name);
             param_node->output(0).get_tensor().set_names({src_name});
