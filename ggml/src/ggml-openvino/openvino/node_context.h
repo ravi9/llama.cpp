@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <openvino/frontend/node_context.hpp>
 #include <string>
 
@@ -57,6 +58,13 @@ public:
 
     int32_t* get_input_op_params(size_t index) const {
         return m_decoder->get_input_op_params(m_node_idx, m_input_names[index]);
+    }
+
+    template<typename T>
+    T get_input_op_params_aligned(size_t index) const {
+        T out;
+        std::memcpy(&out, get_input_op_params(index), sizeof(T));
+        return out;
     }
 
     int32_t * get_output_op_params() const { return m_decoder->get_output_op_params(m_node_idx); }
