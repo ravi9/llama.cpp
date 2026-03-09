@@ -180,7 +180,7 @@ public:
         return m_model_is_splitted;
     }
 
-    ov::PartialShape get_graph_input_shape(const ggml_tensor * op, const ggml_tensor * input) const;
+    ov::PartialShape get_graph_input_shape(const ggml_tensor * op, const ggml_tensor * input, int dynamic_dim_index=-1) const;
 
     static void dump_cgraph(const ggml_cgraph * cgraph, std::string & filename);
 
@@ -277,6 +277,7 @@ private:
     bool node_is_used_as_src(const int node_idx);
     void compute_model_inputs();
     void compute_model_outputs();
+    void compute_node_dynamic_dims();
 
     void validate_cgraph() const;
 
@@ -290,6 +291,7 @@ private:
     std::map<std::string, ggml_tensor *> m_model_outputs;
     std::vector<std::string> m_model_output_names;
     std::vector<NodeInfo> m_node_info_list;
+    std::map<ggml_tensor *, int> m_node_dynamic_dims;
 
     ModelParams m_model_params;
     ComputeParams m_compute_params;
