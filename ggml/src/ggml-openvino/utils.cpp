@@ -114,7 +114,9 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
     if (cache_hit) {
         ggml_decoder = it->second;
         old_m_params = ggml_decoder->get_model_params();
-        cache_hit = old_m_params.can_reuse_dynamically(m_params);
+        if (!ggml_decoder->is_splited_model()) {
+            cache_hit = old_m_params.can_reuse_dynamically(m_params);
+        }
     }
 
     if (cache_hit) {
@@ -556,7 +558,7 @@ namespace {
 ov::Tensor convert_ggml_input_to_ov(std::shared_ptr<GgmlOvDecoder> ggml_decoder, const std::string & name) {
     const auto * ggml_tensor = ggml_decoder->get_input_ggml_tensor(name);
 
-    if (ggml_tensor->extra != nullptr) {
+    if (ggml_tensor->extra != nullptr && !ggml_decoder->is_splited_model()) {
         // GGML_LOG_DEBUG("Using ggml_tensor->extra as ov::Tensor for input: %s\n", name.c_str());
         auto * extra_base = static_cast<ggml_openvino_extra_base *>(ggml_tensor->extra);
         if (extra_base->type != ggml_openvino_extra_base::Type::TENSOR) {
@@ -569,12 +571,43 @@ ov::Tensor convert_ggml_input_to_ov(std::shared_ptr<GgmlOvDecoder> ggml_decoder,
     // GGML_LOG_DEBUG("Converting ggml tensor to ov::Tensor for input: %s\n", name.c_str());
     auto * input_data = ggml_tensor->data;
     ov::Shape input_shape;
-    if (ggml_tensor->op == GGML_OP_VIEW) {
+    if (ggml_tensor->op == GGML_OP_VIEW && !ggml_decoder->is_splited_model()) {
         // This case is added to make test-backend-ops work
         input_shape = ggml_decoder->get_shape(ggml_tensor->view_src);
     } else {
         input_shape = ggml_decoder->get_shape(ggml_tensor);
     }
+
+    // If the tensor is a result of VIEW operation, use ggml_cont to make it contiguous
+    if (ggml_tensor->op == GGML_OP_VIEW && ggml_decoder->is_splited_model()) {
+        // if the ggml_tensor shape size is equal to the source tensor shape size, no need to reconstruct the ov input tensor data
+        if (ggml_nelements(ggml_tensor) == ggml_nelements(ggml_tensor->view_src)) {
+            auto input_tensor = ov::Tensor(ggml_decoder->get_ov_type(ggml_tensor), input_shape, input_data);
+            return input_tensor;
+        }
+
+        // Create OpenVINO input tensor, the data need to reconstructed based on the view tensor shape & stride
+        // Todo: parallel copy & the copy the whole last dim one loop (perf improve)
+        ov::Tensor input_tensor(ggml_decoder->get_ov_type(ggml_tensor), input_shape);
+        const auto * src_tensor = ggml_tensor->view_src;
+        size_t des_index = 0;
+        for (size_t i0 = 0; i0 < static_cast<size_t>(ggml_tensor->ne[3]); i0++) {
+            for (size_t i1 = 0; i1 < static_cast<size_t>(ggml_tensor->ne[2]); i1++) {
+                for (size_t i2 = 0; i2 < static_cast<size_t>(ggml_tensor->ne[1]); i2++) {
+                    for (size_t i3 = 0; i3 < static_cast<size_t>(ggml_tensor->ne[0]); i3++) {
+                        size_t src_index = ggml_tensor->view_offs + i0 * ggml_tensor->nb[3] + i1 * ggml_tensor->nb[2] +
+                                           i2 * ggml_tensor->nb[1] + i3 * ggml_tensor->nb[0];
+
+                        memcpy(static_cast<char *>(input_tensor.data()) + des_index,
+                               static_cast<const char *>(src_tensor->data) + src_index, ggml_tensor->nb[0]);
+                        des_index += ggml_tensor->nb[0];
+                    }
+                }
+            }
+        }
+        return input_tensor;
+    }
+
     auto input_tensor = ov::Tensor(ggml_decoder->get_ov_type(ggml_tensor), input_shape, input_data);
     return input_tensor;
 }
