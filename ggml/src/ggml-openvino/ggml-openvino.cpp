@@ -855,9 +855,9 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
         if (op->src[0]->ne[3] != op->src[1]->ne[3] && op->src[0]->ne[3] != 1 && op->src[1]->ne[3] != 1) {
             return true;
         }
-        if (op->src[0]->op == GGML_OP_PERMUTE || op->src[1]->op == GGML_OP_PERMUTE) {
-            return true;
-        }
+        // if (op->src[0]->op == GGML_OP_PERMUTE || op->src[1]->op == GGML_OP_PERMUTE) {
+        //     return true;
+        // }
         if (ggml_is_quantized(op->src[0]->type) && op->src[0]->ne[1] == 1) {
             // MUL_MAT(type_a=q4_0,type_b=f32,m=1,n=2048,k=8192,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1)
             // triggers a bug in ov matmul_shape_inference.hpp
@@ -901,6 +901,15 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
                 //     op->src[0]->view_src->ne[1], op->src[0]->ne[2]);
                 return true;
             }
+        }
+        break;
+    }
+    case GGML_OP_VIEW: {
+        if (ggml_nelements(op) != ggml_nelements(op->src[0])) {
+            std::cout << __func__ << ": OpenVINO backend does not support VIEW with different number of elements: "
+                      << op->name << " " << ggml_nelements(op)
+                      << " vs " << ggml_nelements(op->src[0]) << std::endl;
+            return true;
         }
         break;
     }

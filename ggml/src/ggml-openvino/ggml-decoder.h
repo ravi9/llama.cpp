@@ -221,7 +221,7 @@ public:
     void update_io(ggml_cgraph * cgraph);
 
     inline static bool is_inp_tok(const ggml_tensor * tensor, const ggml_tensor * op) {
-        return op->op == GGML_OP_GET_ROWS && tensor == op->src[1] && op->src[0]->op == GGML_OP_NONE;
+        return op->op == GGML_OP_GET_ROWS && tensor == op->src[1] && op->src[0]->op == GGML_OP_NONE && op->src[0]->org_src == nullptr;
     }
 
     inline static bool is_inp_pos(const ggml_tensor * tensor, const ggml_tensor * op) {
