@@ -1124,8 +1124,11 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
         struct ggml_tensor * node = graph->nodes[i];
         int * cur_backend_id = &tensor_backend_id(node);
         if (node->view_src != NULL && *cur_backend_id == -1) {
-            *cur_backend_id = tensor_backend_id(node->view_src);
-            SET_CAUSE(node, "4.vsrc");
+            auto view_src_backend = tensor_backend_id(node->view_src);
+            if (view_src_backend != -1 && ggml_backend_supports_op(sched->backends[view_src_backend], node)) {
+                *cur_backend_id = tensor_backend_id(node->view_src);
+                SET_CAUSE(node, "4.vsrc");
+            }
         }
         for (int j = 0; j < GGML_MAX_SRC; j++) {
             struct ggml_tensor * src = node->src[j];
@@ -1171,7 +1174,10 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
             struct ggml_tensor * node = graph->nodes[i];
 
             if (ggml_is_view_op(node->op)) {
-                continue;
+                // continue;
+                if ((tensor_backend_id(node) != cur_backend_id) && (ggml_backend_supports_op(sched->backends[cur_backend_id], node))) {
+                    tensor_backend_id(node) = cur_backend_id;
+                }
             }
 
             const int node_backend_id = tensor_backend_id(node);
@@ -1263,6 +1269,26 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
                     if (tensor_id_copy(src_id, cur_backend_id, 0) == NULL) {
                         ggml_backend_t backend = sched->backends[cur_backend_id];
                         for (int c = 0; c < sched->n_copies; c++) {
+                            // if src op needs to be copied is RESHAPE TRANS, VIEW, PERMUTE, and the data copy from OV to other backends.
+                            // Cause the VIEW ops had done the data arrangement in OV backend, so when copy to other backend, have to change the stride info to avoid the other backends do it again.
+                            if (src->op == GGML_OP_RESHAPE || src->op == GGML_OP_TRANSPOSE || src->op == GGML_OP_VIEW ||
+                                src->op == GGML_OP_PERMUTE) {
+                                if (ggml_backend_name(backend) != "OpenVINO") {
+                                    // find the minist value in src->nb
+                                    size_t min_nb = src->nb[0];
+                                    for (int d = 1; d < GGML_MAX_DIMS; d++) {
+                                        if (src->nb[d] < min_nb) {
+                                            min_nb = src->nb[d];
+                                        }
+                                    }
+
+                                    // re-calcute the nb based on the shape and the data type
+                                    src->nb[0] = ggml_type_size(src->type);
+                                    for (int d = 1; d < GGML_MAX_DIMS; d++) {
+                                        src->nb[d] = src->nb[d - 1] * src->ne[d - 1];
+                                    }
+                                }
+                            }
                             struct ggml_tensor * tensor_copy = ggml_dup_tensor_layout(sched->ctx, src);
                             ggml_format_name(tensor_copy, "%s#%s#%d", ggml_backend_name(backend), src->name, c);
                             if (sched->n_copies > 1) {
