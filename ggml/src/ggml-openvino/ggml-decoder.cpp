@@ -164,16 +164,6 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         }
         break;
     }
-    case GGML_OP_CONT: {
-        if (node->src[0]->op == GGML_OP_PERMUTE) {
-            op_case = 1;
-        } else if (node->src[0]->op == GGML_OP_TRANSPOSE) {
-            op_case = 2;
-        } else if (node->src[0]->op == GGML_OP_VIEW) {
-            op_case = 3;
-        }
-        break;
-    }
     case GGML_OP_PERMUTE: {
         if (node->src[0]->op != GGML_OP_VIEW) {
             op_case = 1;
@@ -193,9 +183,7 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         break;
     }
     case GGML_OP_MUL_MAT: {
-        if (node->src[0]->op == GGML_OP_CONT && node->src[0]->src[0]->op == GGML_OP_TRANSPOSE) {
-            op_case = 2;
-        } else if (node->src[0]->op == GGML_OP_VIEW && node->src[1]->op == GGML_OP_VIEW) {
+        if (node->src[0]->op == GGML_OP_VIEW && node->src[1]->op == GGML_OP_VIEW) {
             op_case = 3;
         }
         break;
