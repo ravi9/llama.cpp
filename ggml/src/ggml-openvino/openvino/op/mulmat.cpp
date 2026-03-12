@@ -75,9 +75,6 @@ OutputVector translate_mulmat(const NodeContext & context) {
         A = Z;
     }
 
-    // print A and B shapes for debugging
-    // std::cout << "A shape: " << A.get_partial_shape() << ", B shape: " << B.get_partial_shape() << std::endl;
-
     res = std::make_shared<ov::op::v0::MatMul>(A, B, false, true);
 
     return rename_outputs_with_suffix({res}, context.get_name());
