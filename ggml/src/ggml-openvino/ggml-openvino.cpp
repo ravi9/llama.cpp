@@ -606,8 +606,18 @@ static const char * ggml_backend_openvino_get_name(ggml_backend_t backend) {
 }
 
 static enum ggml_status ggml_backend_openvino_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
+    // 1. Grab our internal context
+    auto& config = ggml_openvino_get_device_config();
+
+    // 2. --- OPENVINO GENAI TRACER INTERCEPTION ---
+    if (config.is_capturing) {
+        config.captured_graph = cgraph;
+        return GGML_STATUS_SUCCESS; 
+    }
+    // ---------------------------------------------
+
+    // 3. Normal execution path (if we are NOT capturing)
     return ov_graph_compute(cgraph, backend);
-    GGML_UNUSED(backend);
 }
 
 static const ggml_backend_i ggml_backend_openvino_interface = {
@@ -1107,4 +1117,16 @@ GGML_BACKEND_API ggml_backend_reg_t ggml_backend_openvino_reg(void) {
     }
 
     return &reg;
+}
+
+void ggml_backend_ov_set_capture_mode(bool enable) {
+    auto& config = ggml_openvino_get_device_config();
+    config.is_capturing = enable;
+    if (enable) {
+        config.captured_graph = nullptr;
+    }
+}
+
+struct ggml_cgraph * ggml_backend_ov_get_captured_graph() {
+    return ggml_openvino_get_device_config().captured_graph;
 }

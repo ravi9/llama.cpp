@@ -3,8 +3,11 @@
 #include <cstdint>
 #include <openvino/frontend/node_context.hpp>
 #include <string>
-
+#include <iostream>
 #include "decoder.h"
+#include "ggml.h"
+
+struct ggml_tensor;
 
 namespace ov {
 namespace frontend {
@@ -13,20 +16,26 @@ namespace ggml {
 class TranslateSession;
 
 typedef std::map<std::string, Output<Node>> TensorMap;
+typedef std::map<const struct ggml_tensor*, Output<Node>> TensorPtrMap;
 
 class NodeContext : public frontend::NodeContext {
 public:
     NodeContext(const std::shared_ptr<GgmlDecoder>& decoder,
                 std::shared_ptr<TensorMap>& tensor_map,
+                std::shared_ptr<TensorPtrMap>& tensor_ptr_map,
                 int node_idx,
                 TranslateSession* translate_session = nullptr)
         : ov::frontend::NodeContext(decoder->get_op_type(node_idx)),
           m_decoder(decoder),
           m_tensor_map(tensor_map),
+          m_tensor_ptr_map(tensor_ptr_map),
           m_node_idx(node_idx),
           m_translate_session(translate_session) {
         m_input_names = decoder->get_input_names(m_node_idx);
         m_output_names = decoder->get_output_names(m_node_idx);
+
+        m_input_tensors = decoder->get_input_tensors(m_node_idx);
+        m_output_tensors = decoder->get_output_tensors(m_node_idx);
     }
 
     TranslateSession* get_translate_session() const {
@@ -66,7 +75,47 @@ public:
     }
 
     Output<Node> get_input(int idx) const override {
-        return m_tensor_map->at(m_input_names[idx]);
+        // 1. Safely check the pointer map first (Physical Memory Address)
+        if (idx < m_input_tensors.size() && m_input_tensors[idx] != nullptr) {
+            auto it = m_tensor_ptr_map->find(m_input_tensors[idx]);
+            if (it != m_tensor_ptr_map->end()) {
+                return it->second; // Found it via exact pointer!
+            }
+        }
+
+        // 2. Fallback to the string map (For OpenVINO synthetic tensors & static weights)
+        if (idx < m_input_names.size()) {
+            std::string target_name = m_input_names[idx];
+
+            auto it = m_tensor_map->find(target_name);
+            if (it != m_tensor_map->end()) {
+                return it->second; // Found it via string name!
+            }
+
+            // Temporary fallback: Brute-Force Pointer Search
+            // If the pointer mutated due to in-place optimization, scan all translated physical nodes!
+            for (const auto& pair : *m_tensor_ptr_map) {
+                if (pair.first != nullptr) {
+                    std::string actual_name = ggml_get_name(pair.first);
+                    
+                    // IF WE ARE LOOKING FOR NORM-21, PRINT EVERYTHING WE HAVE!
+                    if (target_name == "norm-21" || target_name == "ffn_inp-21") {
+                        std::cout << "[DEBUG TRAP] In memory pointer name: '" << actual_name << "'\n";
+                    }
+
+                    if (actual_name == target_name) {
+                        std::cerr << "[GGUFReaderV2] Recovered shifted tensor via brute-force: '" << target_name << "'\n";
+                        return pair.second;
+                    }
+                }
+            }
+
+            // DIAGNOSTIC BYPASS (Last Resort)
+            std::cerr << "[GGUFReaderV2] WARNING: Tensor totally lost! Name: '" << target_name << "'\n";
+            return std::make_shared<ov::op::v0::Constant>(ov::element::f32, ov::Shape{1}, std::vector<float>{0.0f});
+        }
+
+        throw std::runtime_error("CRITICAL: Input index out of bounds!");
     }
 
     Output<Node> get_input(const std::string& name) const override {
@@ -99,10 +148,13 @@ public:
 private:
     std::shared_ptr<GgmlDecoder> m_decoder;
     std::shared_ptr<TensorMap>& m_tensor_map;
+    std::shared_ptr<TensorPtrMap>& m_tensor_ptr_map;
     int m_node_idx;
     TranslateSession* m_translate_session;
     std::vector<std::string> m_input_names;
     std::vector<std::string> m_output_names;
+    std::vector<const struct ggml_tensor*> m_input_tensors;
+    std::vector<const struct ggml_tensor*> m_output_tensors;
 };
 
 using CreatorFunction = std::function<ov::OutputVector(const ov::frontend::ggml::NodeContext&)>;
