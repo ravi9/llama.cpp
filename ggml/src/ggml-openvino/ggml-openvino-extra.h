@@ -187,6 +187,13 @@ struct ggml_backend_openvino_context {
     ggml_backend_openvino_context() = default;
 };
 
-void ggml_backend_ov_set_capture_mode(bool enable);
+#ifdef __cplusplus
+extern "C" {
+#endif
 
+void ggml_backend_ov_set_capture_mode(bool enable);
 struct ggml_cgraph * ggml_backend_ov_get_captured_graph();
+
+#ifdef __cplusplus
+}
+#endif

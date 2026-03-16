@@ -79,6 +79,8 @@ public:
         if (idx < m_input_tensors.size() && m_input_tensors[idx] != nullptr) {
             auto it = m_tensor_ptr_map->find(m_input_tensors[idx]);
             if (it != m_tensor_ptr_map->end()) {
+                // PROOF IT WORKS:
+                // std::cout << "[DEBUG] Tensor found perfectly via Pointer Map!\n";
                 return it->second; // Found it via exact pointer!
             }
         }
@@ -110,9 +112,10 @@ public:
                 }
             }
 
-            // DIAGNOSTIC BYPASS (Last Resort)
-            std::cerr << "[GGUFReaderV2] WARNING: Tensor totally lost! Name: '" << target_name << "'\n";
-            return std::make_shared<ov::op::v0::Constant>(ov::element::f32, ov::Shape{1}, std::vector<float>{0.0f});
+            // 🚨 THE GSOC FIX: NO MORE DUMMY NODES! 🚨
+            // If we get here, the node is TRULY missing. We throw a hard error 
+            // so we know if our Scheduler Capture Override worked or failed.
+            throw std::runtime_error("[GGUFReaderV2] FATAL: Tensor completely lost during extraction: '" + target_name + "'");
         }
 
         throw std::runtime_error("CRITICAL: Input index out of bounds!");

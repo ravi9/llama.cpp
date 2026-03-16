@@ -742,6 +742,11 @@ static void ggml_backend_openvino_device_get_props(ggml_backend_dev_t dev, ggml_
         /* .buffer_from_host_ptr  = */ false,
         /* .events                = */ false,
     };
+
+    if (ggml_openvino_get_device_config().is_capturing) {
+        props->caps.host_buffer = true;
+        props->caps.buffer_from_host_ptr = true;
+    }
 }
 
 static ggml_backend_t ggml_backend_openvino_device_init(ggml_backend_dev_t dev, const char * params) {
@@ -935,6 +940,10 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
 static bool ggml_backend_openvino_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
     GGML_ASSERT(dev->reg != nullptr);
 
+    if (ggml_openvino_get_device_config().is_capturing) {
+        return true; 
+    }
+
     static std::set<ggml_type> supported_types{GGML_TYPE_F32,  GGML_TYPE_F16,  GGML_TYPE_BF16, GGML_TYPE_I64,
                                                GGML_TYPE_I32,  GGML_TYPE_Q4_0, GGML_TYPE_Q4_1, GGML_TYPE_Q4_K,
                                                GGML_TYPE_Q5_K, GGML_TYPE_Q8_0, GGML_TYPE_Q6_K};
@@ -1027,6 +1036,10 @@ static bool ggml_backend_openvino_device_supports_op(ggml_backend_dev_t dev, con
 }
 
 static bool ggml_backend_openvino_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
+
+    if (ggml_openvino_get_device_config().is_capturing) {
+        return true;
+    }
     return ggml_backend_buft_is_openvino(buft) || ggml_backend_buft_is_host(buft);
     GGML_UNUSED(dev);
 }
