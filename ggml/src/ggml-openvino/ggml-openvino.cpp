@@ -937,11 +937,17 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
     return false;
 }
 
+extern bool g_ov_bypass_mode;
+
 static bool ggml_backend_openvino_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
     GGML_ASSERT(dev->reg != nullptr);
 
+    if (g_ov_bypass_mode) {
+        return false; 
+    }
+
     if (ggml_openvino_get_device_config().is_capturing) {
-        return true; 
+        return true;
     }
 
     static std::set<ggml_type> supported_types{GGML_TYPE_F32,  GGML_TYPE_F16,  GGML_TYPE_BF16, GGML_TYPE_I64,
@@ -1142,4 +1148,12 @@ void ggml_backend_ov_set_capture_mode(bool enable) {
 
 struct ggml_cgraph * ggml_backend_ov_get_captured_graph() {
     return ggml_openvino_get_device_config().captured_graph;
+}
+
+// phase-1 temporary bypass system for ov::model verification
+
+bool g_ov_bypass_mode = false; // The global kill switch
+
+void ggml_backend_ov_set_bypass(bool bypass) {
+    g_ov_bypass_mode = bypass;
 }

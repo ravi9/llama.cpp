@@ -194,6 +194,9 @@ extern "C" {
 void ggml_backend_ov_set_capture_mode(bool enable);
 struct ggml_cgraph * ggml_backend_ov_get_captured_graph();
 
+// maths bypass (temporary)
+void ggml_backend_ov_set_bypass(bool bypass);
+
 #ifdef __cplusplus
 }
 #endif
