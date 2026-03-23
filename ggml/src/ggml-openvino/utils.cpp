@@ -522,17 +522,11 @@ enum ggml_status naive_compute(ggml_cgraph * cgraph,
         infer_request->set_input_tensor(i, input_tensor);
     }
 
-    // TODO: Need to check why set_output_tensor() doesn't work in naive mode. For now, we will create output tensors after infer() and copy data back to ggml tensors.
-    // auto ov_results = model->get_results();
-    // for (size_t i = 0; i < ov_results.size(); i++) {
-    //     auto * ggml_tensor = decoder->get_model_outputs().at(ov_results[i]->get_friendly_name());
-    //     auto output_tensor = create_ov_output_tensor(decoder, infer_request, i, ggml_tensor);
-    //     infer_request->set_output_tensor(i, output_tensor);
-    // }
+    // Use get_output_tensor + memcpy instead of set_output_tensor to avoid memory overwritten
+    // when i/o buffer overlaps, e.g. the cgraph is a single PERMUTE
 
     infer_request->infer();
 
-    // get output tensor from infer_request and copy data back to ggml_tensor
     auto ov_results = model->get_results();
     for (size_t i = 0; i < ov_results.size(); i++) {
         auto output_tensor = infer_request->get_output_tensor(i);
