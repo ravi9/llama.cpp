@@ -23,7 +23,6 @@ namespace ggml {
 namespace op {
 
 OutputVector translate_soft_max(const NodeContext & context) {
-    // TODO code is outdated
     num_inputs_check(context, 1, 2);
 
     auto input_node = context.get_input(0).get_node_shared_ptr();
@@ -48,7 +47,7 @@ OutputVector translate_soft_max(const NodeContext & context) {
     auto scaled_input = std::make_shared<ov::op::v1::Multiply>(input_node, scale_node);
 
     if (context.get_input_size() < 2) {
-        res = std::make_shared<ov::op::v8::Softmax>(scaled_input, 2);
+        res = std::make_shared<ov::op::v8::Softmax>(scaled_input, 3);
         return rename_outputs_with_suffix({res}, context.get_name());
     }
 
@@ -56,11 +55,12 @@ OutputVector translate_soft_max(const NodeContext & context) {
     if (context.has_input("KQ_mask_sliced")) {
         mask_node_sliced = context.get_input("KQ_mask_sliced");
     } else {
-        auto token_len = get_dimensions(input_node, {1});
+        auto token_len = get_dimensions(input_node, {2});
         auto mask_node = context.get_input(1);
         auto zero = ov::op::v0::Constant::create(ov::element::i64, {1}, {0});
         auto one = ov::op::v0::Constant::create(ov::element::i64, {1}, {1});
-        mask_node_sliced = std::make_shared<ov::op::v8::Slice>(mask_node, zero, token_len, one, one);
+        auto axis = ov::op::v0::Constant::create(ov::element::i64, {1}, {2});
+        mask_node_sliced = std::make_shared<ov::op::v8::Slice>(mask_node, zero, token_len, one, axis);
     }
 
     if (mask_node_sliced.get_element_type() != context.get_output_type()) {
@@ -78,7 +78,7 @@ OutputVector translate_soft_max(const NodeContext & context) {
 
     auto input_slope_mask_node = std::make_shared<ov::op::v1::Add>(scaled_input, slope_mask);
 
-    res = std::make_shared<ov::op::v8::Softmax>(input_slope_mask_node, 2);
+    res = std::make_shared<ov::op::v8::Softmax>(input_slope_mask_node, 3);
 
     return rename_outputs_with_suffix({res}, context.get_name());
 }

@@ -255,13 +255,17 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
     for (int i = 0; i < cgraph->n_nodes; i++) {
         auto * node = cgraph->nodes[i];
         std::string name = std::string(node->name);
-        if (node->op == GGML_OP_FLASH_ATTN_EXT) {
+        if (node->op == GGML_OP_FLASH_ATTN_EXT || node->op == GGML_OP_SOFT_MAX) {
             model_params.n_heads = node->src[0]->ne[2];
-            model_params.n_heads_kv = node->src[1]->ne[2];
             model_params.head_size = node->src[0]->ne[0];
             compute_params.input_len = node->src[0]->ne[1];
 
             auto * cache_k_perm = node->src[1];
+            if (node->op == GGML_OP_SOFT_MAX) {
+                cache_k_perm = node->src[0]->src[0];
+            }
+            model_params.n_heads_kv = cache_k_perm->ne[2];
+
             if (cache_k_perm->op == GGML_OP_CPY) {
                 cache_k_perm = cache_k_perm->src[0];
             }
@@ -271,7 +275,11 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
 
             auto * cache_k = cache_k_view->src[0];
             int layer = extract_layer_from_name(cache_k->name);
+
             auto * mask = node->src[3];
+            if (node->op == GGML_OP_SOFT_MAX) {
+                mask = node->src[1];
+            }
             std::string mask_name(mask->name);
 
             model_params.kv_buffer_ctx_id = ggml_backend_openvino_buffer_get_ctx_id(cache_k->buffer);
@@ -288,7 +296,12 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
             size_t offset;
             memcpy(&offset, cache_k_view->op_params, sizeof(size_t));
             compute_params.seq_active_start = offset / seq_size;
-            compute_params.token_len_per_seq = node->ne[2];
+
+            auto * q_perm = node->src[0];
+            if (node->op == GGML_OP_SOFT_MAX) {
+                q_perm = node->src[0]->src[1];
+            }
+            compute_params.token_len_per_seq = q_perm->ne[1];
 
             if (mask_name.find("swa") != std::string::npos) {
                 compute_params.attention_size_swa = mask->ne[0];
