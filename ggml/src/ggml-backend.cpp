@@ -1215,8 +1215,11 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
         struct ggml_tensor * node = graph->nodes[i];
         int * cur_backend_id = &tensor_backend_id(node);
         if (node->view_src != NULL && *cur_backend_id == -1) {
-            *cur_backend_id = tensor_backend_id(node->view_src);
-            SET_CAUSE(node, "4.vsrc");
+            auto view_src_backend = tensor_backend_id(node->view_src);
+            if (view_src_backend != -1 && ggml_backend_supports_op(sched->backends[view_src_backend], node)) {
+                *cur_backend_id = tensor_backend_id(node->view_src);
+                SET_CAUSE(node, "4.vsrc");
+            }
         }
         for (int j = 0; j < GGML_MAX_SRC; j++) {
             struct ggml_tensor * src = node->src[j];
@@ -1242,6 +1245,14 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
         GGML_ASSERT(*cur_backend_id != -1);
     }
 
+    // add the node id to the name for easier debugging
+    for (int i = 0; i < graph->n_nodes; i++) {
+        struct ggml_tensor * node = graph->nodes[i];
+        char                 new_name[128];
+        snprintf(new_name, sizeof(new_name), "%s#%d", node->name, i);
+        ggml_format_name(node, "%s", new_name);
+    }
+
     // pass 5: split graph, find tensors that need to be copied
     {
         int i_split = 0;
@@ -1262,7 +1273,9 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
             struct ggml_tensor * node = graph->nodes[i];
 
             if (ggml_is_view_op(node->op)) {
-                continue;
+                if ((tensor_backend_id(node) != cur_backend_id) && (ggml_backend_supports_op(sched->backends[cur_backend_id], node))) {
+                    tensor_backend_id(node) = cur_backend_id;
+                }
             }
 
             const int node_backend_id = tensor_backend_id(node);
@@ -1360,6 +1373,7 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
                                 ggml_set_input(tensor_copy);
                                 ggml_set_output(tensor_copy); // prevent ggml-alloc from overwriting the tensor
                             }
+                            tensor_copy->org_src = src;
                             tensor_id_copy(src_id, cur_backend_id, c) = tensor_copy;
                             SET_CAUSE(tensor_copy, "4.cpy");
                         }
