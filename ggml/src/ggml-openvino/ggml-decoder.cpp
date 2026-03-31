@@ -1057,9 +1057,9 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
                 continue;
             }
             struct ggml_tensor *root_src = nullptr;
-            // if (src->org_src) {
-            //     root_src = src->org_src;
-            // }
+            if (src->org_src) {
+                root_src = src->org_src;
+            }
             if (root_src) {
                 if (is_inp_tok(root_src, node) || is_inp_pos(root_src, node) ||
                     is_output_idx(root_src, node)) {
@@ -1139,7 +1139,7 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
             // identifies the dynamic dim even when two dims share the same size.
             m_node_dynamic_dims[node] = -1;
             if (m_node_dynamic_dims[node->src[0]] != -1) {
-                if (node->src[0]->op == GGML_OP_NONE) {
+                if (node->src[0]->op == GGML_OP_NONE && node->src[0]->org_src == nullptr) {
                     m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[0]];
                     break;
                 }
