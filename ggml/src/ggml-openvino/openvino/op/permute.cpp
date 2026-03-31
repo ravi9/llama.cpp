@@ -23,8 +23,7 @@ OutputVector translate_permute(const NodeContext & context) {
     num_inputs_check(context, 1, 1);
 
     int op_case = context.get_op_case();
-    FRONT_END_CHECK_IMPLEMENTED(op_case == 1 || op_case == 2 || op_case == 3 || op_case == 4,
-                                "Unsupported PERMUTE case");
+    FRONT_END_CHECK_IMPLEMENTED(op_case != 0, "Unsupported PERMUTE case");
 
     ov::Output<Node> res;
     auto src = context.get_input(0);
@@ -39,7 +38,7 @@ OutputVector translate_permute(const NodeContext & context) {
 
     if (op_case == 1 || context.is_stateful()) {
         res = std::make_shared<ov::op::v1::Transpose>(src, perm);
-    } else if (op_case == 4) {
+    } else if (op_case == 2) {
         auto output_shape = context.get_output_shape().to_shape();
         auto n_heads = ov::op::v0::Constant::create(ov::element::i64, {1}, {output_shape[1]});
         auto head_size = ov::op::v0::Constant::create(ov::element::i64, {1}, {output_shape[3]});
@@ -62,13 +61,17 @@ OutputVector translate_permute(const NodeContext & context) {
         auto output_shape = context.get_output_shape().to_shape();
         int64_t head_size = output_shape[3];
         int64_t n_heads = output_shape[1];
+        if (op_case == 5 || op_case == 6) {
+            head_size = output_shape[2];
+            n_heads = output_shape[1];
+        }
         int64_t ctx_per_seq = cache_shape[2].is_static() ? cache_shape[2].get_length() : -1;
         int64_t n_seq = cache_shape[1].get_length();
 
         Output<Node> attention_size;
         if (!context.has_input("attention_size")) {
             attention_size = ov::op::v0::Constant::create(ov::element::i64, {1}, {output_shape[2]});
-        } else if (op_case == 2) {
+        } else if (op_case == 3 || op_case == 5) {
             attention_size = context.get_input("attention_size");
         } else {
             attention_size = context.get_input("attention_size_swa");

@@ -173,14 +173,31 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
             // kv cache tensor
             std::string src_name(node->view_src->name);
             int layer = extract_layer_from_name(src_name);
-            if (!is_swa_layer(layer)) {
-                op_case = 2;
+            if (ggml_is_contiguous(node->src[0])) {
+                // -  19: [    64,     8,   256,     1] VIEW            cache_k_l0 (view)             [ 2,   128,  1024, 1048576]
+                //         [   512,  1024,     1,     1]      0: NONE     cache_k_l0                    [ 2,  1024, 1048576, 1048576]
+                // -  20: [    64,   256,     8,     1] PERMUTE         cache_k_l0 (view) (permuted)  [ 2,  1024,   128, 1048576]
+                //         [    64,     8,   256,     1]      0: VIEW     cache_k_l0 (view)             [ 2,   128,  1024, 1048576]
+                if (!is_swa_layer(layer)) {
+                    op_case = 3;
+                } else {
+                    op_case = 4;
+                }
             } else {
-                op_case = 3;
+                // special case of cache v when `-fa off`
+                // -  17: [   256,     8,    64,     1] VIEW            cache_v_l0 (view)             [ 2, 131072,  2048, 1048576]
+                //         [   512,  1024,     1,     1]      0: NONE     cache_v_l0                   [ 2,  1024, 1048576, 1048576]
+                // -  18: [   256,    64,     8,     1] PERMUTE         cache_v_l0 (view) (permuted)  [ 2,  2048, 131072, 1048576]
+                //         [   256,     8,    64,     1]      0: VIEW     cache_v_l0 (view)            [ 2, 131072,  2048, 1048576]
+                if (!is_swa_layer(layer)) {
+                    op_case = 5;
+                } else {
+                    op_case = 6;
+                }
             }
         } else {
             // rope'ed query tensor
-            op_case = 4;
+            op_case = 2;
         }
         break;
     }
