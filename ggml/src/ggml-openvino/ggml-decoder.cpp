@@ -215,15 +215,33 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         }
         {
             auto * src = node->src[0];
-            if ((ggml_nelements(node) != ggml_nelements(src)) && m_naive) {
-                // Compare each dimension of node and src, if only one dimension differs then op_case=3
+            if (ggml_nelements(node) != ggml_nelements(src)) {
+                // Case 4: select one slice on src dim1 (via view offset), keep src dim2 as output dim1.
+                // Typical pattern:
+                //   src: ne=[N, M, K, 1], nb=[b0, b1, b2, b3]
+                //   dst: ne=[N, K, 1, 1], nb=[b0, b2, b3, b3]
+                if (node->ne[0] == src->ne[0] &&
+                    node->ne[1] == src->ne[2] &&
+                    node->ne[2] == 1 &&
+                    node->nb[0] == src->nb[0] &&
+                    node->nb[1] == src->nb[2] &&
+                    src->ne[1] > 1) {
+                    op_case = 4;
+                    break;
+                }
+
+                // General case 3: shape differs from source (one or more dims) and is handled as VIEW slicing.
                 int diff_count = 0;
                 for (int i = 0; i < GGML_MAX_DIMS; i++) {
                     if (node->ne[i] != src->ne[i]) {
                         diff_count++;
                     }
+                    // if node ne[i] > src ne[i], case = 0
+                    if (node->ne[i] > src->ne[i]) {
+                        return 0;
+                    }
                 }
-                if (diff_count == 1) {
+                if (diff_count >= 1) {
                     op_case = 3;
                 }
             }
@@ -397,6 +415,11 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op, co
     }
     if (dynamic_dim_index != -1 && m_model_is_splitted) {
         input_shape[3 - dynamic_dim_index] = -1;
+    }
+    if (op->op == GGML_OP_SOFT_MAX && op->src[1] != nullptr && op->src[1]->op == GGML_OP_NONE && op->src[1]->flags & GGML_TENSOR_FLAG_INPUT && op->src[1] == input) {
+        // for softmax input mask, the shape is [1, 1, seq_active, seq_active], where seq_active is determined by the input active sequence length instead of the kv cache sequence length
+        input_shape[2] = -1;
+        input_shape[3] = -1;
     }
     return input_shape;
 }
@@ -923,6 +946,10 @@ int32_t * GgmlOvDecoder::get_output_op_params(int node_idx) const {
     return m_node_info_list[node_idx].node->op_params;
 }
 
+size_t GgmlOvDecoder::get_output_op_offset(int node_idx) const {
+    return m_node_info_list[node_idx].node->view_offs;
+}
+
 void GgmlOvDecoder::visit_subgraph(std::function<void(std::shared_ptr<GgmlDecoder>, int node_idx)> node_visitor) const {
     for (int node_idx = 0; node_idx < m_cgraph->n_nodes; node_idx++) {
         if (m_cgraph->nodes[node_idx]->op == GGML_OP_NONE) {
@@ -947,6 +974,7 @@ std::string GgmlOvDecoder::compute_op_type(const ggml_tensor * node) {
         {GGML_OP_PERMUTE,        "GGML_OP_PERMUTE"       },
         {GGML_OP_RESHAPE,        "GGML_OP_RESHAPE"       },
         {GGML_OP_RMS_NORM,       "GGML_OP_RMS_NORM"      },
+        {GGML_OP_NORM,           "GGML_OP_NORM"          },
         {GGML_OP_ROPE,           "GGML_OP_ROPE"          },
         {GGML_OP_SCALE,          "GGML_OP_SCALE"         },
         {GGML_OP_SOFT_MAX,       "GGML_OP_SOFT_MAX"      },
@@ -1037,6 +1065,10 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
                     m_node_dynamic_dims[src] = 0;
                     continue;
                 }
+                if ( node->op == GGML_OP_VIEW && src->op == GGML_OP_NONE && !is_stateful() && !m_model_is_splitted) {
+                    m_node_dynamic_dims[src] = 1;
+                    continue;
+                }
                 self(self, src);
             }
         }
@@ -1098,6 +1130,10 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
             // identifies the dynamic dim even when two dims share the same size.
             m_node_dynamic_dims[node] = -1;
             if (m_node_dynamic_dims[node->src[0]] != -1) {
+                if (node->src[0]->op == GGML_OP_NONE) {
+                    m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[0]];
+                    break;
+                }
                 auto dynamic_dim_idx   = m_node_dynamic_dims[node->src[0]];
                 auto dynamic_dim_value = node->src[0]->ne[dynamic_dim_idx];
                 auto dynamic_dim_stride =
@@ -1116,6 +1152,7 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
             }
             break;
         }
+        case GGML_OP_TRANSPOSE:
         case GGML_OP_RESHAPE: {
             // RESHAPE requires src[0] to be contiguous, so both src and result
             // have standard compact strides: nb[i] = type_size * prod(ne[0..i-1]).
@@ -1192,14 +1229,15 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
             }
             break;
         case GGML_OP_RMS_NORM:
+        case GGML_OP_NORM:
         case GGML_OP_ADD:
         case GGML_OP_GLU:
         case GGML_OP_ROPE:
         case GGML_OP_SCALE:
-        case GGML_OP_TRANSPOSE:
         case GGML_OP_SOFT_MAX:
         case GGML_OP_ARGSORT:
         case GGML_OP_ADD_ID:
+        case GGML_OP_UNARY:
             m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[0]];
             break;
         case GGML_OP_MUL_MAT_ID:

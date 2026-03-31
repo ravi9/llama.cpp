@@ -113,6 +113,8 @@ public:
 
     virtual int32_t * get_output_op_params(int node_idx) const override;
 
+    virtual size_t get_output_op_offset(int node_idx) const override;
+
     virtual std::vector<std::string> get_output_names(int node_idx) const override;
 
     virtual const std::string & get_op_type() const override;
@@ -265,9 +267,6 @@ public:
         }
         if (is_inp_emb(tensor, op)) {
             return "embd";
-        }
-        if (is_output_idx(tensor, op)) {
-            return "inp_out_ids";
         }
         if (is_inp_mask(tensor, op)) {
             return std::string(tensor->name).find("swa") == std::string::npos ? "self_kq_mask" : "self_kq_mask_swa";
