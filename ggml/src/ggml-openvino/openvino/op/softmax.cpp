@@ -43,14 +43,24 @@ OutputVector translate_soft_max(const NodeContext & context) {
     FRONT_END_CHECK_IMPLEMENTED(!(max_bias > 0.0f && context.get_input_size() < 2),
                                 "OpenVINO softmax ALiBi path requires mask input");
 
+    ov::Output<ov::Node> mask = context.get_input(1);
+
+    // For stateful
+    std::string mask_name = "KQ_mask_sliced";
+    if (context.get_input_names()[1].find("swa") != std::string::npos) {
+        mask_name = "KQ_mask_swa_sliced";
+    }
+    if (context.has_input(mask_name)) {
+        mask = context.get_input(mask_name);
+    }
+
+    if (mask.get_element_type() != logits.get_element_type()) {
+        mask = std::make_shared<ov::op::v0::Convert>(mask, logits.get_element_type());
+    }
+
     // Optional mask add: logits += mask
     // For max_bias > 0 (ALiBi), apply per-head slope to mask before adding.
     if (context.get_input_size() > 1) {
-        ov::Output<ov::Node> mask = context.get_input(1);
-        if (mask.get_element_type() != logits.get_element_type()) {
-            mask = std::make_shared<ov::op::v0::Convert>(mask, logits.get_element_type());
-        }
-
         if (max_bias > 0.0f) {
             auto out_shape = context.get_output_shape().to_shape();
             FRONT_END_CHECK_IMPLEMENTED(out_shape.size() == 4,

@@ -239,7 +239,8 @@ public:
     }
 
     inline static bool is_inp_mask(const ggml_tensor * tensor, const ggml_tensor * op) {
-        return op->op == GGML_OP_CPY || (op->op == GGML_OP_FLASH_ATTN_EXT && tensor == op->src[3]);
+        return op->op == GGML_OP_CPY || (op->op == GGML_OP_FLASH_ATTN_EXT && tensor == op->src[3]) ||
+               (op->op == GGML_OP_SOFT_MAX && tensor == op->src[1]);
     }
 
     inline static bool is_rope_freqs_weight(const ggml_tensor * tensor, const ggml_tensor * op) {

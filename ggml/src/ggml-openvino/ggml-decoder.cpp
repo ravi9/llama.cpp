@@ -291,15 +291,18 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
         auto * node = cgraph->nodes[i];
         std::string name = std::string(node->name);
         if (node->op == GGML_OP_FLASH_ATTN_EXT || node->op == GGML_OP_SOFT_MAX) {
-            model_params.n_heads = node->src[0]->ne[2];
-            model_params.head_size = node->src[0]->ne[0];
             compute_params.input_len = node->src[0]->ne[1];
 
+            auto * q_perm = node->src[0];
             auto * cache_k_perm = node->src[1];
             if (node->op == GGML_OP_SOFT_MAX) {
+                q_perm = node->src[0]->src[1];
                 cache_k_perm = node->src[0]->src[0];
             }
+            model_params.head_size = cache_k_perm->ne[0];
             model_params.n_heads_kv = cache_k_perm->ne[2];
+            model_params.n_heads = q_perm->ne[2];
+            compute_params.token_len_per_seq = q_perm->ne[1];
 
             if (cache_k_perm->op == GGML_OP_CPY) {
                 cache_k_perm = cache_k_perm->src[0];
@@ -332,12 +335,6 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
             memcpy(&offset, cache_k_view->op_params, sizeof(size_t));
             compute_params.seq_active_start = offset / seq_size;
 
-            auto * q_perm = node->src[0];
-            if (node->op == GGML_OP_SOFT_MAX) {
-                q_perm = node->src[0]->src[1];
-            }
-            compute_params.token_len_per_seq = q_perm->ne[1];
-
             if (mask_name.find("swa") != std::string::npos) {
                 compute_params.attention_size_swa = mask->ne[0];
             } else {
@@ -348,7 +345,6 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
                 compute_params.attention_size_swa = model_params.ctx_per_seq_swa;
                 compute_params.token_len_per_seq = 1;
             }
-            break;
         }
         // if the node op is TRANSPOSE and its input is PERMUTE and the source of the PERMUTE is VIEW, then get the attention size with the TRANSPOSE node ne[0] (in case no GGML_OP_FLASH_ATTN_EXT)
         if (node->op == GGML_OP_TRANSPOSE && node->src[0]->op == GGML_OP_PERMUTE &&
