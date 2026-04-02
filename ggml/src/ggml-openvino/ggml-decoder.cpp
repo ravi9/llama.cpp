@@ -1,20 +1,15 @@
 #include "ggml-decoder.h"
 
-#include "ggml-backend-impl.h"
-#include "ggml-backend.h"
+#include "ggml-impl.h"
 #include "ggml-openvino-extra.h"
 #include "ggml-openvino.h"
 #include "ggml-quants.h"
-
-#include <ggml-impl.h>
-#include <ggml.h>
 
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <execution>
 #include <fstream>
 #include <iomanip>
 #include <map>
@@ -30,12 +25,10 @@
 #include <openvino/op/convert.hpp>
 #include <openvino/op/parameter.hpp>
 #include <openvino/runtime/tensor.hpp>
-#include <optional>
 #include <ostream>
 #include <set>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph,
@@ -204,6 +197,9 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
     case GGML_OP_MUL_MAT: {
         if (node->src[0]->op == GGML_OP_VIEW && node->src[1]->op == GGML_OP_VIEW) {
             op_case = 3;
+        } else if (node->src[1]->op == GGML_OP_SOFT_MAX) {
+            // In the case of `-fa off`, softmax is used, v_trans=true, the dynamic dim is ne[0] for cache_v
+            op_case = 2;
         }
         break;
     }
