@@ -152,7 +152,7 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
             if (src->ne[2] * src->ne[3] == node->ne[1]) {
                 op_case = 5;
             }
-        } else if (src->ne[0] * src->ne[1] == node->ne[1]) {
+        } else if (src->ne[0] * src->ne[1] * src->ne[2] == node->ne[1]) {
             op_case = 3;
         } else if (src->ne[1] * src->ne[2] == node->ne[1]) {
             op_case = 6;
