@@ -159,9 +159,6 @@ std::pair<ov::Output<Node>, ov::Output<Node>> make_sin_cos(int32_t * rope_params
 
     const float theta_scale = powf(freq_base, -2.0f / n_dims);
 
-    float corr_dims[2];
-    ggml_rope_yarn_corr_dims(n_dims, n_ctx_orig, freq_base, beta_fast, beta_slow, corr_dims);
-
     std::vector<float> factor(n_dims_half);
 
     Output<Node> freq_factors;
@@ -182,6 +179,8 @@ std::pair<ov::Output<Node>, ov::Output<Node>> make_sin_cos(int32_t * rope_params
             std::make_shared<ov::op::v0::Constant>(ov::element::f32, ov::Shape{n_dims_half}, factor);
         theta = std::make_shared<ov::op::v1::Multiply>(inp_pos, factor_const);
     } else {
+        float corr_dims[2];
+        ggml_rope_yarn_corr_dims(n_dims, n_ctx_orig, freq_base, beta_fast, beta_slow, corr_dims);
         factor[0] = 1.0f;
         for (size_t i = 1; i < factor.size(); i++) {
             factor[i] = theta_scale * factor[i - 1];

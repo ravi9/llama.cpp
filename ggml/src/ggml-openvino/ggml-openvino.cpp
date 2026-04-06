@@ -892,6 +892,10 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
                 return true;
             }
         }
+        if (mode == GGML_ROPE_TYPE_IMROPE && (op->src[2] != 0 || ((float*)op_params)[6] != 1 | ((float*)op_params)[7] != 0 || ((float*)op_params)[8] != 1)) {
+            // GGML_LOG_WARN("OpenVINO backend does not support IMROPE with freq_factors, freq_scale, ext_factor, and attn_factor\n");
+            return true;
+        }
         break;
     }
     case GGML_OP_TRANSPOSE: {
