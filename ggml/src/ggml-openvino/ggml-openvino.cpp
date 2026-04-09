@@ -97,6 +97,8 @@ struct ggml_backend_openvino_buffer_context {
             ov_buffer = std::make_shared<ov::intel_gpu::ocl::USMTensor>(std::move(usm_tensor));
         } else {
             data = ggml_aligned_malloc(size);
+            GGML_ASSERT(data);
+            memset(data, 0, size);
             ov_buffer = std::make_shared<ov::Tensor>(ov::element::u8, ov::Shape{size}, data);
         }
 
@@ -906,6 +908,14 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
         }
         break;
     }
+    case GGML_OP_TRANSPOSE: {
+        // if the type is bf16, will return true
+        if (op->type == GGML_TYPE_BF16) {
+            // GGML_LOG_WARN("OpenVINO backend does not support CONT with BF16 type\n");
+            return true;
+        }
+        break;
+    }
     default:
         break;
     }
@@ -932,6 +942,7 @@ static bool ggml_backend_openvino_device_supports_op(ggml_backend_dev_t dev, con
                                                  GGML_OP_SOFT_MAX,
                                                  GGML_OP_SET_ROWS, GGML_OP_FLASH_ATTN_EXT, GGML_OP_CPY};
     static const std::set<ggml_unary_op> supported_unary_ops{
+        GGML_UNARY_OP_GELU,
         GGML_UNARY_OP_SILU,
         GGML_UNARY_OP_TANH,
     };
