@@ -10,10 +10,8 @@ namespace op {
 
 #define GGML_OP_CONVERTER(op) OutputVector op(const NodeContext& context)
 
-GGML_OP_CONVERTER(translate_add);
 GGML_OP_CONVERTER(translate_cont);
 GGML_OP_CONVERTER(translate_get_rows);
-GGML_OP_CONVERTER(translate_mul);
 GGML_OP_CONVERTER(translate_mulmat);
 GGML_OP_CONVERTER(translate_permute);
 GGML_OP_CONVERTER(translate_reshape);
