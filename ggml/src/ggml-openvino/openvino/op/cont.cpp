@@ -18,6 +18,8 @@ namespace op {
 OutputVector translate_cont(const NodeContext & context) {
     num_inputs_check(context, 1, 1);
 
+    // call process_view_input_new handle input 0
+    auto input = process_view_input_new(context, 0);
     auto src_shape = context.get_input_shape(0).to_shape();
     auto dst_shape = context.get_output_shape().to_shape();
 
@@ -27,7 +29,7 @@ OutputVector translate_cont(const NodeContext & context) {
 
     ov::Output<Node> res;
     res = std::make_shared<ov::op::v1::Reshape>(
-        context.get_input(0), ov::op::v0::Constant::create(ov::element::i64, {dst_shape.size()}, dst_shape), false);
+        input, ov::op::v0::Constant::create(ov::element::i64, {dst_shape.size()}, dst_shape), false);
 
     return rename_outputs_with_suffix({res}, context.get_name());
 }
