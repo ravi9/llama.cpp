@@ -11,7 +11,10 @@ ggml_add_backend_library(ggml-openvino
     ${GGML_HEADERS_OPENVINO}
 )
 
-target_link_libraries(ggml-openvino PRIVATE openvino::runtime TBB::tbb OpenCL::OpenCL)
+target_link_libraries(ggml-openvino 
+    PRIVATE openvino::runtime TBB::tbb 
+    PUBLIC OpenCL::OpenCL
+)
 
 if (GGML_OPENVINO)
     if (CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")

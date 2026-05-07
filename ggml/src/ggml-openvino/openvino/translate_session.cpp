@@ -174,6 +174,7 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
     ov::ParameterVector params;
     ov::ResultVector results;
     auto tensor_map = std::make_shared<TensorMap>();
+    auto tensor_ptr_map = std::make_shared<TensorPtrMap>();
     std::shared_ptr<Model> resulting_model;
 
     const auto & ggml_model = std::dynamic_pointer_cast<InputModel>(input_model);
@@ -197,7 +198,15 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
 
     auto node_visitor = [&](std::shared_ptr<GgmlDecoder> decoder, int node_idx) {
         auto operation_type = decoder->get_op_type(node_idx);
+        
+        // TRAP 1: Is OpenVINO throwing our tensor in the trash?
         if (operation_type == "GGML_OP_NONE") {
+            const auto & skipped_names = decoder->get_output_names(node_idx);
+            for (const auto& name : skipped_names) {
+                if (name == "norm-21" || name == "ffn_inp-21") {
+                    std::cerr << "\nCAUGHT THE BUG! '" << name << "' is a GGML_OP_NONE and OpenVINO skipped it!\n";
+                }
+            }
             return;
         }
 
@@ -205,18 +214,27 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
         auto it = m_translator_map.find(operation_type);
         FRONT_END_OP_CONVERSION_CHECK(it != m_translator_map.end(), "Translation for operation type ", operation_type,
                                       " is not implemented.");
-        NodeContext node_context(decoder, tensor_map, node_idx, this);
+        NodeContext node_context(decoder, tensor_map, tensor_ptr_map, node_idx, this);
         converted_outputs = it->second(node_context);
 
         const auto & node_output_names = decoder->get_output_names(node_idx);
+        const auto & node_output_tensors = decoder->get_output_tensors(node_idx);
         FRONT_END_OP_CONVERSION_CHECK(node_output_names.size() == converted_outputs.size(), "Number of ",
                                       operation_type, " outputs greater than number of converted outputs, which are ",
                                       node_output_names.size(), " and ", converted_outputs.size(), " respectively.");
 
         for (size_t i = 0; i < node_output_names.size(); ++i) {
             auto output_name = node_output_names[i];
+            auto output_tensor = node_output_tensors[i]; // Match the pointer
+            
             if (i < converted_outputs.size() && converted_outputs[i].get_node_shared_ptr() != nullptr) {
-                (*tensor_map)[output_name] = converted_outputs[i];
+                // Save to the original string map (keeps OpenVINO synthetic nodes satisfied)
+                (*tensor_map)[output_name] = converted_outputs[i]; 
+                
+                // Save to our new pointer map (makes it physically impossible to overwrite unnamed tensors)
+                if (output_tensor != nullptr) {
+                    (*tensor_ptr_map)[output_tensor] = converted_outputs[i];
+                }
             }
         }
     };

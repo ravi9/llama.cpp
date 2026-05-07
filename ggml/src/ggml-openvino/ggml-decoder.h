@@ -103,6 +103,8 @@ public:
 
     virtual std::vector<std::string> get_input_names(int node_idx) const override;
 
+    virtual std::vector<const struct ggml_tensor*> get_input_tensors(int node_idx) const override;
+
     virtual ov::PartialShape get_output_shape(int node_idx) const override;
 
     virtual ov::element::Type get_output_type(int node_idx) const override;
@@ -116,6 +118,8 @@ public:
     virtual size_t get_output_op_offset(int node_idx) const override;
 
     virtual std::vector<std::string> get_output_names(int node_idx) const override;
+
+    virtual std::vector<const struct ggml_tensor*> get_output_tensors(int node_idx) const override;
 
     virtual const std::string & get_op_type() const override;
 

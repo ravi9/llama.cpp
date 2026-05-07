@@ -984,15 +984,30 @@ ov::element::Type GgmlOvDecoder::get_ov_type(const ggml_tensor * tensor) {
 }
 
 ov::PartialShape GgmlOvDecoder::get_input_shape(int node_idx, const std::string & name) const {
-    return ov::PartialShape(get_shape(m_node_info_list[node_idx].node_inputs.at(name)));
+    auto& inputs = m_node_info_list[node_idx].node_inputs;
+    if (inputs.find(name) == inputs.end()) {
+        std::cerr << "\nCRASH CAUGHT: get_input_shape missing key: '" << name << "' on node " << node_idx << "\n";
+        return ov::PartialShape::dynamic(); 
+    }
+    return ov::PartialShape(get_shape(inputs.at(name)));
 }
 
 std::vector<size_t> GgmlOvDecoder::get_input_stride(int node_idx, const std::string & name) const {
-    return get_stride(m_node_info_list[node_idx].node_inputs.at(name));
+    auto& inputs = m_node_info_list[node_idx].node_inputs;
+    if (inputs.find(name) == inputs.end()) {
+        std::cerr << "\nCRASH CAUGHT: get_input_stride missing key: '" << name << "' on node " << node_idx << "\n";
+        return {}; 
+    }
+    return get_stride(inputs.at(name));
 }
 
 ov::element::Type GgmlOvDecoder::get_input_type(int node_idx, const std::string & name) const {
-    return get_ov_type(m_node_info_list[node_idx].node_inputs.at(name));
+    auto& inputs = m_node_info_list[node_idx].node_inputs;
+    if (inputs.find(name) == inputs.end()) {
+        std::cerr << "\nCRASH CAUGHT: get_input_type missing key: '" << name << "' on node " << node_idx << "\n";
+        return ov::element::dynamic;
+    }
+    return get_ov_type(inputs.at(name));
 }
 
 size_t GgmlOvDecoder::get_input_size() const {
@@ -1025,6 +1040,28 @@ std::vector<std::string> GgmlOvDecoder::get_output_names(int node_idx) const {
     return {m_node_info_list[node_idx].node_output_name};
 }
 
+// OUR NEW IMPLEMENTATIONS
+std::vector<const struct ggml_tensor*> GgmlOvDecoder::get_input_tensors(int node_idx) const {
+    const auto& info = m_node_info_list[node_idx];
+    std::vector<const struct ggml_tensor*> input_tensors;
+    input_tensors.reserve(info.node_inputs_names.size());
+    
+    for (const auto& name : info.node_inputs_names) {
+        // Safely get the pointer mapped by OpenVINO's strict port names
+        if (info.node_inputs.find(name) != info.node_inputs.end()) {
+            input_tensors.push_back(info.node_inputs.at(name));
+        } else {
+            input_tensors.push_back(nullptr); // Fallback flag
+        }
+    }
+    return input_tensors;
+}
+
+std::vector<const struct ggml_tensor*> GgmlOvDecoder::get_output_tensors(int node_idx) const {
+    // The output is simple: just return the raw node_output pointer wrapped in a vector.
+    return {m_node_info_list[node_idx].node_output};
+}
+
 const std::string & GgmlOvDecoder::get_op_name() const {
     static const std::string unknown_name = "UNKNOWN_OP_NAME";
     return unknown_name;
@@ -1043,7 +1080,12 @@ const std::string & GgmlOvDecoder::get_op_name(int node_idx) const {
 }
 
 int32_t * GgmlOvDecoder::get_input_op_params(int node_idx, const std::string & name) const {
-    return m_node_info_list[node_idx].node_inputs.at(name)->op_params;
+    auto& inputs = m_node_info_list[node_idx].node_inputs;
+    if (inputs.find(name) == inputs.end()) {
+        std::cerr << "\nCRASH CAUGHT: get_input_op_params missing key: '" << name << "' on node " << node_idx << "\n";
+        return nullptr;
+    }
+    return inputs.at(name)->op_params;
 }
 
 int32_t * GgmlOvDecoder::get_output_op_params(int node_idx) const {
@@ -1113,12 +1155,29 @@ std::string GgmlOvDecoder::compute_op_type(const ggml_tensor * node) {
     };
 
     switch (node->op) {
-    case GGML_OP_UNARY:
-        return unary_ops.at(ggml_get_unary_op(node));
-    case GGML_OP_GLU:
-        return glu_ops.at(ggml_get_glu_op(node));
-    default:
+    case GGML_OP_UNARY: {
+        auto uop = ggml_get_unary_op(node);
+        if (unary_ops.find(uop) == unary_ops.end()) {
+            std::cerr << "\n[GgmlOvDecoder] MISSING UNARY OP: " << uop << " (Node: " << node->name << ")\n";
+            return "UNKNOWN_GGML_OP";
+        }
+        return unary_ops.at(uop);
+    }
+    case GGML_OP_GLU: {
+        auto gop = ggml_get_glu_op(node);
+        if (glu_ops.find(gop) == glu_ops.end()) {
+            std::cerr << "\n[GgmlOvDecoder] MISSING GLU OP: " << gop << " (Node: " << node->name << ")\n";
+            return "UNKNOWN_GGML_OP";
+        }
+        return glu_ops.at(gop);
+    }
+    default: {
+        if (ops.find(node->op) == ops.end()) {
+            std::cerr << "\n[GgmlOvDecoder] CRASH PREVENTED: Missing GGML OP Code: " << node->op << " (Node: " << node->name << ")\n";
+            return "UNKNOWN_GGML_OP";
+        }
         return ops.at(node->op);
+    }
     }
     static const std::string unknown_op = "UNKNOWN_GGML_OP";
     return unknown_op;

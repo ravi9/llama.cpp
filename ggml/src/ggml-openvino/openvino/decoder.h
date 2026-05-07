@@ -6,6 +6,8 @@
 #include <openvino/frontend/decoder.hpp>
 #include <string>
 
+struct ggml_tensor;
+
 namespace ov {
 namespace frontend {
 namespace ggml {
@@ -33,6 +35,8 @@ public:
 
     virtual PartialShape get_output_shape(int node_idx) const = 0;
 
+    virtual std::vector<const struct ggml_tensor*> get_input_tensors(int node_idx) const = 0;
+
     virtual element::Type get_output_type(const int node_idx) const = 0;
 
     virtual std::vector<size_t> get_output_stride(int node_idx) const = 0;
@@ -44,6 +48,8 @@ public:
     virtual size_t get_output_op_offset(int node_idx) const = 0;
 
     virtual std::vector<std::string> get_output_names(int node_idx) const = 0;
+
+    virtual std::vector<const struct ggml_tensor*> get_output_tensors(int node_idx) const = 0;
 
     virtual const std::string& get_op_type() const = 0;
 

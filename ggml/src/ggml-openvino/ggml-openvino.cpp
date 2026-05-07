@@ -623,8 +623,18 @@ static const char * ggml_backend_openvino_get_name(ggml_backend_t backend) {
 }
 
 static enum ggml_status ggml_backend_openvino_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
+    // 1. Grab our internal context
+    auto& config = ggml_openvino_get_device_config();
+
+    // 2. --- OPENVINO GENAI TRACER INTERCEPTION ---
+    if (config.is_capturing) {
+        config.captured_graph = cgraph;
+        return GGML_STATUS_SUCCESS; 
+    }
+    // ---------------------------------------------
+
+    // 3. Normal execution path (if we are NOT capturing)
     return ov_graph_compute(cgraph, backend);
-    GGML_UNUSED(backend);
 }
 
 static const ggml_backend_i ggml_backend_openvino_interface = {
@@ -755,6 +765,11 @@ static void ggml_backend_openvino_device_get_props(ggml_backend_dev_t dev, ggml_
         /* .buffer_from_host_ptr  = */ false,
         /* .events                = */ false,
     };
+
+    if (ggml_openvino_get_device_config().is_capturing) {
+        props->caps.host_buffer = true;
+        props->caps.buffer_from_host_ptr = true;
+    }
 }
 
 static ggml_backend_t ggml_backend_openvino_device_init(ggml_backend_dev_t dev, const char * params) {
@@ -939,8 +954,18 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
     return false;
 }
 
+extern bool g_ov_bypass_mode;
+
 static bool ggml_backend_openvino_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
     GGML_ASSERT(dev->reg != nullptr);
+
+    if (g_ov_bypass_mode) {
+        return false; 
+    }
+
+    if (ggml_openvino_get_device_config().is_capturing) {
+        return true;
+    }
 
     static std::set<ggml_type> supported_types{GGML_TYPE_F32,  GGML_TYPE_F16,  GGML_TYPE_BF16, GGML_TYPE_I64,
                                                GGML_TYPE_I32,  GGML_TYPE_Q4_0, GGML_TYPE_Q4_1, GGML_TYPE_Q4_K,
@@ -1035,6 +1060,10 @@ static bool ggml_backend_openvino_device_supports_op(ggml_backend_dev_t dev, con
 }
 
 static bool ggml_backend_openvino_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
+
+    if (ggml_openvino_get_device_config().is_capturing) {
+        return true;
+    }
     return ggml_backend_buft_is_openvino(buft) || ggml_backend_buft_is_host(buft);
     GGML_UNUSED(dev);
 }
@@ -1125,4 +1154,24 @@ GGML_BACKEND_API ggml_backend_reg_t ggml_backend_openvino_reg(void) {
     }
 
     return &reg;
+}
+
+void ggml_backend_ov_set_capture_mode(bool enable) {
+    auto& config = ggml_openvino_get_device_config();
+    config.is_capturing = enable;
+    if (enable) {
+        config.captured_graph = nullptr;
+    }
+}
+
+struct ggml_cgraph * ggml_backend_ov_get_captured_graph() {
+    return ggml_openvino_get_device_config().captured_graph;
+}
+
+// phase-1 temporary bypass system for ov::model verification
+
+bool g_ov_bypass_mode = false; // The global kill switch
+
+void ggml_backend_ov_set_bypass(bool bypass) {
+    g_ov_bypass_mode = bypass;
 }

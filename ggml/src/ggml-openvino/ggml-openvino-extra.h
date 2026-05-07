@@ -66,6 +66,9 @@ struct ggml_openvino_device_config {
     ov::AnyMap compile_config;
     cl_command_queue cl_queue = nullptr;
 
+    bool is_capturing = false;
+    struct ggml_cgraph * captured_graph = nullptr;
+
     void init();
     ~ggml_openvino_device_config();
 };
@@ -178,5 +181,22 @@ struct ggml_backend_openvino_context {
 
     std::shared_ptr<void> runtime_context = nullptr;
 
+    bool is_capturing = false;
+    struct ggml_cgraph * captured_graph = nullptr;
+
     ggml_backend_openvino_context() = default;
 };
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void ggml_backend_ov_set_capture_mode(bool enable);
+struct ggml_cgraph * ggml_backend_ov_get_captured_graph();
+
+// maths bypass (temporary)
+void ggml_backend_ov_set_bypass(bool bypass);
+
+#ifdef __cplusplus
+}
+#endif
