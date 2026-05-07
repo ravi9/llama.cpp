@@ -19,6 +19,7 @@ namespace op {
 
 OutputVector translate_reshape(const NodeContext & context) {
     num_inputs_check(context, 1, 1);
+
     if (context.get_input_shape(0) == context.get_output_shape()) {
         return {context.get_input(0)};
     }
@@ -38,7 +39,7 @@ OutputVector translate_reshape(const NodeContext & context) {
         } else {
             new_shape_node = ov::op::v0::Constant::create(
                 ov::element::i64, {4},
-                std::vector<int64_t>{(int64_t) output_shape[0], -1, (int64_t) output_shape[2], (int64_t) output_shape[3]});
+                std::vector<int64_t>{0, -1, (int64_t) output_shape[2], (int64_t) output_shape[3]});
         }
     } else if (op_case == 2) {
         new_shape_node = ov::op::v0::Constant::create(
@@ -79,7 +80,7 @@ OutputVector translate_reshape(const NodeContext & context) {
     } else if (op_case == 6) {
         new_shape_node = ov::op::v0::Constant::create(ov::element::i64, {4}, context.get_output_shape().to_shape());
     }
-    auto res = std::make_shared<ov::op::v1::Reshape>(context.get_input(0), new_shape_node, false);
+    auto res = std::make_shared<ov::op::v1::Reshape>(context.get_input(0), new_shape_node, true);
     return rename_outputs_with_suffix({res}, context.get_name());
 }
 
