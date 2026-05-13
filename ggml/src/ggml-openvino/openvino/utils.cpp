@@ -492,6 +492,48 @@ ov::Output<ov::Node> process_view_input_new(const NodeContext & context, int inp
                              view_stride.size() == view_ggml_shape.size();
             const size_t relative_offset = view_offset >= view_src_offset ? view_offset - view_src_offset : 0;
 
+            if (same_rank) {
+                const size_t ndims = view_ggml_shape.size();
+                std::vector<int> diff_dims;
+                for (size_t i = 0; i < ndims; ++i) {
+                    if (view_ggml_shape[i] != view_src_ggml_shape[i]) {
+                        diff_dims.push_back(static_cast<int>(i));
+                    }
+                }
+
+                if (diff_dims.size() == 1) {
+                    const size_t slice_dim = static_cast<size_t>(diff_dims[0]);
+                    bool suffix_stride_match = true;
+                    for (size_t i = slice_dim + 1; i < ndims; ++i) {
+                        if (view_stride[i] != view_src_stride[i]) {
+                            suffix_stride_match = false;
+                            break;
+                        }
+                    }
+
+                    if (suffix_stride_match && view_src_stride[slice_dim] > 0 &&
+                        relative_offset % view_src_stride[slice_dim] == 0) {
+                        const int64_t begin_val = static_cast<int64_t>(relative_offset / view_src_stride[slice_dim]);
+                        const int64_t end_val = begin_val + static_cast<int64_t>(view_ggml_shape[slice_dim]);
+                        const int64_t dim_size = static_cast<int64_t>(view_src_ggml_shape[slice_dim]);
+
+                        if (begin_val >= 0 && end_val <= dim_size) {
+                            auto sliced = std::make_shared<ov::op::v8::Slice>(
+                                current,
+                                ov::op::v0::Constant::create(ov::element::i64, {1}, {begin_val}),
+                                ov::op::v0::Constant::create(ov::element::i64, {1}, {end_val}),
+                                ov::op::v0::Constant::create(ov::element::i64, {1}, {1}),
+                                ov::op::v0::Constant::create(
+                                    ov::element::i64,
+                                    {1},
+                                    {static_cast<int64_t>(slice_dim)}));
+                            sliced->set_friendly_name(view_name);
+                            return sliced;
+                        }
+                    }
+                }
+            }
+
             size_t view_elems = 1;
             size_t src_elems = 1;
             if (same_rank) {
@@ -515,6 +557,62 @@ ov::Output<ov::Node> process_view_input_new(const NodeContext & context, int inp
 
             if (same_rank) {
                 const size_t ndims = view_ggml_shape.size();
+
+                // Match views that can be expressed as a regular strided slice over the
+                // already reconstructed source tensor, e.g. offset on one axis plus step > 1
+                // on another axis.
+                bool is_regular_slice = view_src_ggml_shape.size() == ndims;
+                std::vector<int64_t> begin(ndims, 0);
+                std::vector<int64_t> end(ndims, 0);
+                std::vector<int64_t> step(ndims, 1);
+                std::vector<int64_t> axes(ndims, 0);
+                size_t remaining_offset = relative_offset;
+
+                if (is_regular_slice) {
+                    for (size_t i = 0; i < ndims; ++i) {
+                        axes[i] = static_cast<int64_t>(i);
+
+                        if (view_src_stride[i] == 0 || view_stride[i] == 0 ||
+                            view_stride[i] % view_src_stride[i] != 0) {
+                            is_regular_slice = false;
+                            break;
+                        }
+
+                        step[i] = static_cast<int64_t>(view_stride[i] / view_src_stride[i]);
+                        if (step[i] <= 0) {
+                            is_regular_slice = false;
+                            break;
+                        }
+
+                        begin[i] = static_cast<int64_t>(remaining_offset / view_src_stride[i]);
+                        remaining_offset %= view_src_stride[i];
+
+                        if (view_ggml_shape[i] == 0) {
+                            end[i] = begin[i];
+                            continue;
+                        }
+
+                        end[i] = begin[i] + step[i] * static_cast<int64_t>(view_ggml_shape[i] - 1) + 1;
+
+                        if (begin[i] < 0 || end[i] > static_cast<int64_t>(view_src_ggml_shape[i])) {
+                            is_regular_slice = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (is_regular_slice && remaining_offset == 0) {
+                    auto sliced = std::make_shared<ov::op::v8::Slice>(
+                        current,
+                        ov::op::v0::Constant::create(ov::element::i64, {ndims}, begin),
+                        ov::op::v0::Constant::create(ov::element::i64, {ndims}, end),
+                        ov::op::v0::Constant::create(ov::element::i64, {ndims}, step),
+                        ov::op::v0::Constant::create(ov::element::i64, {ndims}, axes));
+
+                    sliced->set_friendly_name(view_name);
+                    return sliced;
+                }
+
                 const size_t elem_stride = view_src_stride.back();
                 const bool aligned_offset = elem_stride > 0 && relative_offset % elem_stride == 0;
 
