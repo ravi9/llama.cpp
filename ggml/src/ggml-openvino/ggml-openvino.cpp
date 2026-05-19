@@ -1021,6 +1021,10 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
         //     // CVS-186471
         //     return true;
         // }
+        if (ggml_openvino_get_device_name() == "GPU") {
+            // enable after https://github.com/openvinotoolkit/openvino/pull/35917 is included in OV release
+            return true;
+        }
         if (op->src[0]->op == GGML_OP_PERMUTE) {
             return true;
         }
