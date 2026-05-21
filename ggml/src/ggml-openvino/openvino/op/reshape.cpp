@@ -25,9 +25,6 @@ OutputVector translate_reshape(const NodeContext & context) {
     }
 
     int op_case = context.get_op_case();
-    FRONT_END_CHECK_IMPLEMENTED(
-        op_case == 1 || op_case == 2 || op_case == 3 || op_case == 4 || op_case == 5 || op_case == 6,
-        "Unsupported RESHAPE case");
 
     auto output_shape = context.get_output_shape().to_shape();
     std::shared_ptr<ov::Node> new_shape_node;
@@ -79,6 +76,8 @@ OutputVector translate_reshape(const NodeContext & context) {
 
     } else if (op_case == 6) {
         new_shape_node = ov::op::v0::Constant::create(ov::element::i64, {4}, context.get_output_shape().to_shape());
+    } else if (op_case == 7) {
+        return {context.get_input(0)};
     }
     auto res = std::make_shared<ov::op::v1::Reshape>(context.get_input(0), new_shape_node, false);
     return rename_outputs_with_suffix({res}, context.get_name());

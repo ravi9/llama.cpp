@@ -9,6 +9,8 @@
 #include <openvino/op/multiply.hpp>
 #include <openvino/op/power.hpp>
 #include <openvino/op/reduce_mean.hpp>
+#include <openvino/op/reshape.hpp>
+#include <openvino/op/slice.hpp>
 #include <openvino/op/sqrt.hpp>
 
 namespace ov {
@@ -19,7 +21,29 @@ namespace op {
 OutputVector translate_rms_norm(const NodeContext & context) {
     num_inputs_check(context, 1, 1);
 
-    auto input_node = process_view_input_new(context, 0);
+    auto op_case = context.get_op_case();
+
+    ov::Output<ov::Node> input_node;
+    if (op_case == 1) {
+        input_node = context.get_input(0);
+    } else if (op_case == 2) {
+        auto ssm_state_size = context.get_ssm_state_size();
+        auto gdn_attn_output = std::make_shared<ov::op::v8::Slice>(
+            context.get_input(0), ov::op::v0::Constant::create(ov::element::i64, {1}, {0}),
+            ov::op::v0::Constant::create(ov::element::i64, {1}, {-ssm_state_size}),
+            ov::op::v0::Constant::create(ov::element::i64, {1}, {1}),
+            ov::op::v0::Constant::create(ov::element::i64, {1}, {2}));
+
+        auto input_shape = context.get_input_shape(0).to_shape();
+        input_node = std::make_shared<ov::op::v1::Reshape>(
+            gdn_attn_output,
+            ov::op::v0::Constant::create(
+                ov::element::i64, {4}, std::vector<int64_t>{1, -1, (int64_t) input_shape[2], (int64_t) input_shape[3]}),
+            false);
+
+    } else {
+        input_node = process_view_input_new(context, 0);
+    }
     auto square = std::make_shared<ov::op::v1::Power>(
         input_node, ov::op::v0::Constant::create(ov::element::f32, ov::Shape{1}, {2.0f}));
 
