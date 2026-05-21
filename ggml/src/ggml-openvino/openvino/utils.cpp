@@ -234,23 +234,30 @@ std::pair<ov::Output<Node>, ov::Output<Node>> make_sin_cos(int32_t * rope_params
     return std::make_pair(sin_theta, cos_theta);
 }
 
-ov::Output<ov::Node> process_view_input(const NodeContext & context, int input_index, int slice_len) {
-    // Only works for VIEW operations that slice at the lowest dimension
-    // If the VIEW also reshape the result, `slice_len` should be provided
+ov::Output<ov::Node> process_view_input(const NodeContext & context, int input_index, int slice_len, int axis) {
+    // Only works for VIEW operations that does a non-strided slice with optinal reshape on the slice result.
+    // The function only does the slice part, the reshape (if any) should be handled by the caller.
+    // Default axis is -1, which means slicing the last dimension.
+    // If the VIEW reshapes the result, `slice_len` should be provided
     auto input = context.get_input(input_index);
     auto * op_params = (size_t *) context.get_input_op_params(input_index);
-    auto src1_stride = context.get_input_stride(input_index);
+    auto src_stride = context.get_input_stride(input_index);
 
-    int64_t split_addr = op_params[0] / src1_stride[3];
+    int64_t slice_start = op_params[0] / src_stride[3];
     if (slice_len == 0) {
         slice_len = context.get_input_shape(input_index)[3].get_length();
     }
-    int64_t slice_end = split_addr + slice_len;
+    int64_t slice_end = slice_start + slice_len;
 
-    auto begin = ov::op::v0::Constant::create(ov::element::i64, {1}, {split_addr});
+    auto begin = ov::op::v0::Constant::create(ov::element::i64, {1}, {slice_start});
     auto end = ov::op::v0::Constant::create(ov::element::i64, {1}, {slice_end});
     auto stride = ov::op::v0::Constant::create(ov::element::i64, {1}, {1});
-    auto axes = ov::op::v0::Constant::create(ov::element::i64, {1}, {context.is_stateful() ? 2 : 3});
+    ov::Output<ov::Node> axes;
+    if (axis == -1) {
+        axes = ov::op::v0::Constant::create(ov::element::i64, {1}, {context.is_stateful() ? 2 : 3});
+    } else {
+        axes = ov::op::v0::Constant::create(ov::element::i64, {1}, {axis});
+    }
     auto sliced = std::make_shared<ov::op::v8::Slice>(input, begin, end, stride, axes);
     return sliced;
 }

@@ -919,6 +919,23 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
         }
         break;
     }
+    case GGML_OP_SET: {
+        const auto nb1 = static_cast<size_t>(op->op_params[0]);
+        const auto nb2 = static_cast<size_t>(op->op_params[1]);
+        const auto nb3 = static_cast<size_t>(op->op_params[2]);
+
+        // OpenVINO SET translation currently supports dst layouts that match src0 strides.
+        if (op->src[0] == nullptr || nb1 != op->src[0]->nb[1] || nb2 != op->src[0]->nb[2] || nb3 != op->src[0]->nb[3]) {
+            // std::cout << "Unsupported SET op with dst nb1=" << nb1 << ", nb2=" << nb2 << ", nb3=" << nb3
+            //           << " that does not match src0 strides nb[1]="
+            //           << (op->src[0] != nullptr ? std::to_string(op->src[0]->nb[1]) : "null")
+            //           << ", nb[2]=" << (op->src[0] != nullptr ? std::to_string(op->src[0]->nb[2]) : "null")
+            //           << ", nb[3]=" << (op->src[0] != nullptr ? std::to_string(op->src[0]->nb[3]) : "null")
+            //           << std::endl;
+            return true;
+        }
+        break;
+    }
     case GGML_OP_GET_ROWS:
     case GGML_OP_SET_ROWS: {
         if (op->ne[3] != 1) {
@@ -1021,6 +1038,9 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
             // GGML_LOG_WARN("OpenVINO backend does not support CPY with non-contiguous data or bf16 types\n");
             return true;
         }
+        if (ggml_nelements(op->src[0]) != ggml_nelements(op->src[1])) {
+            return true;
+        }
         // op test case with non-contiguous src or dst
         if ((op->ne[0] == 3 && op->ne[1] == 4 && op->ne[2] == 3 && op->ne[3] == 2) ||
             (op->ne[0] == 1 && op->ne[1] == 4 && op->ne[2] == 3 && op->ne[3] == 2) ||
@@ -1056,8 +1076,10 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
             // GGML_LOG_WARN("OpenVINO backend does not support ROPE with mode %d\n", mode);
             return true;
         }
-        if (n_dims != 0.0f && n_dims != op->src[0]->ne[0]) {
-            // GGML_LOG_WARN("OpenVINO backend does not support ROPE with n_dims %d != src[0]->ne[0] %ld\n", n_dims,
+        const int64_t head_dim = op->src[0]->ne[0];
+        const int64_t rope_dims = n_dims == 0 ? head_dim : n_dims;
+        if (rope_dims <= 0 || rope_dims > head_dim || (rope_dims % 2) != 0) {
+            // GGML_LOG_WARN("OpenVINO backend does not support ROPE with n_dims %d and src[0]->ne[0] %ld\n", n_dims,
             //               op->src[0]->ne[0]);
             return true;
         }
@@ -1092,7 +1114,7 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
     }
     case GGML_OP_GATED_DELTA_NET: {
         // enable after https://github.com/openvinotoolkit/openvino/pull/35917 is included in OV release
-        return true;
+        // return true;
         // if (ggml_openvino_get_device_name() == "GPU" && op->src[0]->ne[2] > 1) {
         //     // CVS-186471
         //     return true;
@@ -1110,7 +1132,7 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
             return true;
         }
         // K > 1 (multiple state snapshots) not supported by fused op
-        if (op->src[5]->ne[1] > 1) {
+        if (op->src[5]->ne[3] > 1) {
             return true;
         }
         break;
@@ -1118,7 +1140,8 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
     case GGML_OP_SSM_CONV: {
         // qwen3next is numerically unstable with OpenVINO SSM_CONV.
         // Keep this op on CPU until the OpenVINO implementation is fixed.
-        return true;
+        // return true;
+        break;
     }
     case GGML_OP_VIEW: {
         // Skip TOPK_MOE fused tests until it is fully supported.
@@ -1212,14 +1235,9 @@ static bool ggml_backend_openvino_device_supports_op(ggml_backend_dev_t dev, con
             // GGML_LOG_WARN("OpenVINO backend does not support op %s\n", ggml_op_name(op->op));
             return false;
         }
-        static std::set<ggml_op> ops_not_support_view_input{
-            GGML_OP_L2_NORM,
-        };
+        static std::set<ggml_op> ops_not_support_view_input{};
         if (ops_not_support_view_input.find(op->op) != ops_not_support_view_input.end() && has_view_op_input(op)) {
             // GGML_LOG_WARN("OpenVINO backend does not support op %s with view input\n", ggml_op_name(op->op));
-            return false;
-        }
-        if (op->op == GGML_OP_RMS_NORM && has_non_contiguous_view_input(op)) {
             return false;
         }
     }
