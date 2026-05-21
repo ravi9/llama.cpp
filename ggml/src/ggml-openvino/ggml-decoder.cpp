@@ -1131,7 +1131,7 @@ ov::PartialShape GgmlOvDecoder::get_view_input_ov_shape(int node_idx, const std:
             if (dynamic_it != m_node_dynamic_dims.end() && dynamic_it->second != -1) {
                 int dynamic_dim_index = dynamic_it->second;
                 // GGML uses reverse indexing, so convert to OpenVINO indexing
-                shape[3 - dynamic_dim_index] = -1;
+                shape[3 - dynamic_dim_index] = m_is_static ? get_static_n_tokens() : -1;
             }
 
             return shape;
@@ -1154,7 +1154,7 @@ ov::PartialShape GgmlOvDecoder::get_view_input_src_ov_shape(int node_idx, const 
                 if (dynamic_it != m_node_dynamic_dims.end() && dynamic_it->second != -1) {
                     int dynamic_dim_index = dynamic_it->second;
                     // GGML uses reverse indexing, so convert to OpenVINO indexing
-                    shape[3 - dynamic_dim_index] = -1;
+                    shape[3 - dynamic_dim_index] = m_is_static ? get_static_n_tokens() : -1;
                 }
 
                 return shape;
