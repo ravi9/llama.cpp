@@ -171,7 +171,9 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
     static auto is_static = false;
 
     if (is_naive(cgraph)) {
-        return naive_compute(cgraph, core, device, config);
+        if (!is_model_splitted(cgraph)) {
+            return naive_compute(cgraph, core, device, config);
+        }
     }
 
     auto start_time = ggml_time_us();
