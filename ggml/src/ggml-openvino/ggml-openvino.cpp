@@ -1042,14 +1042,12 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
         break;
     }
     case GGML_OP_GATED_DELTA_NET: {
+        // enable after https://github.com/openvinotoolkit/openvino/pull/35917 is included in OV release
+        return true;
         // if (ggml_openvino_get_device_name() == "GPU" && op->src[0]->ne[2] > 1) {
         //     // CVS-186471
         //     return true;
         // }
-        if (ggml_openvino_get_device_name() == "GPU") {
-            // enable after https://github.com/openvinotoolkit/openvino/pull/35917 is included in OV release
-            return true;
-        }
         if (op->src[2]->op == GGML_OP_PERMUTE) {
             return true;
         }
