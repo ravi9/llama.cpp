@@ -20,6 +20,7 @@ struct ModelParams {
     int n_seq = 1;
     int n_heads_kv = -1;
     int head_size = -1;
+    int state_size = -1;  // for SSM molels, eg qwen35
     int32_t rope_params[15];
     bool mixed_rope_params = false;
     std::vector<int> swa_layers;
@@ -189,7 +190,7 @@ public:
         return m_model_weights;
     }
 
-    virtual std::vector<std::string> get_model_output_names() const override { return m_model_output_names; }
+    virtual std::set<std::string> get_model_output_names() const override { return m_model_output_names; }
 
     const std::map<std::string, ggml_tensor *> & get_model_outputs() const { return m_model_outputs; }
 
@@ -213,6 +214,8 @@ public:
     virtual int32_t * get_rope_params() const override { return const_cast<int32_t *>(m_model_params.rope_params); }
 
     virtual bool has_mixed_rope_params() const override { return m_model_params.mixed_rope_params; }
+
+    virtual int get_ssm_state_size() const override { return m_model_params.state_size; }
 
     virtual std::map<std::string, std::string> get_kv_param_res_names() const override;
 
@@ -287,6 +290,7 @@ public:
         return op->op == GGML_OP_ROPE && tensor == op->src[2];
     }
 
+    // also returns true for cache_s and cache_r in SSM/DeltaNet models
     inline static bool is_kvcache(const ggml_tensor * tensor, const ggml_tensor * op) {
         return tensor->buffer->usage == GGML_BACKEND_BUFFER_USAGE_ANY ||
                (op != nullptr && op->op == GGML_OP_SET_ROWS && op->src[2] == tensor);
@@ -334,7 +338,7 @@ private:
     std::map<std::string, std::shared_ptr<ov::Tensor>> m_model_extra_input_values;
     std::map<std::string, std::shared_ptr<ov::Node>> m_model_weights;
     std::map<std::string, ggml_tensor *> m_model_outputs;
-    std::vector<std::string> m_model_output_names;
+    std::set<std::string> m_model_output_names;
     std::vector<NodeInfo> m_node_info_list;
     std::map<ggml_tensor *, int> m_node_dynamic_dims;
 
