@@ -1467,8 +1467,8 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
                 }
                 if (m_node_dynamic_dims[node] != -1 && dynamic_dim_value != node->ne[m_node_dynamic_dims[node]]) {
                     m_node_dynamic_dims[node] = -1;
-                    // std::cout << "Warning: Dynamic dim value mismatch for node: " << node->name
-                    //           << " and its src[0]: " << node->src[0]->name << std::endl;
+                    GGML_LOG_WARN("ggml-openvino: dynamic dim value mismatch for VIEW node '%s', src[0]: '%s'\n",
+                                  node->name, node->src[0]->name);
                 }
             }
             break;
@@ -1492,7 +1492,7 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
                     }
                 }
                 if (m_node_dynamic_dims[node] == -1) {
-                    // std::cout << "Cannot determine dynamic dim for RESHAPE node: " << node->name << std::endl;
+                    GGML_LOG_WARN("ggml-openvino: cannot determine dynamic dim for RESHAPE node '%s'\n", node->name);
                 }
             }
             break;
@@ -1543,13 +1543,25 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
                     }
                     if (matched_dim_count != 1) {
                         m_node_dynamic_dims[node] = -1;
-                        // std::cout << "Warning: Cannot determine dynamic dim for CONT node: " << node->name
-                        //           << " and its src[0]: " << node->src[0]->name << std::endl;
+                        GGML_LOG_WARN("ggml-openvino: cannot determine dynamic dim for CONT node '%s', src[0]: '%s'\n",
+                                      node->name, node->src[0]->name);
                     }
                 }
             }
             break;
+        case GGML_OP_CONCAT:
+            for (int i = 0; i < GGML_MAX_DIMS; i++) {
+                if (node->src[0]->ne[i] != node->ne[i]) {
+                    m_node_dynamic_dims[node] = i;
+                    break;
+                }
+            }
+            break;
+        case GGML_OP_SSM_CONV:
+            m_node_dynamic_dims[node] = 1;
+            break;
         case GGML_OP_RMS_NORM:
+        case GGML_OP_L2_NORM:
         case GGML_OP_NORM:
         case GGML_OP_ADD:
         case GGML_OP_GLU:
@@ -1597,7 +1609,8 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
             break;
         }
         default:
-            // std::cout << "Doesn't handle node name: " << node->name << " op: " << ggml_op_name(node->op) << std::endl;
+            GGML_LOG_DEBUG("ggml-openvino: compute_node_dynamic_dims: unhandled op %s for node '%s'\n",
+                           ggml_op_name(node->op), node->name);
             break;
         }
     };
