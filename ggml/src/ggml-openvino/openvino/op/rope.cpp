@@ -219,18 +219,6 @@ OutputVector translate_rope(const NodeContext & context) {
     //         ov::element::i64, {4}, std::vector<int64_t>{1, -1, (int64_t) output_shape[2], (int64_t) output_shape[3]});
     //     res = std::make_shared<ov::op::v1::Reshape>(stack, data_shape, false);
     else if (mode == TYPE_NEOX) {
-        // In stateful mode the data arrives rank-3 ([S, n_heads, head_size]) while the
-        // cos/sin tables are rank-4 ([1, S, 1, n_dims/2]). The resulting mixed-rank
-        // broadcast in the Multiply below is miscomputed by the OpenVINO GPU plugin,
-        // corrupting the rotated Q/K. Lift the data to rank-4 ([1, S, n_heads, head_size])
-        // first so the RoPE Multiplies are equal-rank, matching the TYPE_NORMAL branch.
-        // Stateful RoPE already produced rank-4 output, so downstream attention is unaffected.
-        if (context.is_stateful()) {
-            auto r4_shape = ov::op::v0::Constant::create(
-                ov::element::i64, {4},
-                std::vector<int64_t>{1, -1, (int64_t) output_shape[2], (int64_t) output_shape[3]});
-            data_node = std::make_shared<ov::op::v1::Reshape>(data_node, r4_shape, false);
-        }
         auto axis_last = ov::op::v0::Constant::create(ov::element::i64, ov::Shape{}, {-1});
         std::vector<int64_t> split_lengths = {n_dims / 2, n_dims / 2};
         if (n_dims < head_dim) {

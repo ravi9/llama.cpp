@@ -113,96 +113,7 @@ bool is_same_shape(const ggml_tensor * a, const ggml_tensor * b) {
     }
     return true;
 }
-
-bool is_conv_states_all_tensor(const ggml_tensor * tensor) {
-    return tensor != nullptr && strncmp(tensor->name, "conv_states_all", strlen("conv_states_all")) == 0;
-}
-
-// CPY writing the tail of conv_input (the concat of the previous conv state and the new tokens)
-// back into a slot block of the recurrent state cache. Detected structurally because the rollback
-// variant (cparams.n_rs_seq > 0) emits one such CPY per snapshot slot without naming them.
-bool is_conv_state_writeback(const ggml_tensor * node) {
-    return node->op == GGML_OP_CPY && node->view_src != nullptr && GgmlOvDecoder::is_kvcache(node->view_src, nullptr) &&
-           node->src[0] != nullptr && node->src[0]->op == GGML_OP_VIEW && node->src[0]->src[0] != nullptr &&
-           node->src[0]->src[0]->op == GGML_OP_CONCAT && node->src[1] != nullptr && node->src[1]->op == GGML_OP_VIEW &&
-           node->src[1]->view_src == node->view_src;
-}
-
-// MoE expert aggregation (build_moe_ffn in llama-graph.cpp): each expert plane is
-// `ggml_view_2d(experts, n_embd, n_tokens, experts->nb[2], i*experts->nb[1])` and the planes
-// are summed with a chain of ADDs: moe_out = ((view_0 + view_1) + view_2) + ... + view_{n-1}.
-// Detected structurally by walking the ADD chain and checking every leaf is a same-shape,
-// same-stride VIEW of one common base tensor, indexed by a distinct expert-plane offset, and
-// that the chain covers every plane of that base (leaf count == base->ne[1]). Only the
-// outermost ADD of the chain satisfies this (inner ADDs see fewer leaves than base->ne[1]).
-bool is_moe_expert_sum_add(const ggml_tensor * node) {
-    std::vector<const ggml_tensor *> leaves;
-    const ggml_tensor * cur = node;
-    while (cur->op == GGML_OP_ADD) {
-        if (cur->src[0] == nullptr || cur->src[1] == nullptr) {
-            return false;
-        }
-        leaves.push_back(cur->src[1]);
-        cur = cur->src[0];
-    }
-    leaves.push_back(cur);
-
-    const ggml_tensor * base = nullptr;
-    std::set<int64_t> plane_indices;
-    for (const ggml_tensor * leaf : leaves) {
-        if (leaf->op != GGML_OP_VIEW || leaf->src[0] == nullptr) {
-            return false;
-        }
-        const ggml_tensor * leaf_base = leaf->src[0];
-        if (base == nullptr) {
-            base = leaf_base;
-        } else if (leaf_base != base) {
-            return false;
-        }
-        if (leaf->ne[0] != base->ne[0] || leaf->ne[1] != base->ne[2] || leaf->ne[2] != 1 || leaf->ne[3] != 1 ||
-            leaf->nb[1] != base->nb[2]) {
-            return false;
-        }
-        if (base->nb[1] == 0 || leaf->view_offs % base->nb[1] != 0) {
-            return false;
-        }
-        int64_t plane = static_cast<int64_t>(leaf->view_offs / base->nb[1]);
-        if (plane < 0 || plane >= base->ne[1] || !plane_indices.insert(plane).second) {
-            return false;
-        }
-    }
-
-    return base != nullptr && base->ne[1] > 1 && plane_indices.size() == static_cast<size_t>(base->ne[1]);
-}
 }  // namespace
-
-static std::string get_tensor_ov_name(const ggml_cgraph * cgraph, const ggml_tensor * tensor) {
-    if (tensor == nullptr) {
-        return "";
-    }
-    const size_t hash_pos = ggml_hash_find(&cgraph->visited_hash_set, tensor);
-    if (((tensor->flags & GGML_TENSOR_FLAG_COMPUTE) || GgmlOvDecoder::is_kvcache(tensor, nullptr)) &&
-        hash_pos != GGML_HASHSET_FULL && ggml_bitset_get(cgraph->visited_hash_set.used, hash_pos)) {
-        return std::string(tensor->name) + "#" + std::to_string(hash_pos);
-    }
-    return tensor->name;
-}
-
-static std::string get_tensor_graph_input_ov_name(const GgmlOvDecoder * decoder,
-                                                  const ggml_cgraph * cgraph,
-                                                  const ggml_tensor * tensor,
-                                                  const ggml_tensor * op) {
-    if (GgmlOvDecoder::is_inp_pos(tensor, op)) {
-        return "inp_pos";
-    }
-    if (GgmlOvDecoder::is_inp_emb(tensor, op)) {
-        return "embd";
-    }
-    if (decoder->is_stateful() && GgmlOvDecoder::is_inp_mask(tensor, op)) {
-        return std::string(tensor->name).find("swa") == std::string::npos ? "self_kq_mask" : "self_kq_mask_swa";
-    }
-    return get_tensor_ov_name(cgraph, tensor);
-}
 
 void GgmlOvDecoder::set_input_output() {
     for (int node_n = 0; node_n < m_cgraph->n_nodes; node_n++) {
@@ -262,6 +173,10 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
     case GGML_OP_RESHAPE: {
         auto name = std::string(node->name);
         auto * src = node->src[0];
+        if (is_same_shape(src, node)) {
+            op_case = 7;
+            break;
+        }
         if (src->op == GGML_OP_RESHAPE && src->src[0]->ne[0] == node->ne[0] && src->src[0]->ne[1] == node->ne[1]) {
             op_case = 4;
         } else if (node->ne[0] * node->ne[1] == src->ne[0]) {
@@ -412,39 +327,10 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         if (node->src[0]->op == GGML_OP_VIEW) {
             if (node->src[0]->src[0]->op == GGML_OP_GATED_DELTA_NET) {
                 op_case = 1;
-            } else if (is_conv_state_writeback(node)) {
+            } else if (std::string(node->src[0]->name).find("conv_state_last") == 0) {
                 op_case = 2;
                 break;
-            } else if (is_conv_states_all_tensor(node->view_src) && node->src[1] != nullptr &&
-                       node->src[1]->op == GGML_OP_VIEW && node->src[1]->view_src == node->view_src) {
-                op_case = 4;
-                break;
             }
-        } else if (node->src[0]->op == GGML_OP_GET_ROWS && node->src[1] != nullptr &&
-                   node->src[1]->op == GGML_OP_VIEW && node->src[1]->view_src != nullptr &&
-                   is_kvcache(node->src[1]->view_src, nullptr)) {
-            // s_copy defrag remainder writeback: gathered extra state rows copied back into the cache
-            op_case = 3;
-        }
-        break;
-    }
-    case GGML_OP_ADD: {
-        if (is_moe_expert_sum_add(node)) {
-            // Outermost ADD of a MoE expert-plane sum chain: translated as a single
-            // ReduceSum over the base tensor instead of N-1 chained Adds over N Slices.
-            op_case = 1;
-        }
-        break;
-    }
-    case GGML_OP_SCALE: {
-        if (node->view_src && node->buffer->usage == GGML_BACKEND_BUFFER_USAGE_ANY) {
-            op_case = 1;
-        }
-        break;
-    }
-    case GGML_OP_L2_NORM: {
-        if (std::string(node->name).find("predelta") != std::string::npos) {
-            op_case = 1;
         }
         break;
     }
@@ -631,40 +517,6 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
         }
         if (node->op == GGML_OP_GATED_DELTA_NET) {
             model_params.state_size = node->src[0]->ne[0];
-        }
-        if (node->op == GGML_OP_SCALE && node->view_src != nullptr && is_kvcache(node->view_src, nullptr)) {
-            compute_params.cache_rs_reset_len = ggml_nelements(node) / node->view_src->ne[0];
-            compute_params.cache_rs_reset_idx = node->src[0]->view_offs / node->view_src->ne[0];
-        }
-        // Capture the destination slot block of every recurrent state cache writeback, plus the
-        // conv_input window the conv state writeback copies. The active sequences occupy a
-        // contiguous slot block [begin, begin + n_seqs) of the cache; the block and the window move
-        // with the batch, so they are fed to the cached model as runtime inputs.
-        if (node->op == GGML_OP_CPY && node->view_src != nullptr && is_kvcache(node->view_src, nullptr) &&
-            node->src[1] != nullptr && node->src[1]->op == GGML_OP_VIEW && node->src[1]->view_src == node->view_src) {
-            const bool is_conv = is_conv_state_writeback(node);
-            const bool is_gdn = node->src[0]->op == GGML_OP_VIEW && node->src[0]->src[0] != nullptr &&
-                                node->src[0]->src[0]->op == GGML_OP_GATED_DELTA_NET;
-            const bool is_extra = node->src[0]->op == GGML_OP_GET_ROWS;
-
-            const ggml_tensor * dest_view = node->src[1];
-            const ggml_tensor * cache = node->view_src;
-            const size_t row_bytes = cache->ne[0] * ggml_type_size(cache->type);
-            if (row_bytes > 0 && (is_conv || is_gdn || is_extra)) {
-                ComputeParams::RsWriteback writeback;
-                writeback.slot_begin = (int) (dest_view->view_offs / row_bytes);
-                if (is_conv) {
-                    // conv_input column the copied window starts at
-                    writeback.src_begin = (int) (node->src[0]->view_offs / node->src[0]->view_src->nb[0]);
-                } else if (is_gdn) {
-                    // first row of the state part of the gated-delta-net output
-                    writeback.src_begin = (int) (node->src[0]->view_offs / node->src[0]->view_src->nb[1]);
-                }
-                compute_params.rs_writebacks[get_tensor_ov_name(cgraph, node)] = writeback;
-            }
-            if (is_conv || is_gdn) {
-                compute_params.s_copy_active_slot_len = (int) dest_view->ne[1];
-            }
         }
     }
     auto * output_tensor = cgraph->nodes[cgraph->n_nodes - 1];
@@ -912,7 +764,7 @@ void GgmlOvDecoder::compute_model_outputs() {
         auto cur_node_use_count = m_cgraph->use_counts[ggml_hash_find(&m_cgraph->visited_hash_set, cur_node)];
         if (cur_node_use_count == 0) {
             // The output of in-place ops is the view_src tensor, which is updated in place. We should use the view_src name as the output name to make sure it can be correctly matched with the later ops that use the view_src.
-            if (cur_node != nullptr && ::is_inplace_op(cur_node) && ggml_nbytes(cur_node) > 0) {
+            if (cur_node != nullptr && is_inplace_op(cur_node)) {
                 cur_node = cur_node->view_src;
             }
         } else {
@@ -932,7 +784,7 @@ void GgmlOvDecoder::compute_model_outputs() {
         if (cur_node != nullptr) {
             std::string cur_node_name(cur_node->name);
             m_model_outputs[cur_node_name] = cur_node;
-            m_model_output_names.push_back(cur_node_name);
+            m_model_output_names.insert(cur_node_name);
         }
     }
 }
@@ -1816,15 +1668,6 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
         case GGML_OP_DIAG:
         case GGML_OP_TRI:
         case GGML_OP_REPEAT:
-        // Shape-preserving elementwise ops: the dynamic dim is unchanged from src[0].
-        // DIV/CLAMP are used in the MoE routing-weight normalization
-        // (sum_rows -> clamp -> div). If they are left untracked here the dynamic
-        // (token) dim is lost there, the captured prefill token count gets baked into
-        // the downstream reshapes, and every decoder layer after layer 0 turns static
-        // (which then triggers the GPU in-place-concat KV-cache corruption).
-        case GGML_OP_DIV:
-        case GGML_OP_CLAMP:
-        case GGML_OP_PAD:
             m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[0]];
             break;
         case GGML_OP_SUM_ROWS:

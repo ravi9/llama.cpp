@@ -26,23 +26,12 @@ OutputVector translate_rms_norm(const NodeContext & context) {
 
     ov::Output<ov::Node> input_node;
     if (op_case == 1) {
-        input_node = process_view_input_new(context, 0);
+        input_node = context.get_input(0);
     } else if (op_case == 2) {
         auto ssm_state_size = context.get_ssm_state_size();
-        // The GDN op packs [attn | new_state] along the row axis; the state occupies the last
-        // ssm_state_size * n_seqs rows. Slice it off (scaling by the active sequence count) to keep
-        // just the attention output.
-        ov::Output<ov::Node> state_end;
-        if (context.has_input("s_copy_active_slot_len")) {
-            auto len = context.get_input("s_copy_active_slot_len");
-            auto state_rows = std::make_shared<ov::op::v1::Multiply>(
-                ov::op::v0::Constant::create(ov::element::i64, {1}, {ssm_state_size}), len);
-            state_end = std::make_shared<ov::op::v0::Negative>(state_rows);
-        } else {
-            state_end = ov::op::v0::Constant::create(ov::element::i64, {1}, {-ssm_state_size});
-        }
         auto gdn_attn_output = std::make_shared<ov::op::v8::Slice>(
-            context.get_input(0), ov::op::v0::Constant::create(ov::element::i64, {1}, {0}), state_end,
+            context.get_input(0), ov::op::v0::Constant::create(ov::element::i64, {1}, {0}),
+            ov::op::v0::Constant::create(ov::element::i64, {1}, {-ssm_state_size}),
             ov::op::v0::Constant::create(ov::element::i64, {1}, {1}),
             ov::op::v0::Constant::create(ov::element::i64, {1}, {2}));
 
@@ -56,7 +45,8 @@ OutputVector translate_rms_norm(const NodeContext & context) {
     } else {
         input_node = process_view_input_new(context, 0);
     }
-    auto square = std::make_shared<ov::op::v1::Multiply>(input_node, input_node);
+    auto square = std::make_shared<ov::op::v1::Power>(
+        input_node, ov::op::v0::Constant::create(ov::element::f32, ov::Shape{1}, {2.0f}));
 
     auto mean = std::make_shared<ov::op::v1::ReduceMean>(
         square, ov::op::v0::Constant::create(ov::element::i64, ov::Shape{1}, {-1}), true);

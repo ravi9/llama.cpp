@@ -1063,6 +1063,23 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
         }
         break;
     }
+    case GGML_OP_SET: {
+        const auto nb1 = static_cast<size_t>(op->op_params[0]);
+        const auto nb2 = static_cast<size_t>(op->op_params[1]);
+        const auto nb3 = static_cast<size_t>(op->op_params[2]);
+
+        // OpenVINO SET translation currently supports dst layouts that match src0 strides.
+        if (op->src[0] == nullptr || nb1 != op->src[0]->nb[1] || nb2 != op->src[0]->nb[2] || nb3 != op->src[0]->nb[3]) {
+            // std::cout << "Unsupported SET op with dst nb1=" << nb1 << ", nb2=" << nb2 << ", nb3=" << nb3
+            //           << " that does not match src0 strides nb[1]="
+            //           << (op->src[0] != nullptr ? std::to_string(op->src[0]->nb[1]) : "null")
+            //           << ", nb[2]=" << (op->src[0] != nullptr ? std::to_string(op->src[0]->nb[2]) : "null")
+            //           << ", nb[3]=" << (op->src[0] != nullptr ? std::to_string(op->src[0]->nb[3]) : "null")
+            //           << std::endl;
+            return true;
+        }
+        break;
+    }
     case GGML_OP_GET_ROWS:
     case GGML_OP_SET_ROWS: {
         if (op->ne[3] != 1) {
@@ -1173,10 +1190,6 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
             // GGML_LOG_WARN("OpenVINO backend does not support CPY with non-contiguous data or bf16 types\n");
             return true;
         }
-        // CPY to a quantized destination (e.g. f32 -> q4_0) is numerically unstable with OpenVINO backend.
-        if (ggml_is_quantized(op->type)) {
-            return true;
-        }
         if (ggml_nelements(op->src[0]) != ggml_nelements(op->src[1])) {
             return true;
         }
@@ -1272,7 +1285,7 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
             return true;
         }
         // K > 1 (multiple state snapshots) not supported by fused op
-        if (((const int32_t *) op->op_params)[0] > 1) {
+        if (op->src[5]->ne[3] > 1) {
             return true;
         }
         break;

@@ -9,6 +9,7 @@
 #include <openvino/op/gelu.hpp>
 #include <openvino/op/matmul.hpp>
 #include <openvino/op/multiply.hpp>
+#include <openvino/op/negative.hpp>
 #include <openvino/op/sigmoid.hpp>
 #include <openvino/op/subtract.hpp>
 #include <openvino/op/tanh.hpp>
@@ -70,9 +71,8 @@ std::unordered_map<std::string, CreatorFunction> get_supported_ops() {
         {"GGML_OP_FILL",            op::translate_fill                             },
         {"GGML_OP_DIAG",            op::translate_diag                             },
         {"GGML_OP_TRI",             op::translate_tri                              },
+        {"GGML_OP_SOLVE_TRI",       op::translate_solve_tri                        },
         {"GGML_OP_SET",             op::translate_set                              },
-        // solve_tri has accuracy issues on GPU
-        // {"GGML_OP_SOLVE_TRI",       op::translate_solve_tri                        },
     };
 }
 

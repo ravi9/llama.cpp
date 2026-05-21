@@ -41,12 +41,11 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
     //     return translate_gated_delta_net_ref(context);
     // }
 
-    // const int64_t B = v_shape[0];
+    const int64_t B = v_shape[0];
     // const int64_t T = v_shape[1];
     const int64_t H_v = v_shape[2];
     const int64_t S_v = v_shape[3];
-    const int64_t H_k = q_shape[2];
-    // const int64_t S_k = q_shape[3];
+    const int64_t S_k = q_shape[3];
 
     auto q = context.get_input(0);
     auto k = context.get_input(1);
@@ -55,25 +54,14 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
     auto beta = context.get_input(4);
     auto state = context.get_input(5);
 
-    // ggml maps GQA heads in tiled order, while OV GDN maps repeated heads in grouped order.
-    if (H_v != H_k) {
-        const int64_t repeat = H_v / H_k;
-        auto repeats = ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{1, 1, repeat, 1});
-        q = std::make_shared<ov::op::v0::Tile>(q, repeats);
-        k = std::make_shared<ov::op::v0::Tile>(k, repeats);
-    }
-
-    if (context.get_view_input_size(2)) {
-        // Same as l2_norm case 1
-        v = std::make_shared<ov::op::v0::Squeeze>(v, ov::op::v0::Constant::create(ov::element::i64, {1}, {0}));
-        auto v_shape = context.get_input_shape(2).to_shape();
-        std::vector<int64_t> reshape_pattern = {0, 0, (int64_t) v_shape[2], (int64_t) v_shape[3]};
-        v = std::make_shared<ov::op::v1::Reshape>(
-            v, ov::op::v0::Constant::create(ov::element::i64, {4}, reshape_pattern), true);
-    }
+    v = std::make_shared<ov::op::v1::Reshape>(
+        v, ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{B, -1, H_v, S_v}), false);
 
     // ggml state layout (OV notation): [B, H_v, value_dim, key_dim]
     // GatedDeltaNet op expects: [B, H_v, key_dim, value_dim]
+    auto state_reshape_shape =
+        ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{B, H_v, S_v, S_k});
+    state = std::make_shared<ov::op::v1::Reshape>(state, state_reshape_shape, false);
     auto state_perm = ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{0, 1, 3, 2});
     state = std::make_shared<ov::op::v1::Transpose>(state, state_perm);
 
@@ -102,6 +90,9 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
     auto res = std::make_shared<ov::op::v1::Reshape>(packed, out_shape, false);
 
     return rename_outputs_with_suffix({res}, context.get_name());
+
+    // The OV version in CI does not have the GatedDeltaNet op, so use reference implementation for now.
+    // return translate_gated_delta_net_ref(context);
 }
 
 static OutputVector translate_gated_delta_net_ref(const NodeContext & context) {
