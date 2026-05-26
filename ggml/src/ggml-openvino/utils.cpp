@@ -142,6 +142,24 @@ ov::Tensor create_ov_output_tensor(std::shared_ptr<GgmlOvDecoder> ggml_decoder,
         return *sliced;
     }
 
+    // For passthrough VIEW outputs, the OV Result has the source tensor's shape and storage. Binding a
+    // smaller VIEW shape can make the plugin back-propagate the wrong size into input validation.
+    const struct ggml_tensor * output_tensor_src = ggml_tensor;
+    if (ggml_tensor->op == GGML_OP_VIEW && ggml_tensor->view_src != nullptr) {
+        const struct ggml_tensor * view_src = ggml_tensor->view_src;
+        if (view_src->op != GGML_OP_VIEW) {
+            int diff_count = 0;
+            for (int d = 0; d < GGML_MAX_DIMS; d++) {
+                if (ggml_tensor->ne[d] != view_src->ne[d]) {
+                    diff_count++;
+                }
+            }
+            if (diff_count != 1) {
+                output_tensor_src = view_src;
+            }
+        }
+    }
+
     // Disabling for now as gpu has bug with in-place ScatterUpdate with remote tensors, can re-enable once CVS-186519 is fixed
     // if (ggml_tensor->extra != nullptr && !ggml_decoder->is_splited_model()) {
     //     auto * extra_base = static_cast<ggml_openvino_extra_base *>(ggml_tensor->extra);
@@ -156,10 +174,10 @@ ov::Tensor create_ov_output_tensor(std::shared_ptr<GgmlOvDecoder> ggml_decoder,
     if (ggml_decoder->is_static()) {
         output_shape = infer_request->get_output_tensor(output_index).get_shape();
     } else {
-        output_shape = ggml_decoder->get_shape(ggml_tensor);
+        output_shape = ggml_decoder->get_shape(output_tensor_src);
     }
 
-    ov::Tensor output_tensor(output_type, output_shape, ggml_tensor->data);
+    ov::Tensor output_tensor(output_type, output_shape, output_tensor_src->data);
     return output_tensor;
 }
 
