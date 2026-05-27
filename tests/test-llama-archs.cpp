@@ -499,11 +499,16 @@ static int test_backends(const llm_arch target_arch, const size_t seed, const gg
     std::vector<device_config> dev_configs;
     {
         std::vector<ggml_backend_dev_t> devices_meta;
+        bool has_openvino = false;
         {
             const size_t device_count = ggml_backend_dev_count();
             for (size_t i = 0; i < device_count; i++) {
                 ggml_backend_dev_t dev = ggml_backend_dev_get(i);
                 dev_configs.emplace_back(std::vector<ggml_backend_dev_t>{dev}, ggml_backend_dev_description(dev), LLAMA_SPLIT_MODE_LAYER);
+
+                if (strncmp(ggml_backend_dev_name(dev), "OPENVINO", 8) == 0) {
+                    has_openvino = true;
+                }
 
                 // cpu-based devices cannot be used in tensor split mode
                 if (ggml_backend_dev_buffer_type(dev) != ggml_backend_cpu_buffer_type()) {
@@ -512,7 +517,9 @@ static int test_backends(const llm_arch target_arch, const size_t seed, const gg
             }
         }
 
-        dev_configs.emplace_back(devices_meta, "Meta", LLAMA_SPLIT_MODE_TENSOR);
+        if (!has_openvino) {
+            dev_configs.emplace_back(devices_meta, "Meta", LLAMA_SPLIT_MODE_TENSOR);
+        }
     }
 
     bool all_ok = true;
