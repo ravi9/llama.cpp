@@ -685,11 +685,8 @@ void GgmlOvDecoder::compute_model_outputs() {
     m_model_output_names.clear();
     for (int node_n = 0; node_n < m_cgraph->n_nodes; node_n++) {
         auto * cur_node = m_cgraph->nodes[node_n];
-
-        // PERMUTE and TRANSPOSE are zero-copy views over the source buffer. Materializing them as OV Result
-        // nodes can overwrite the original layout or make CPU consumers read a double-permuted value.
-        if (cur_node->op == GGML_OP_NONE || cur_node->op == GGML_OP_VIEW || cur_node->op == GGML_OP_RESHAPE ||
-            cur_node->op == GGML_OP_PERMUTE || cur_node->op == GGML_OP_TRANSPOSE) {
+        // if the node op is NONE means this node is not used at all, we can skip it directly without adding to model outputs.
+        if (cur_node->op == GGML_OP_NONE || cur_node->op == GGML_OP_VIEW || cur_node->op == GGML_OP_RESHAPE) {
             continue;
         }
         auto cur_node_use_count = m_cgraph->use_counts[ggml_hash_find(&m_cgraph->visited_hash_set, cur_node)];
@@ -709,37 +706,13 @@ void GgmlOvDecoder::compute_model_outputs() {
                 }
             }
             if (input_use_count == cur_node_use_count) {
-                // If every consumer is a zero-copy view op, CPU still needs this producer's bytes written
-                // before it reads them through the downstream view strides.
-                bool all_consumers_are_views = true;
-                for (int i = 0; i < m_cgraph->n_nodes; i++) {
-                    ggml_tensor * node = m_cgraph->nodes[i];
-                    bool uses_cur = false;
-                    for (int j = 0; j < GGML_MAX_SRC; j++) {
-                        if (node->src[j] == cur_node) {
-                            uses_cur = true;
-                            break;
-                        }
-                    }
-                    if (uses_cur && node->op != GGML_OP_PERMUTE && node->op != GGML_OP_TRANSPOSE &&
-                        node->op != GGML_OP_VIEW) {
-                        all_consumers_are_views = false;
-                        break;
-                    }
-                }
-                if (!all_consumers_are_views) {
-                    cur_node = nullptr;
-                }
+                cur_node = nullptr;
             }
         }
         if (cur_node != nullptr) {
             std::string node_output_name(cur_node->name);
             m_model_outputs[node_output_name] = cur_node;
-            // Multiple GGML nodes can share a name, but duplicate Result names can be rejected by the GPU plugin.
-            if (std::find(m_model_output_names.begin(), m_model_output_names.end(), node_output_name) ==
-                m_model_output_names.end()) {
-                m_model_output_names.push_back(node_output_name);
-            }
+            m_model_output_names.push_back(node_output_name);
         }
     }
 }
@@ -1636,7 +1609,6 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
             break;
         }
         default:
-            m_node_dynamic_dims[node] = -1;
             GGML_LOG_DEBUG("ggml-openvino: compute_node_dynamic_dims: unhandled op %s for node '%s'\n",
                            ggml_op_name(node->op), node->name);
             break;

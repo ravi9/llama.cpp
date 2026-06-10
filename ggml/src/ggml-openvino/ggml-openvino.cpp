@@ -167,20 +167,13 @@ static enum ggml_status ggml_backend_openvino_buffer_init_tensor(ggml_backend_bu
         tensor->data = (char *) ctx->data + ((char *) tensor->data - (char *) data_prev);
     }
 
-    // Views may share the extra from view_src only for pure same-buffer aliases. Reshapes and offset
-    // views need their own OV tensor so shape and pointer validation still matches inference inputs.
+    // Views share the extra from view_src
     if (tensor->view_src != nullptr) {
         GGML_ASSERT(tensor->view_src->buffer->buft == buffer->buft);
-        bool can_share_extra = tensor->data == tensor->view_src->data;
-        for (int i = 0; i < GGML_MAX_DIMS && can_share_extra; i++) {
-            if (tensor->ne[i] != tensor->view_src->ne[i]) {
-                can_share_extra = false;
-            }
-        }
-        if (can_share_extra && tensor->view_src->extra != nullptr) {
+        if (tensor->view_src->extra != nullptr) {
             tensor->extra = tensor->view_src->extra;
-            return GGML_STATUS_SUCCESS;
         }
+        return GGML_STATUS_SUCCESS;
     }
 
     ctx = (ggml_backend_openvino_buffer_context *) buffer->context;
