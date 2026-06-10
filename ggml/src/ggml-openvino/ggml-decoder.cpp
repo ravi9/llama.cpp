@@ -98,16 +98,31 @@ GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph, std::map<std::string, std::sh
     }
 }
 
+namespace {
+bool is_inplace_op(const ggml_tensor * node) {
+    return node->op == GGML_OP_SET_ROWS || node->op == GGML_OP_CPY || (node->op == GGML_OP_SCALE && node->view_src);
+}
+
+bool is_same_shape(const ggml_tensor * a, const ggml_tensor * b) {
+    for (int i = 0; i < GGML_MAX_DIMS; i++) {
+        if (a->ne[i] != b->ne[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+}  // namespace
+
 void GgmlOvDecoder::set_input_output() {
     for (int node_n = 0; node_n < m_cgraph->n_nodes; node_n++) {
-        auto node = m_cgraph->nodes[node_n];
+        auto * node = m_cgraph->nodes[node_n];
 
         NodeInfo current_node_info;
         auto node_name = std::string(node->name);
         auto node_output_name = node_name;
         auto * node_output = node;
-        if (node->op == GGML_OP_SET_ROWS) {
-            // SET_ROWS updates the tensor in place. For later ov op that uses the
+        if (is_inplace_op(node)) {
+            // In-place ops update the tensor in place. For later ov op that uses the
             // the view_src of SET_ROWS, we need to make sure they get the updated tensor
             // by putting the view_src name in the tensor_map in
             // <openvino>/src/frontends/ggml/src/translate_session.cpp
@@ -167,6 +182,10 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
     switch (node->op) {
     case GGML_OP_RESHAPE: {
         auto * src = node->src[0];
+        if (is_same_shape(src, node)) {
+            op_case = 7;
+            break;
+        }
         if (src->op == GGML_OP_RESHAPE && src->src[0]->ne[0] == node->ne[0] && src->src[0]->ne[1] == node->ne[1]) {
             op_case = 4;
         } else if (node->ne[0] * node->ne[1] == src->ne[0]) {
@@ -291,6 +310,27 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
                 if (diff_count >= 1) {
                     op_case = 0;
                 }
+            }
+        }
+        break;
+    }
+    case GGML_OP_RMS_NORM: {
+        if (node->src[0]->op == GGML_OP_VIEW) {
+            if (is_same_shape(node->src[0]->src[0], node->src[0])) {
+                op_case = 1;
+            } else if (node->src[0]->src[0]->op == GGML_OP_GATED_DELTA_NET) {
+                op_case = 2;
+            }
+        }
+        break;
+    }
+    case GGML_OP_CPY: {
+        if (node->src[0]->op == GGML_OP_VIEW) {
+            if (node->src[0]->src[0]->op == GGML_OP_GATED_DELTA_NET) {
+                op_case = 1;
+            } else if (std::string(node->src[0]->name).find("conv_state_last") == 0) {
+                op_case = 2;
+                break;
             }
         }
         break;
@@ -475,6 +515,9 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
             } else if (memcmp(model_params.rope_params, node->op_params, sizeof(int32_t) * 15) != 0) {
                 model_params.mixed_rope_params = true;
             }
+        }
+        if (node->op == GGML_OP_GATED_DELTA_NET) {
+            model_params.state_size = node->src[0]->ne[0];
         }
     }
     auto * output_tensor = cgraph->nodes[cgraph->n_nodes - 1];
@@ -691,8 +734,8 @@ void GgmlOvDecoder::compute_model_outputs() {
         }
         auto cur_node_use_count = m_cgraph->use_counts[ggml_hash_find(&m_cgraph->visited_hash_set, cur_node)];
         if (cur_node_use_count == 0) {
-            // The output of SET_ROWS is the view_src tensor, which is updated in place. We should use the view_src name as the output name to make sure it can be correctly matched with the later ops that use the view_src.
-            if (cur_node != nullptr && cur_node->op == GGML_OP_SET_ROWS) {
+            // The output of in-place ops is the view_src tensor, which is updated in place. We should use the view_src name as the output name to make sure it can be correctly matched with the later ops that use the view_src.
+            if (cur_node != nullptr && is_inplace_op(cur_node)) {
                 cur_node = cur_node->view_src;
             }
         } else {
@@ -712,7 +755,7 @@ void GgmlOvDecoder::compute_model_outputs() {
         if (cur_node != nullptr) {
             std::string node_output_name(cur_node->name);
             m_model_outputs[node_output_name] = cur_node;
-            m_model_output_names.push_back(node_output_name);
+            m_model_output_names.insert(node_output_name);
         }
     }
 }
@@ -1295,6 +1338,7 @@ std::string GgmlOvDecoder::compute_op_type(const ggml_tensor * node) {
         {GGML_OP_SUB,             "GGML_OP_SUB"            },
         {GGML_OP_TRANSPOSE,       "GGML_OP_TRANSPOSE"      },
         {GGML_OP_VIEW,            "GGML_OP_VIEW"           },
+        {GGML_OP_SET,             "GGML_OP_SET"            },
         {GGML_OP_SET_ROWS,        "GGML_OP_SET_ROWS"       },
         {GGML_OP_CPY,             "GGML_OP_CPY"            },
         {GGML_OP_FLASH_ATTN_EXT,  "GGML_OP_FLASH_ATTN_EXT" },
@@ -1305,7 +1349,12 @@ std::string GgmlOvDecoder::compute_op_type(const ggml_tensor * node) {
         {GGML_OP_GATED_DELTA_NET, "GGML_OP_GATED_DELTA_NET"},
         {GGML_OP_ARGSORT,         "GGML_OP_ARGSORT"        },
         {GGML_OP_REPEAT,          "GGML_OP_REPEAT"         },
-        {GGML_OP_IM2COL,          "GGML_OP_IM2COL"         }
+        {GGML_OP_IM2COL,          "GGML_OP_IM2COL"         },
+        {GGML_OP_CUMSUM,          "GGML_OP_CUMSUM"         },
+        {GGML_OP_FILL,            "GGML_OP_FILL"           },
+        {GGML_OP_DIAG,            "GGML_OP_DIAG"           },
+        {GGML_OP_TRI,             "GGML_OP_TRI"            },
+        {GGML_OP_SOLVE_TRI,       "GGML_OP_SOLVE_TRI"      },
     };
     static const std::map<ggml_unary_op, std::string> unary_ops = {
         {GGML_UNARY_OP_ABS,         "GGML_UNARY_OP_ABS"        },
@@ -1475,6 +1524,10 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
         }
         case GGML_OP_TRANSPOSE:
         case GGML_OP_RESHAPE: {
+            if (is_same_shape(node->src[0], node)) {
+                m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[0]];
+                break;
+            }
             // RESHAPE requires src[0] to be contiguous, so both src and result
             // have standard compact strides: nb[i] = type_size * prod(ne[0..i-1]).
             // Match src->nb[dynamic_dim] against result->nb[i] to find the output
@@ -1558,12 +1611,14 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
             }
             break;
         case GGML_OP_SSM_CONV:
+        case GGML_OP_GATED_DELTA_NET:
             m_node_dynamic_dims[node] = 1;
             break;
         case GGML_OP_RMS_NORM:
         case GGML_OP_L2_NORM:
         case GGML_OP_NORM:
         case GGML_OP_ADD:
+        case GGML_OP_SUB:
         case GGML_OP_GLU:
         case GGML_OP_ROPE:
         case GGML_OP_SCALE:
@@ -1571,9 +1626,16 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
         case GGML_OP_ARGSORT:
         case GGML_OP_ADD_ID:
         case GGML_OP_UNARY:
+        case GGML_OP_CUMSUM:
+        case GGML_OP_FILL:
+        case GGML_OP_SET:
+        case GGML_OP_DIAG:
+        case GGML_OP_TRI:
+        case GGML_OP_REPEAT:
             m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[0]];
             break;
         case GGML_OP_MUL_MAT_ID:
+        case GGML_OP_SOLVE_TRI:
             m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[1]];
             break;
         case GGML_OP_CPY:

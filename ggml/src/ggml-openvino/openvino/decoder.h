@@ -87,14 +87,16 @@ public:
 
     virtual int get_op_case(int node_idx) const = 0;
 
-    virtual const std::map<std::string, std::shared_ptr<ov::Node>> & get_model_inputs() const = 0;
-    virtual const std::map<std::string, std::shared_ptr<ov::Node>> & get_model_extra_inputs() const = 0;
-    virtual const std::map<std::string, std::shared_ptr<ov::Node>> & get_model_weights() const = 0;
-    virtual std::vector<std::string> get_model_output_names() const = 0;
+    virtual const std::map<std::string, std::shared_ptr<ov::Node>>& get_model_inputs() const = 0;
+    virtual const std::map<std::string, std::shared_ptr<ov::Node>>& get_model_extra_inputs() const = 0;
+    virtual const std::map<std::string, std::shared_ptr<ov::Node>>& get_model_weights() const = 0;
+    virtual std::set<std::string> get_model_output_names() const = 0;
 
     virtual int32_t * get_rope_params() const = 0;
 
     virtual bool has_mixed_rope_params() const = 0;
+
+    virtual int get_ssm_state_size() const = 0;
 
     virtual std::map<std::string, std::string> get_kv_param_res_names() const = 0;
 

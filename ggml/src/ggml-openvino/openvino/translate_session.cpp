@@ -289,21 +289,11 @@ std::shared_ptr<Model> TranslateSession::apply_transformations(std::shared_ptr<M
         }
         manager.run_passes(model);
         if (ggml_model_decoder->is_stateful()) {
-            auto output_names = ggml_model_decoder->get_model_output_names();
-            std::map<std::string, int> model_output_indexes;
-            for (size_t i = 0; i < output_names.size(); i++) {
-                model_output_indexes.insert(std::make_pair(output_names[i], i));
-            }
             ov::preprocess::PrePostProcessor ppp(model);
             for (size_t i = 0; i < model->get_output_size(); i++) {
-                auto output_friendly_name = model->output(i).get_node_shared_ptr()->get_friendly_name();
-                auto output_id = model_output_indexes[output_friendly_name];
                 auto model_output_shape = model->output(i).get_partial_shape();
-                auto decoder_output_shape = ggml_model_decoder->get_output_shape(output_id);
-                if (model_output_shape.rank().is_static() && decoder_output_shape.rank().is_static() &&
-                    model_output_shape.rank().get_length() + 1 == decoder_output_shape.rank().get_length() &&
-                    decoder_output_shape[0].is_static() && decoder_output_shape[0].get_length() == 1) {
-                    ppp.output(i).postprocess().custom([](const ov::Output<ov::Node> & node) {
+                if (model_output_shape.rank().is_static() && model_output_shape.rank().get_length() == 3) {
+                    ppp.output(i).postprocess().custom([](const ov::Output<ov::Node>& node) {
                         auto axes = ov::op::v0::Constant::create(ov::element::i32, ov::Shape{1}, {0});
                         return std::make_shared<ov::op::v0::Unsqueeze>(node, axes);
                     });

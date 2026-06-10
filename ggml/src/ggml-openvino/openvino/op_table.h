@@ -42,6 +42,12 @@ GGML_OP_CONVERTER(translate_pad);
 GGML_OP_CONVERTER(translate_ssm_conv);
 GGML_OP_CONVERTER(translate_gated_delta_net);
 GGML_OP_CONVERTER(translate_repeat);
+GGML_OP_CONVERTER(translate_cumsum);
+GGML_OP_CONVERTER(translate_fill);
+GGML_OP_CONVERTER(translate_set);
+GGML_OP_CONVERTER(translate_diag);
+GGML_OP_CONVERTER(translate_tri);
+GGML_OP_CONVERTER(translate_solve_tri);
 
 }  // namespace op
 
