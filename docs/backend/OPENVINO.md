@@ -757,24 +757,37 @@ build\ReleaseOV\bin\llama-simple.exe -m "C:\models\Llama-3.2-1B-Instruct-Q4_K_M.
 **General (all devices)**
 
 - Llama.cpp OpenVINO backend currently supports text-only models. Multimodal features (audio/image/video) are a work in progress.
+- Unsupported GGML operations or patterns automatically fall back to CPU.
+- 3D quantized tensors are not supported.
+
+**Operation-specific**
+
+- `ROPE`: Supports only `NORMAL`, `NEOX`, and `IMROPE` modes. `IMROPE` has restricted support for `freq_factors`, `freq_scale`, `ext_factor`, and `attn_factor`.
+- `FLASH_ATTN_EXT`: No support for `max_bias > 0` (ALiBi), `logit_softcap != 0`, or sink tokens. Requires specific input patterns.
+- `GATED_DELTA_NET` and `SSM_CONV`: Currently disabled (fallback to CPU).
+- `ADD_ID`: Only supports `F32` inputs/output and `I32` ids.
+- `DIV`: Broadcast `DIV` on GPU and certain MoE weight normalization patterns are kept on CPU for numerical stability.
 
 **Tool-specific**
 
-- `llama-bench`: requires `-fa 1` (flash-attention).
-- `llama-cli --context-shift`: stateless only (`GGML_OPENVINO_STATEFUL_EXECUTION=0`). In stateful mode the KV cache is owned by the OpenVINO model and cannot be shifted externally.
-- `llama-server`: only one chat session/thread when `GGML_OPENVINO_STATEFUL_EXECUTION=1`.
+- `llama-bench`: Requires `-fa 1` (flash-attention).
+- `llama-cli --context-shift`: Stateless only (`GGML_OPENVINO_STATEFUL_EXECUTION=0`). In stateful mode the KV cache is owned by the OpenVINO model and cannot be shifted externally.
+- `llama-server`: Only one chat session/thread when `GGML_OPENVINO_STATEFUL_EXECUTION=1`.
 
 **GPU-specific**
 
-- `llama-server -np > 1`: concurrent requests are batched together, which may slightly reduce per-request throughput.
+- `BF16` type is not supported for `PERMUTE`, `CPY`, and `TRANSPOSE` operations.
+- MoE routing and normalization operations are kept on CPU for numerical stability.
+- `MUL_MAT_ID` falls back to CPU if the required temporary memory exceeds 1 GiB.
+- `llama-server -np > 1`: Concurrent requests are batched together, which may slightly reduce per-request throughput.
 
 **NPU-specific**
 
 - Default context resolves to the model's training context (e.g. 131072 for Llama 3.2 1B), which can OOM or fail or degrade performance on NPU. Inspect the resolved value with `-lv 3`.
-  - **Workaround:** pass an explicit `-c <N>`, e.g. `-c 1024`.
+  - **Workaround:** Pass an explicit `-c <N>`, e.g. `-c 1024`.
 - Model caching (`GGML_OPENVINO_CACHE_DIR`) is not supported.
 - `llama-server -np > 1` (multiple parallel sequences) is not supported.
-- `llama-perplexity`: requires `-b 512` or smaller.
+- `llama-perplexity`: Requires `-b 512` or smaller.
 
 > [!NOTE]
 > The OpenVINO backend is actively under development. Fixes and improvements are underway, and this document will continue to be updated.
