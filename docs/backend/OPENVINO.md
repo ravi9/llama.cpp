@@ -15,7 +15,7 @@ The OpenVINO backend is implemented in `ggml/src/ggml-openvino` and provides a t
 ## Contents
 
 - [Supported Devices](#supported-devices)
-- [Supported Quantizations](#supported-quantizations)
+- [Supported Model Precisions](#supported-model-precisions)
 - [Supported Llama.cpp Tools](#supported-llamacpp-tools)
 - [Validated Models](#validated-models)
 - [Build Instructions](#build-instructions)
@@ -41,25 +41,20 @@ OpenVINO backend supports the following hardware:
 
 Although OpenVINO supports a wide range of [Intel hardware](https://docs.openvino.ai/2026/about-openvino/release-notes-openvino/system-requirements.html), the llama.cpp OpenVINO backend has been validated specifically on AI PCs such as the Intel® Core™ Ultra Series 1 and Series 2.
 
-## Supported Quantizations
+## Supported Model Precisions
 
-The following quantization formats are supported by the OpenVINO backend:
+- `FP16`
+- `BF16` (on Intel Xeon)
+- `Q8_0`
+- `Q4_0`
+- `Q4_1`
+- `Q4_K`
+- `Q4_K_M`
+- `Q5_K` (converted to `Q8_0_C` at runtime)
+- `Q6_K` (converted to `Q8_0_C` at runtime)
 
 > [!NOTE]
 > Accuracy validation and performance optimizations for quantized models are a work in progress.
-
-| Format | CPU | GPU | NPU | Notes |
-| :--- | :---: | :---: | :---: | :--- |
-| `FP16` | ✓ | ✓ | ✗ | — |
-| `BF16` | ✓ | ✗ | ✗ | Intel Xeon only |
-| `Q8_0` | ✓ | ✓ | ✗ | — |
-| `Q4_0` | ✓ | ✓ | ✓ | Primary NPU format |
-| `Q4_1` | ✓ | ✓ | ✗ | — |
-| `Q4_K` | ✓ | ✓ | ✗ | — |
-| `Q4_K_M` | ✓ | ✓ | ✓ | May include `Q6_K` and `Q5_K` tensors |
-| `Q5_1` | ✓ | ✓ | ✗ | Dequantized natively (weights, scales, zero-points) |
-| `Q5_K` | ✓ | ✓ | ✗ | Converted to `Q8_0_C` at runtime |
-| `Q6_K` | ✓ | ✓ | ✗ | Converted to `Q8_0_C` at runtime |
 
 **CPU and GPU Quantization Details:**
 - `Q5_K` and `Q6_K` tensors are converted to `Q8_0_C`
@@ -80,6 +75,7 @@ The following tools work with the OpenVINO backend on CPU, GPU, NPU:
 - llama-bench
 - llama-cli
 - llama-completion
+- llama-embedding
 - llama-perplexity
 - llama-run
 - llama-server
@@ -87,7 +83,7 @@ The following tools work with the OpenVINO backend on CPU, GPU, NPU:
 
 ## Validated Models
 
-Although, the validated models below were tested with `llama-cli` using the `Q4_K_M` quantization format on Intel® Core™ Ultra Series 2 (Lunar Lake), the OpenVINO backend is expected to work across a broader range of [Intel hardware](https://docs.openvino.ai/2026/about-openvino/release-notes-openvino/system-requirements.html), [supported quantization formats](#supported-quantizations), [supported llama.cpp tools](#supported-llamacpp-tools) and additional model architectures.
+Although, the validated models below were tested with `llama-cli` using the `Q4_K_M` quantization format on Intel® Core™ Ultra Series 2 (Lunar Lake), the OpenVINO backend is expected to work across a broader range of [Intel hardware](https://docs.openvino.ai/2026/about-openvino/release-notes-openvino/system-requirements.html), [supported model precisions](#supported-model-precisions), [supported llama.cpp tools](#supported-llamacpp-tools) and additional model architectures.
 
 > [!NOTE]
 > Extensive accuracy validation, performance optimizations, and broader architecture coverage are work in progress.
@@ -153,7 +149,7 @@ Although, the validated models below were tested with `llama-cli` using the `Q4_
       sudo apt-get update
       sudo apt-get install -y build-essential libcurl4-openssl-dev libtbb12 cmake ninja-build python3-pip curl wget tar
     ```
-    - OpenCL (required for Intel GPU support; safe to skip for CPU-only builds)
+    - OpenCL
     ```bash
       sudo apt install ocl-icd-opencl-dev opencl-headers opencl-clhpp-headers intel-opencl-icd
     ```
@@ -382,9 +378,25 @@ winget install --id Git.Git -e --accept-source-agreements --accept-package-agree
 winget install --id Ninja-build.Ninja -e --accept-source-agreements --accept-package-agreements 2>nul
 winget install --id Kitware.CMake -e --accept-source-agreements --accept-package-agreements 2>nul
 
-REM Ensure Visual Studio Build Tools are installed
+REM Ensure Visual Studio Build Tools are installed.
 echo Checking for Visual Studio Build Tools...
-winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended" --accept-source-agreements --accept-package-agreements
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+set "VS_INSTALLED="
+if exist "%VSWHERE%" (
+    for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2^>nul`) do (
+        set "VS_INSTALLED=%%i"
+    )
+)
+if defined VS_INSTALLED (
+    echo Visual Studio with VC++ x86/x64 tools already present at "!VS_INSTALLED!". Skipping winget install.
+) else (
+    winget install --id Microsoft.VisualStudio.2022.BuildTools -e --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended" --accept-source-agreements --accept-package-agreements
+    if errorlevel 1 (
+        echo WARNING: winget could not install Visual Studio Build Tools automatically.
+        echo Install manually from https://aka.ms/vs/17/release/vs_BuildTools.exe ^(select the "Desktop development with C++" workload^)
+        echo and re-run this script from a "Developer Command Prompt for VS 2022".
+    )
+)
 
 echo ============================================
 echo Installing OpenCL via vcpkg...
@@ -437,11 +449,19 @@ if exist "%OPENVINO_INSTALL_DIR%\setupvars.bat" (
     )
 
     REM Move the single top-level folder contents into the versioned install dir.
+    REM NOTE: delayed expansion (!VAR!) is required because the surrounding else( ... )
+    REM block is parsed once up-front, so %OPENVINO_EXTRACTED% would expand to "" here
+    REM and xcopy would then treat "\*" as C:\* and fail with "Cannot perform a cyclic copy".
+    set "OPENVINO_EXTRACTED="
     for /d %%i in ("%OPENVINO_EXTRACT_TMP%\*") do set "OPENVINO_EXTRACTED=%%i"
+    if not defined OPENVINO_EXTRACTED (
+        echo ERROR: Could not locate extracted OpenVINO folder under "%OPENVINO_EXTRACT_TMP%".
+        exit /b 1
+    )
     if not exist "%OPENVINO_INSTALL_DIR%" mkdir "%OPENVINO_INSTALL_DIR%"
-    xcopy /e /i /y /q "%OPENVINO_EXTRACTED%\*" "%OPENVINO_INSTALL_DIR%\" >nul
+    xcopy /e /i /y /q "!OPENVINO_EXTRACTED!\*" "%OPENVINO_INSTALL_DIR%\" >nul
     if errorlevel 1 (
-        echo ERROR: Failed to copy OpenVINO to "%OPENVINO_INSTALL_DIR%".
+        echo ERROR: Failed to copy OpenVINO from "!OPENVINO_EXTRACTED!" to "%OPENVINO_INSTALL_DIR%".
         echo Re-run this script from an elevated Command Prompt ^(Run as administrator^) if access is denied.
         exit /b 1
     )
@@ -736,7 +756,6 @@ build\ReleaseOV\bin\llama-simple.exe -m "C:\models\Llama-3.2-1B-Instruct-Q4_K_M.
 
 **General (all devices)**
 
-- Encoder models (embedding, reranking) are not supported with the current OpenVINO backend implementation.
 - Default context size is resolved to the model's training context (for example, 131072 for Llama 3.2 1B), which can be much larger than necessary and may degrade performance — especially on edge/laptop devices — and can cause failures on NPU. To inspect the selected context size, run `llama-cli` or `llama-server` with `-lv 3`.
   - **Workaround:** explicitly limit it with `-c`, e.g. `-c 1024`.
 
