@@ -28,7 +28,7 @@ The OpenVINO backend is implemented in `ggml/src/ggml-openvino` and provides a t
   - [4. Run Inference with OpenVINO Backend](#4-run-inference-with-openvino-backend)
   - [5. Docker Build](#5-docker-build)
 - [GGML OpenVINO Backend Runtime Configurations](#ggml-openvino-backend-runtime-configurations)
-- [Known Issues and Current Workarounds](#known-issues-and-current-workarounds)
+- [Known Limitations](#known-limitations)
 - [Work in Progress](#work-in-progress)
 
 ## Supported Devices
@@ -95,7 +95,7 @@ Although, the validated models below were tested with `llama-cli` using the `Q4_
   - **SF** = Stateful (`GGML_OPENVINO_STATEFUL_EXECUTION=1`)
   - Note: The NPU operates in stateless mode only.
 - **Validation system:** Intel® Core™ Ultra 5 238V (Lunar Lake) | 32 GB RAM | Ubuntu 24.04 | Intel OpenCL GPU Driver 26.18.38308.1 | Intel NPU Driver 1.33.0.
-- See [Known Issues](#known-issues-and-current-workarounds) for context on observed failures.
+- See [Known Limitations](#known-limitations) for context on observed failures.
 
 | Model | CPU (SL / SF) | GPU (SL / SF) | NPU (SL) |
 | :--- | :---: | :---: | :---: |
@@ -135,6 +135,8 @@ Although, the validated models below were tested with `llama-cli` using the `Q4_
 | [bartowski/tencent_Hunyuan-7B-Instruct-Q4_K_M](https://huggingface.co/bartowski/tencent_Hunyuan-7B-Instruct-GGUF) | ✓ / ✓ | ✓ / ✗ | ✓ |
 | [LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct-Q4_K_M](https://huggingface.co/LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct-GGUF) | ✓ / ✓ | ✓ / ✗ | ✓ |
 | [bartowski/prism-ml_Bonsai-8B-unpacked-Q4_K_M](https://huggingface.co/bartowski/prism-ml_Bonsai-8B-unpacked-GGUF) | ✓ / ✓ | ✓ / ✗ | ✓ |
+|  |  |  |  |
+| [gpustack/bge-m3-Q4_K_M.gguf](https://huggingface.co/gpustack/bge-m3-GGUF) | ✓ | ✗ | ✗ |
 
 ## Build Instructions
 
@@ -752,11 +754,13 @@ build\ReleaseOV\bin\llama-simple.exe -m "C:\models\Llama-3.2-1B-Instruct-Q4_K_M.
 
 ```
 
-## Known Issues and Current Workarounds
+## Known Limitations
 
 **General (all devices)**
 
-- Llama.cpp OpenVINO backend currently supports text-only models. Multimodal features (audio/image/video) are a work in progress.
+- Llama.cpp OpenVINO backend currently supports a subset of GGML ops and text-only models. Unsupported ops or unsupported op shapes/cases fail during OpenVINO translation.
+- Multimodal features (audio/image/video) are a work in progress.
+- Limited Embedding and Reranking model support.
 
 **Tool-specific**
 
@@ -771,8 +775,8 @@ build\ReleaseOV\bin\llama-simple.exe -m "C:\models\Llama-3.2-1B-Instruct-Q4_K_M.
 **NPU-specific**
 
 - Default context resolves to the model's training context (e.g. 131072 for Llama 3.2 1B), which can OOM or fail or degrade performance on NPU. Inspect the resolved value with `-lv 3`.
-  - **Workaround:** pass an explicit `-c <N>`, e.g. `-c 1024`.
-- Model caching (`GGML_OPENVINO_CACHE_DIR`) is not supported.
+  - **Workaround:** Pass an explicit `-c <N>`, e.g. `-c 1024`.
+- NPU device uses a static graph with a fixed prefill chunk size (defaults to 256), configurable with `GGML_OPENVINO_PREFILL_CHUNK_SIZE`. Large prefill/batch settings may need tuning.
 - `llama-server -np > 1` (multiple parallel sequences) is not supported.
 - `llama-perplexity`: requires `-b 512` or smaller.
 
