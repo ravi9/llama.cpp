@@ -756,25 +756,28 @@ build\ReleaseOV\bin\llama-simple.exe -m "C:\models\Llama-3.2-1B-Instruct-Q4_K_M.
 
 **General (all devices)**
 
-- Default context size is resolved to the model's training context (for example, 131072 for Llama 3.2 1B), which can be much larger than necessary and may degrade performance — especially on edge/laptop devices — and can cause failures on NPU. To inspect the selected context size, run `llama-cli` or `llama-server` with `-lv 3`.
-  - **Workaround:** explicitly limit it with `-c`, e.g. `-c 1024`.
+- Llama.cpp OpenVINO backend currently supports text-only models. Multimodal features (audio/image/video) are a work in progress.
 
 **Tool-specific**
 
-- `llama-cli --context-shift` is supported only in **stateless** mode (`GGML_OPENVINO_STATEFUL_EXECUTION=0`, the default). It cannot be supported in stateful mode (`GGML_OPENVINO_STATEFUL_EXECUTION=1`) because the KV cache is managed internally by the OpenVINO model.
-- `llama-bench` requires `-fa 1` when using the OpenVINO backend.
-  - Example: `GGML_OPENVINO_STATEFUL_EXECUTION=1 GGML_OPENVINO_DEVICE=GPU ./llama-bench -fa 1`
-- `llama-server` supports only one chat session/thread when `GGML_OPENVINO_STATEFUL_EXECUTION=1` is enabled.
+- `llama-bench`: requires `-fa 1` (flash-attention).
+- `llama-cli --context-shift`: stateless only (`GGML_OPENVINO_STATEFUL_EXECUTION=0`). In stateful mode the KV cache is owned by the OpenVINO model and cannot be shifted externally.
+- `llama-server`: only one chat session/thread when `GGML_OPENVINO_STATEFUL_EXECUTION=1`.
+
+**GPU-specific**
+
+- `llama-server -np > 1`: concurrent requests are batched together, which may slightly reduce per-request throughput.
 
 **NPU-specific**
 
-- Use a small context size (e.g. `-c 1024` or smaller) — large training-context defaults will fail on NPU.
+- Default context resolves to the model's training context (e.g. 131072 for Llama 3.2 1B), which can OOM or fail or degrade performance on NPU. Inspect the resolved value with `-lv 3`.
+  - **Workaround:** pass an explicit `-c <N>`, e.g. `-c 1024`.
 - Model caching (`GGML_OPENVINO_CACHE_DIR`) is not supported.
 - `llama-server -np > 1` (multiple parallel sequences) is not supported.
-- `llama-perplexity` is only supported with `-b 512` or smaller.
+- `llama-perplexity`: requires `-b 512` or smaller.
 
 > [!NOTE]
-> The OpenVINO backend is actively under development. Fixes are underway, and this document will continue to be updated as issues are resolved.
+> The OpenVINO backend is actively under development. Fixes and improvements are underway, and this document will continue to be updated.
 
 ## Work in Progress
 
