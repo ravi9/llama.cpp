@@ -98,6 +98,15 @@ GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph, std::map<std::string, std::sh
     }
 }
 
+// VIEW outputs are keyed by name in the tensor_map, but several distinct VIEWs of
+// one source can share a ggml name (e.g. 8 per-expert views all named the same).
+// Disambiguate by appending the view offset and the tensor address so each VIEW
+// node maps to its own entry instead of colliding on the last writer.
+static std::string ggml_ov_unique_view_name(const ggml_tensor * t) {
+    return std::string(t->name) + "#voff" + std::to_string(t->view_offs) + "@" +
+           std::to_string(reinterpret_cast<uintptr_t>(t));
+}
+
 void GgmlOvDecoder::set_input_output() {
     for (int node_n = 0; node_n < m_cgraph->n_nodes; node_n++) {
         auto node = m_cgraph->nodes[node_n];
@@ -106,6 +115,9 @@ void GgmlOvDecoder::set_input_output() {
         auto node_name = std::string(node->name);
         auto node_output_name = node_name;
         auto * node_output = node;
+        if (node->op == GGML_OP_VIEW) {
+            node_output_name = ggml_ov_unique_view_name(node);
+        }
         if (node->op == GGML_OP_SET_ROWS) {
             // SET_ROWS updates the tensor in place. For later ov op that uses the
             // the view_src of SET_ROWS, we need to make sure they get the updated tensor
@@ -130,6 +142,8 @@ void GgmlOvDecoder::set_input_output() {
             auto src_name = std::string(src->name);
             if (src->flags & GGML_TENSOR_FLAG_INPUT) {
                 src_name = get_graph_input_ov_name(src, node);
+            } else if (src->op == GGML_OP_VIEW) {
+                src_name = ggml_ov_unique_view_name(src);
             }
             current_node_info.node_inputs[src_name] = src;
             current_node_info.node_inputs_names.push_back(src_name);
@@ -824,6 +838,30 @@ std::shared_ptr<ov::Node> GgmlOvDecoder::create_weight_node(ggml_tensor * tensor
         auto weight_node = std::make_shared<ov::op::v0::Constant>(weight_tensor);
         weight_node->set_friendly_name(tensor->name);
         return weight_node;
+    }
+
+    // 3D quantized MoE expert weights [k, m, n_expert]: flatten to a rank-2
+    // [n_expert, m*k] tensor and build the dequant subgraph with use_bias=true (the
+    // exact f16 zero-point form). This is the path hit by test-backend-ops and the
+    // host-buffer load; the backend-buffer path builds the same node in set_tensor.
+    // translate_mul_mat_id gathers experts on axis 0 of this node and splits m*k.
+    if (ggml_is_quantized(tensor->type) && tensor->ne[2] > 1) {
+        GGML_ASSERT(tensor->ne[3] == 1 && "4D quantized expert weights are not supported");
+        GGML_ASSERT(ggml_is_contiguous(tensor) && "expert weights must be contiguous to flatten");
+        const int64_t n_expert = tensor->ne[2];
+        const int64_t m = tensor->ne[1];
+        const int64_t k = tensor->ne[0];
+        ggml_tensor flat_tensor = *tensor;
+        flat_tensor.ne[0] = m * k;
+        flat_tensor.ne[1] = n_expert;
+        flat_tensor.ne[2] = 1;
+        flat_tensor.ne[3] = 1;
+        flat_tensor.nb[1] = ggml_row_size(tensor->type, m * k);
+        flat_tensor.nb[2] = ggml_nbytes(tensor);
+        flat_tensor.nb[3] = ggml_nbytes(tensor);
+        OvWeight flat_weight = process_weight_tensor(&flat_tensor, tensor->data, nullptr, /*use_bias=*/true);
+        flat_weight.weight_node->set_friendly_name(tensor->name);
+        return flat_weight.weight_node;
     }
 
     // There are three cases where we need to create a new weight node:

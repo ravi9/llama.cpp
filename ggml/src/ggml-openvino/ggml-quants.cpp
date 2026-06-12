@@ -514,11 +514,28 @@ ov::Output<ov::Node> make_int8_weights(ov::Tensor & weight,
         auto weights_f16 = std::make_shared<ov::op::v0::Convert>(weights_node, ov::element::f16);
 
         if (use_bias && zp.get_size() > 0) {
-            // Bias path: w * s + b (zp tensor holds f16 bias values)
-            auto bias_f16 = std::make_shared<ov::op::v0::Constant>(zp);
-            auto w_s =
-                std::make_shared<ov::op::v1::Multiply>(weights_f16, scales_f16, ov::op::AutoBroadcastType::NUMPY);
-            result = std::make_shared<ov::op::v1::Add>(w_s, bias_f16, ov::op::AutoBroadcastType::NUMPY);
+            // Accurate dequant in the FUSABLE zero-point form: (w - zp) * s, where the
+            // zero point is an exact f16 value zp = -bias/scale (bias held in the zp
+            // tensor). This is algebraically equal to w*s + bias but, unlike an Add(bias)
+            // graph, it matches OpenVINO's ConvertGatherToGatherCompressed pattern
+            // (Constant->Convert->Subtract->Multiply), so MoE expert weights stay
+            // compressed through compile_model (no f32 materialization / OOM). Using a
+            // real f16 zp instead of an integer one avoids the round(min/scale) error
+            // that corrupts Q4_K/Q5_1 experts.
+            // Convert bias -> zero-point IN PLACE in the (buffer-backed) zp tensor to
+            // avoid allocating a duplicate f16 array.
+            auto * bias_zp_data = zp.data<ov::float16>();
+            const auto * scale_data = scales.data<ov::float16>();
+            size_t n = zp.get_size();
+            for (size_t i = 0; i < n; i++) {
+                float s = static_cast<float>(scale_data[i]);
+                float b = static_cast<float>(bias_zp_data[i]);
+                bias_zp_data[i] = ov::float16(s != 0.0f ? -b / s : 0.0f);
+            }
+            auto zero_point_f16 = std::make_shared<ov::op::v0::Constant>(zp);
+            auto w_zp =
+                std::make_shared<ov::op::v1::Subtract>(weights_f16, zero_point_f16, ov::op::AutoBroadcastType::NUMPY);
+            result = std::make_shared<ov::op::v1::Multiply>(w_zp, scales_f16, ov::op::AutoBroadcastType::NUMPY);
         } else {
             // Zero point path: (w - zp) * s
             auto zero_point = std::make_shared<ov::op::v0::Constant>(zp);
@@ -588,11 +605,24 @@ ov::Output<ov::Node> make_int4_weights(ov::Tensor & weight,
         auto weights_f16 = std::make_shared<ov::op::v0::Convert>(weights_node, ov::element::f16);
 
         if (use_bias && zp.get_size() > 0) {
-            // Bias path: w * s + b (zp tensor holds f16 bias values)
-            auto bias_f16 = std::make_shared<ov::op::v0::Constant>(zp);
-            auto w_s =
-                std::make_shared<ov::op::v1::Multiply>(weights_f16, scales_f16, ov::op::AutoBroadcastType::NUMPY);
-            result = std::make_shared<ov::op::v1::Add>(w_s, bias_f16, ov::op::AutoBroadcastType::NUMPY);
+            // Accurate dequant in the FUSABLE zero-point form: (w - zp) * s with an
+            // exact f16 zp = -bias/scale. Equivalent to w*s + bias but matches
+            // ConvertGatherToGatherCompressed so MoE experts stay compressed (no OOM),
+            // and avoids the round(min/scale) error of an integer zp.
+            // Convert bias -> zero-point IN PLACE in the zp tensor (which is backed by the
+            // backend buffer for experts) so we don't allocate a duplicate f16 array.
+            auto * bias_zp_data = zp.data<ov::float16>();
+            const auto * scale_data = scales.data<ov::float16>();
+            size_t n = zp.get_size();
+            for (size_t i = 0; i < n; i++) {
+                float s = static_cast<float>(scale_data[i]);
+                float b = static_cast<float>(bias_zp_data[i]);
+                bias_zp_data[i] = ov::float16(s != 0.0f ? -b / s : 0.0f);
+            }
+            auto zero_point_f16 = std::make_shared<ov::op::v0::Constant>(zp);
+            auto w_zp =
+                std::make_shared<ov::op::v1::Subtract>(weights_f16, zero_point_f16, ov::op::AutoBroadcastType::NUMPY);
+            result = std::make_shared<ov::op::v1::Multiply>(w_zp, scales_f16, ov::op::AutoBroadcastType::NUMPY);
         } else {
             // Zero point path: (w - zp) * s
             auto zero_points_node = std::make_shared<ov::op::v0::Constant>(zp);
@@ -739,7 +769,8 @@ std::shared_ptr<ov::Node> requantize_to_buffers(const ggml_tensor * tensor,
     return result;
 }
 
-OvWeight process_weight_tensor(const ggml_tensor * tensor, const void * data, void * output_base_ptr, bool use_bias) {
+OvWeight process_weight_tensor(const ggml_tensor * tensor, const void * data, void * output_base_ptr, bool use_bias,
+                               bool zp_buffer_is_f16) {
     GGML_ASSERT(tensor != nullptr);
     GGML_ASSERT(data != nullptr);
 
@@ -789,10 +820,15 @@ OvWeight process_weight_tensor(const ggml_tensor * tensor, const void * data, vo
     }
 
     if (use_bias) {
-        OPENVINO_ASSERT(!layout.is_requant,
-                        "use_bias is only used for test-backend-ops, which should not have requantization");
-        // bias node will be created on the fly and not use backend buffer
-        output_base_ptr = nullptr;
+        OPENVINO_ASSERT(!layout.is_requant, "use_bias cannot be combined with requantization");
+        // The f16 bias/zero-point can be written into the backend buffer ONLY when that
+        // buffer was sized for an f16 zp (caller sets zp_buffer_is_f16 - true for the 3D
+        // MoE expert set_tensor path, whose get_alloc_size reserves f16 zp space). For any
+        // other use_bias caller (e.g. test-backend-ops 2D weights, buffer sized for an
+        // integer zp) writing f16 zp would overflow it, so self-allocate instead.
+        if (!zp_buffer_is_f16) {
+            output_base_ptr = nullptr;
+        }
     }
 
     // F16 requant path - no separate scales/zp needed in result
@@ -821,7 +857,10 @@ OvWeight process_weight_tensor(const ggml_tensor * tensor, const void * data, vo
         result.weights = ov::Tensor(weight_type, node_shape, buf_base + layout.weights_offset);
         result.scales = ov::Tensor(ov::element::f16, scale_shape, buf_base + layout.scales_offset);
         if (!layout.is_symmetric) {
-            ov::element::Type zp_type = layout.is_u4 ? ov::element::u4 : ov::element::u8;
+            // use_bias stores an f16 bias in the zp slot (layout reserved f16-sized
+            // space); otherwise a packed integer zero-point.
+            ov::element::Type zp_type =
+                use_bias ? ov::element::f16 : (layout.is_u4 ? ov::element::u4 : ov::element::u8);
             result.zp = ov::Tensor(zp_type, scale_shape, buf_base + layout.zp_offset);
         }
         // else: result.zp remains default-constructed (empty) for symmetric

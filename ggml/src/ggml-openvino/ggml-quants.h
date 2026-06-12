@@ -126,7 +126,8 @@ OvWeight process_weight_tensor(
     const ggml_tensor * tensor,
     const void * data,                 // Source data pointer (may differ from tensor->data)
     void * output_base_ptr = nullptr,  // Base pointer for output buffers (or nullptr for internal allocation)
-    bool use_bias = false);            // Use fp bias instead of quantized zero_point, only used in test-backend-ops
+    bool use_bias = false,             // Use fp bias instead of quantized zero_point (test-backend-ops + 3D experts)
+    bool zp_buffer_is_f16 = false);    // output_base_ptr's zp slot is sized for f16 (3D-expert set_tensor path)
 
 void quantize_q4_0(const float * x,
                    ov::Tensor & weights_arr,

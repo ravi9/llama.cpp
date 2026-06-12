@@ -222,6 +222,14 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
         return std::nullopt;
     }
     if (strncmp(tensor->name, "token_embd.weight", 17) == 0) {
+        // On CPU/GPU, requantizing token_embd to channel-wise Q8_0_C (one scale per
+        // 2816-wide row) loses precision on the many small embedding values (they
+        // round to 0), measurably degrading output quality. Keep native extraction
+        // (per-32 block scales) on non-NPU. NPU still needs the requant for layout.
+        // Override with GGML_OPENVINO_EMBD_REQUANT=1.
+        if (!ggml_openvino_is_npu() && !getenv("GGML_OPENVINO_EMBD_REQUANT")) {
+            return std::nullopt;
+        }
         return ((ggml_openvino_is_npu() && tensor->type == GGML_TYPE_Q6_K) ? ExtraQuantType::F16 :
                                                                              ExtraQuantType::Q8_0_C);
     }
@@ -252,8 +260,10 @@ ggml_openvino_extracted_layout ggml_openvino_get_extracted_layout(const ggml_ten
         return layout;
     }
 
-    // Only handle 2D weight tensors
-    if (tensor->ne[2] != 1 || tensor->ne[3] != 1) {
+    // Handle 2D weight tensors, and 3D MoE expert weights [k, m, n_expert] which
+    // are treated as a flattened 2D [n_expert*m, k] tensor (each row is quantized
+    // independently along k, so the block layout is identical when flattened).
+    if (tensor->ne[3] != 1) {
         return layout;
     }
 
@@ -375,6 +385,10 @@ ggml_openvino_extracted_layout ggml_openvino_get_extracted_layout(const ggml_ten
     // For symmetric quantization, no zp needed (weights stored as signed)
     if (layout.is_symmetric) {
         layout.zp_size = 0;
+    } else if (use_bias) {
+        // use_bias stores the zero-point/bias as F16 (2 bytes/block), not a packed
+        // integer. Must size the buffer accordingly so the extracted data fits in-place.
+        layout.zp_size = n_blocks * sizeof(uint16_t);
     } else {
         layout.zp_size = layout.is_u4 ? ((n_blocks + 1) / 2) : n_blocks;
     }
