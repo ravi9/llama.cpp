@@ -71,7 +71,9 @@ Although OpenVINO supports a wide range of [Intel hardware](https://docs.openvin
 
 ## Supported Llama.cpp Tools
 
-The following tools work with the OpenVINO backend on CPU, GPU, NPU:
+The OpenVINO backend integrates with the standard llama.cpp tools listed below.
+However, all the tools coverage across all devices is not uniform and exhaustive validation is work in progress.
+
 - llama-bench
 - llama-cli
 - llama-completion
@@ -761,6 +763,7 @@ build\ReleaseOV\bin\llama-simple.exe -m "C:\models\Llama-3.2-1B-Instruct-Q4_K_M.
 - Llama.cpp OpenVINO backend currently supports a subset of GGML ops and text-only models. Unsupported ops or unsupported op shapes/cases fail during OpenVINO translation.
 - Multimodal features (audio/image/video) are a work in progress.
 - Limited Embedding and Reranking model support.
+- Llama.cpp tool coverage across CPU/GPU/NPU is not uniform.
 
 **Tool-specific**
 
