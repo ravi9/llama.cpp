@@ -4,9 +4,12 @@
 
 #include <openvino/core/node.hpp>
 #include <openvino/core/node_output.hpp>
+#include <openvino/op/broadcast.hpp>
+#include <openvino/op/concat.hpp>
 #include <openvino/op/constant.hpp>
 #include <openvino/op/convert.hpp>
 #include <openvino/op/gather.hpp>
+#include <openvino/op/shape_of.hpp>
 #include <openvino/op/squeeze.hpp>
 #include <openvino/op/unsqueeze.hpp>
 
@@ -37,6 +40,20 @@ OutputVector translate_get_rows(const NodeContext & context) {
             auto axis = ov::op::v0::Constant::create(ov::element::i32, ov::Shape{}, {1});
             data =
                 std::make_shared<ov::op::v0::Squeeze>(data, ov::op::v0::Constant::create(ov::element::i64, {1}, {0}));
+            // data: [batch, rows, ...], indices: [batch, n] - this is a batched gather
+            // (batch_dims=1) along the rows axis. The data and indices batch dims are
+            // logically equal (both = n_tokens) but reach this node through independent
+            // dynamic reshapes, so the GPU plugin's gather shape inference cannot prove
+            // data.shape[0] == indices.shape[0] and rejects the node. Tie the indices
+            // batch dim to the data batch dim explicitly: broadcast indices to
+            // [data_batch, indices_n] so both batch dims are the SAME dynamic value.
+            auto data_shape = std::make_shared<ov::op::v3::ShapeOf>(data, ov::element::i64);
+            auto data_batch = get_dimensions(data_shape, {0});  // [batch]
+            auto idx_shape = std::make_shared<ov::op::v3::ShapeOf>(indices, ov::element::i64);
+            auto idx_n = get_dimensions(idx_shape, {1});  // [n]
+            auto idx_target = std::make_shared<ov::op::v0::Concat>(ov::OutputVector{data_batch, idx_n}, 0);
+            indices = std::make_shared<ov::op::v3::Broadcast>(indices, idx_target,
+                                                              ov::op::BroadcastType::BIDIRECTIONAL);
             res = std::make_shared<ov::op::v8::Gather>(data, indices, axis, 1);
         }
     } else if (context.is_stateful() && data.get_partial_shape().rank() == 3) {
