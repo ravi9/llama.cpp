@@ -267,17 +267,26 @@ ov::Output<ov::Node> process_view_input_new(const NodeContext & context, int inp
 
     // If translate_view already resolved this VIEW (produced a Slice), the input
     // will already have the expected shape — skip re-slicing.
+    //
+    // Two notions of "matches" are accepted per axis:
+    //   - both dims static and equal, OR
+    //   - both dims dynamic.
+    // The dynamic case matters for the MoE expert-plane views: translate_view now emits a
+    // DYNAMIC-token slice (so the token dim is not frozen). An all-static-only check would
+    // see the dynamic token dim, decide the shapes "don't match", and fall through to
+    // re-slice/flatten the already-resolved view (a Reshape to the full flattened
+    // n_expert_used*n_embd tail, which then conflicts with the single-plane input). Treat a
+    // dynamic-vs-dynamic axis as matching so the already-resolved view is reused as-is.
     auto expected_ov_shape = context.get_view_input_ov_shape(input_index, 0);
     auto actual_shape = input.get_partial_shape();
     if (expected_ov_shape.rank().is_static() && actual_shape.rank().is_static() &&
         expected_ov_shape.rank() == actual_shape.rank()) {
         bool shapes_match = true;
         for (int64_t i = 0; i < expected_ov_shape.rank().get_length(); ++i) {
-            if (!expected_ov_shape[i].is_static() || !actual_shape[i].is_static()) {
-                shapes_match = false;
-                break;
-            }
-            if (expected_ov_shape[i] != actual_shape[i]) {
+            const bool both_dynamic = expected_ov_shape[i].is_dynamic() && actual_shape[i].is_dynamic();
+            const bool both_static_equal = expected_ov_shape[i].is_static() && actual_shape[i].is_static() &&
+                                           expected_ov_shape[i] == actual_shape[i];
+            if (!both_dynamic && !both_static_equal) {
                 shapes_match = false;
                 break;
             }

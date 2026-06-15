@@ -1,7 +1,10 @@
 #include "../op_table.h"
 #include "../utils.h"
+#include <openvino/op/concat.hpp>
 #include <openvino/op/constant.hpp>
+#include <openvino/op/gather.hpp>
 #include <openvino/op/reshape.hpp>
+#include <openvino/op/shape_of.hpp>
 #include <openvino/op/slice.hpp>
 #include <set>
 namespace ov {
@@ -36,7 +39,10 @@ OutputVector translate_view(const NodeContext & context) {
                 if (sst.size() == nd && dst.size() == nd) {
                     // Map each dst axis of size>1 to a src axis with equal (size,stride);
                     // the unmatched src axis of size>1 is the indexed expert axis.
+                    // dst_to_src[d] records which src axis each dst axis came from, so we can
+                    // later pull the dynamic (token) dim from the right source axis at runtime.
                     std::vector<bool> used(nd, false);
+                    std::vector<int> dst_to_src(nd, -1);
                     bool ok = true;
                     for (size_t d = 0; d < nd; ++d) {
                         if (dd[d] == 1) {
@@ -48,6 +54,7 @@ OutputVector translate_view(const NodeContext & context) {
                         }
                         if (found < 0) { ok = false; break; }
                         used[found] = true;
+                        dst_to_src[d] = found;
                     }
                     int dropped = -1;
                     if (ok) {
@@ -70,6 +77,43 @@ OutputVector translate_view(const NodeContext & context) {
                                     ov::op::v0::Constant::create(ov::element::i64, {1}, {sel + 1}),
                                     ov::op::v0::Constant::create(ov::element::i64, {1}, {1}),
                                     ov::op::v0::Constant::create(ov::element::i64, {1}, {dropped}));
+                                // Build the reshape target from the (concrete) dst shape, but
+                                // keep the dynamic token axis dynamic instead of freezing it
+                                // to the captured n_tokens. Without this the constant dst
+                                // shape bakes in the prefill token count and the static value
+                                // flows downstream, turning every later decoder layer static
+                                // (the GPU in-place-concat KV-cache bug). The token axis is
+                                // PERMUTED between the sliced input and the dst (e.g. input
+                                // [1,tok,expert,emb] -> dst [1,1,tok,emb]), so special_zero
+                                // (which copies the same-position dim) is not enough: pull the
+                                // dynamic dim from the correct SOURCE axis via ShapeOf+Gather
+                                // and place it at the dst token position.
+                                const int32_t dyn = context.get_op_dynamic_dim();  // output ggml axis, -1 if none
+                                int dst_ov_axis = (dyn != -1) ? (3 - (int) dyn) : -1;  // get_shape() reverses ggml order
+                                int src_ov_axis = (dst_ov_axis >= 0 && dst_ov_axis < (int) nd)
+                                                      ? dst_to_src[dst_ov_axis]
+                                                      : -1;
+                                if (dst_ov_axis >= 0 && src_ov_axis >= 0) {
+                                    // target = concat of per-axis scalars; the token axis is a
+                                    // runtime Gather of the slice's shape, the rest are constants.
+                                    auto sl_shape = std::make_shared<ov::op::v3::ShapeOf>(sl, ov::element::i64);
+                                    auto tok_dim = std::make_shared<ov::op::v8::Gather>(
+                                        sl_shape,
+                                        ov::op::v0::Constant::create(ov::element::i64, {1}, {src_ov_axis}),
+                                        ov::op::v0::Constant::create(ov::element::i64, {}, {0}));
+                                    ov::OutputVector parts;
+                                    for (int a = 0; a < (int) nd; ++a) {
+                                        if (a == dst_ov_axis) {
+                                            parts.push_back(tok_dim);
+                                        } else {
+                                            parts.push_back(ov::op::v0::Constant::create(
+                                                ov::element::i64, {1}, {(int64_t) dd[a]}));
+                                        }
+                                    }
+                                    auto dc = std::make_shared<ov::op::v0::Concat>(parts, 0);
+                                    auto rs = std::make_shared<ov::op::v1::Reshape>(sl, dc, false);
+                                    return rename_outputs_with_suffix({rs}, context.get_name());
+                                }
                                 auto dc = ov::op::v0::Constant::create(
                                     ov::element::i64, {nd}, std::vector<int64_t>(dd.begin(), dd.end()));
                                 auto rs = std::make_shared<ov::op::v1::Reshape>(sl, dc, false);

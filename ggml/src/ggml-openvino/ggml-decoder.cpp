@@ -1597,7 +1597,21 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
         case GGML_OP_ARGSORT:
         case GGML_OP_ADD_ID:
         case GGML_OP_UNARY:
+        // Shape-preserving elementwise ops: the dynamic dim is unchanged from src[0].
+        // DIV/CLAMP are used in the MoE routing-weight normalization
+        // (sum_rows -> clamp -> div). If they are left untracked here the dynamic
+        // (token) dim is lost there, the captured prefill token count gets baked into
+        // the downstream reshapes, and every decoder layer after layer 0 turns static
+        // (which then triggers the GPU in-place-concat KV-cache corruption).
+        case GGML_OP_DIV:
+        case GGML_OP_CLAMP:
             m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[0]];
+            break;
+        case GGML_OP_SUM_ROWS:
+            // SUM_ROWS reduces ggml axis 0 to size 1 and preserves all other axes, so the
+            // dynamic dim is preserved unless it was axis 0 (then it is summed away).
+            m_node_dynamic_dims[node] =
+                (m_node_dynamic_dims[node->src[0]] == 0) ? -1 : m_node_dynamic_dims[node->src[0]];
             break;
         case GGML_OP_MUL_MAT_ID:
             m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[1]];
