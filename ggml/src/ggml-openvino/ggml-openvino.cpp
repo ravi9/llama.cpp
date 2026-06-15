@@ -882,8 +882,122 @@ static bool mul_mat_id_requires_large_tmp(const ggml_tensor * op) {
     return tmp_bytes > mul_mat_id_tmp_limit;
 }
 
-static bool is_op_unsupported_case(const ggml_tensor * op) {
+static bool is_moe_routing_logits_pattern(const ggml_tensor * op) {
+    if (op == nullptr || op->op != GGML_OP_MUL_MAT || op->src[0] == nullptr || op->src[1] == nullptr) {
+        return false;
+    }
+
+    const ggml_tensor * weights = op->src[0];
+    const ggml_tensor * hidden  = op->src[1];
+
+    if (weights->ne[2] != 1 || weights->ne[3] != 1) {
+        return false;
+    }
+
+    if (op->ne[0] <= 1 || op->ne[0] > 256 || hidden->ne[0] <= op->ne[0]) {
+        return false;
+    }
+
+    return weights->ne[0] == hidden->ne[0] && weights->ne[1] == op->ne[0] && op->ne[1] == hidden->ne[1] &&
+           op->ne[2] == hidden->ne[2] && op->ne[3] == hidden->ne[3];
+}
+
+static bool is_moe_routing_scores_pattern(const ggml_tensor * op) {
+    if (is_moe_routing_logits_pattern(op)) {
+        return true;
+    }
+
+    if (op == nullptr) {
+        return false;
+    }
+
+    if (op->op == GGML_OP_ADD && op->src[0] != nullptr && is_moe_routing_logits_pattern(op->src[0])) {
+        return true;
+    }
+
+    if (op->op == GGML_OP_SOFT_MAX && op->src[0] != nullptr && is_moe_routing_scores_pattern(op->src[0])) {
+        return true;
+    }
+
+    return false;
+}
+
+static bool is_moe_routing_argsort_pattern(const ggml_tensor * op) {
+    return op != nullptr && op->op == GGML_OP_ARGSORT && op->src[0] != nullptr &&
+           is_moe_routing_scores_pattern(op->src[0]);
+}
+
+static bool is_argsort_topk_view_pattern(const ggml_tensor * op) {
+    return op != nullptr && op->op == GGML_OP_VIEW && op->src[0] != nullptr && op->src[0]->op == GGML_OP_ARGSORT &&
+           op->type == GGML_TYPE_I32 && op->ne[0] <= op->src[0]->ne[0];
+}
+
+static bool is_moe_topk_ids_pattern(const ggml_tensor * op) {
+    return is_argsort_topk_view_pattern(op);
+}
+
+static bool is_moe_get_rows_pattern(const ggml_tensor * op) {
+    return op != nullptr && op->op == GGML_OP_GET_ROWS && op->src[0] != nullptr && op->src[1] != nullptr &&
+           is_moe_topk_ids_pattern(op->src[1]);
+}
+
+static bool is_moe_cpu_fallback_pattern(const ggml_tensor * op) {
+    if (op == nullptr || op->op == GGML_OP_NONE) {
+        return false;
+    }
+
+    if (is_moe_routing_argsort_pattern(op) || is_moe_topk_ids_pattern(op) || is_moe_get_rows_pattern(op)) {
+        return true;
+    }
+
     switch (op->op) {
+    case GGML_OP_RESHAPE:
+    case GGML_OP_VIEW:
+    case GGML_OP_SOFT_MAX:
+    case GGML_OP_SUM_ROWS:
+    case GGML_OP_CLAMP:
+        return is_moe_cpu_fallback_pattern(op->src[0]);
+    case GGML_OP_MUL_MAT_ID:
+        return is_moe_topk_ids_pattern(op->src[2]);
+    case GGML_OP_ADD_ID:
+        return is_moe_cpu_fallback_pattern(op->src[0]) && is_moe_topk_ids_pattern(op->src[2]);
+    case GGML_OP_GLU:
+        return is_moe_cpu_fallback_pattern(op->src[0]) &&
+               (op->src[1] == nullptr || is_moe_cpu_fallback_pattern(op->src[1]));
+    case GGML_OP_ADD:
+    case GGML_OP_MUL:
+    case GGML_OP_SUB:
+    case GGML_OP_DIV: {
+        bool has_src = false;
+        for (int i = 0; i < GGML_MAX_SRC; ++i) {
+            const ggml_tensor * src = op->src[i];
+            if (src == nullptr) {
+                continue;
+            }
+            has_src = true;
+            if (!is_moe_cpu_fallback_pattern(src)) {
+                return false;
+            }
+        }
+        return has_src;
+    }
+    default:
+        return false;
+    }
+}
+
+static bool is_op_unsupported_case(const ggml_tensor * op) {
+    if (is_moe_cpu_fallback_pattern(op)) {
+        return true;
+    }
+
+    switch (op->op) {
+    case GGML_OP_CONCAT: {
+        if (op->type == GGML_TYPE_I64) {
+            return true;
+        }
+        break;
+    }
     case GGML_OP_GET_ROWS:
     case GGML_OP_SET_ROWS: {
         if (op->ne[3] != 1) {
@@ -895,17 +1009,10 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
             return true;
         }
 
-        // Keep the MoE routing weights gather on CPU for GPU runs. Splitting
-        // only at the later SUM/CLAMP/DIV nodes still leaves this routing path
-        // numerically unstable for arctic-style MoE graphs.
-        if (strncmp(op->name, "ffn_moe_weights", sizeof("ffn_moe_weights") - 1) == 0) {
-            return true;
-        }
         break;
     }
     case GGML_OP_RESHAPE: {
-        if (strncmp(op->name, "ffn_moe_weights", sizeof("ffn_moe_weights") - 1) == 0 ||
-            strncmp(op->name, "ffn_norm_exps", sizeof("ffn_norm_exps") - 1) == 0) {
+        if (strncmp(op->name, "ffn_norm_exps", sizeof("ffn_norm_exps") - 1) == 0) {
             return true;
         }
         break;
@@ -952,45 +1059,11 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
             return true;
         }
 
-        // qwen3next MoE weight normalization is numerically sensitive on the GPU
-        // path. Keep the normalization divide on CPU to match the reference.
-        if (strncmp(op->name, "ffn_moe_weights_norm", sizeof("ffn_moe_weights_norm") - 1) == 0) {
-            return true;
-        }
-        break;
-    }
-    case GGML_OP_SOFT_MAX: {
-        if (op->src[2] != nullptr) {
-            // GGML_LOG_WARN("OpenVINO backend does not support SOFT_MAX with sinks\n");
-            return true;
-        }
-
-        if (strncmp(op->name, "ffn_moe_probs", sizeof("ffn_moe_probs") - 1) == 0) {
-            return true;
-        }
-
-        // GPU execution of the MoE routing weights softmax is numerically unstable
-        // when fused with the surrounding GET_ROWS/reshape path. Keep this softmax
-        // on CPU so the scheduler splits at the same boundary that restores parity.
-        if (op->src[0] != nullptr && op->src[0]->op == GGML_OP_RESHAPE && op->src[0]->src[0] != nullptr &&
-            strncmp(op->src[0]->src[0]->name, "ffn_moe_weights", sizeof("ffn_moe_weights") - 1) == 0) {
-            return true;
-        }
         break;
     }
     case GGML_OP_SUM_ROWS: {
-        if (strncmp(op->name, "ffn_moe_weights_sum", sizeof("ffn_moe_weights_sum") - 1) == 0) {
-            return true;
-        }
-
         // if the input is PERMUTE skip
         if (op->src[0]->op == GGML_OP_PERMUTE) {
-            return true;
-        }
-        break;
-    }
-    case GGML_OP_CLAMP: {
-        if (strncmp(op->name, "ffn_moe_weights_sum_clamped", sizeof("ffn_moe_weights_sum_clamped") - 1) == 0) {
             return true;
         }
         break;
@@ -1050,12 +1123,6 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
         break;
     }
     case GGML_OP_MUL_MAT: {
-        if (ggml_openvino_get_device_name() == "GPU" && op->src[1]->op == GGML_OP_SOFT_MAX &&
-            op->src[0]->op == GGML_OP_CONT && op->src[0]->src[0] != nullptr &&
-            op->src[0]->src[0]->op == GGML_OP_TRANSPOSE && op->src[0]->src[0]->src[0] != nullptr &&
-            op->src[0]->src[0]->src[0]->op == GGML_OP_PERMUTE) {
-            return true;
-        }
         if (op->src[0]->ne[3] != op->src[1]->ne[3] && op->src[0]->ne[3] != 1 && op->src[1]->ne[3] != 1) {
             return true;
         }
@@ -1065,11 +1132,6 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
         break;
     }
     case GGML_OP_MUL_MAT_ID: {
-        if (strncmp(op->name, "ffn_moe_gate_up", sizeof("ffn_moe_gate_up") - 1) == 0 ||
-            strncmp(op->name, "ffn_moe_down", sizeof("ffn_moe_down") - 1) == 0) {
-            return true;
-        }
-
         if (mul_mat_id_requires_large_tmp(op)) {
             return true;
         }
@@ -1146,14 +1208,6 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
         // qwen3next is numerically unstable with OpenVINO SSM_CONV.
         // Keep this op on CPU until the OpenVINO implementation is fixed.
         return true;
-    }
-    case GGML_OP_VIEW: {
-        // Skip TOPK_MOE fused tests until it is fully supported
-        // the argsort_top_k VIEW wrapping ARGSORT is named "selected_experts" in test_topk_moe
-        if (strcmp(op->name, "selected_experts") == 0) {
-            return true;
-        }
-        break;
     }
     default:
         break;
