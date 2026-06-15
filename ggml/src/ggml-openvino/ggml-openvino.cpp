@@ -906,6 +906,19 @@ static bool checked_mul_size(size_t a, size_t b, size_t & out) {
     return true;
 }
 
+// When set (env GGML_OPENVINO_GPU_FULL_MOE), keep the entire MoE — including the routing
+// gather/softmax/argsort/normalization and the expert matmuls — on the OpenVINO device so
+// the whole model compiles as ONE submodel instead of fragmenting at every MoE node. The
+// per-node "force to CPU on GPU" gates below were added to work around GPU-plugin numerical
+// issues, but they fragment the graph into dozens of submodels with cross-boundary tensor
+// copies (which mis-handles e.g. the layer-5 argsort indices). With the dynamic-shape
+// frontend fix in place the un-fragmented graph is numerically correct, so this toggle lets
+// us run the whole MoE on one OV submodel.
+static bool gpu_full_moe_enabled() {
+    static const bool v = getenv("GGML_OPENVINO_GPU_FULL_MOE") != nullptr;
+    return v;
+}
+
 static bool mul_mat_id_requires_large_tmp(const ggml_tensor * op) {
     const ggml_tensor * as = op->src[0];
     const ggml_tensor * ids = op->src[2];
@@ -917,7 +930,7 @@ static bool mul_mat_id_requires_large_tmp(const ggml_tensor * op) {
     // shape [n_tokens, n_used, rows, k]. Skip cases that would create a very
     // large temporary on GPU and let the scheduler fall back instead. The CPU
     // device can handle the large intermediate, so only apply this cap on GPU.
-    if (ggml_openvino_get_device_name() != "GPU") {
+    if (ggml_openvino_get_device_name() != "GPU" || gpu_full_moe_enabled()) {
         return false;
     }
 
@@ -955,15 +968,16 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
         // only at the later SUM/CLAMP/DIV nodes still leaves this routing path
         // numerically unstable for arctic-style MoE graphs. The CPU device path
         // is numerically stable, so only force this off on GPU.
-        if (ggml_openvino_get_device_name() == "GPU" &&
+        if (ggml_openvino_get_device_name() == "GPU" && !gpu_full_moe_enabled() &&
             strncmp(op->name, "ffn_moe_weights", sizeof("ffn_moe_weights") - 1) == 0) {
             return true;
         }
         break;
     }
     case GGML_OP_RESHAPE: {
-        if (strncmp(op->name, "ffn_moe_weights", sizeof("ffn_moe_weights") - 1) == 0 ||
-            strncmp(op->name, "ffn_norm_exps", sizeof("ffn_norm_exps") - 1) == 0) {
+        if (!gpu_full_moe_enabled() &&
+            (strncmp(op->name, "ffn_moe_weights", sizeof("ffn_moe_weights") - 1) == 0 ||
+             strncmp(op->name, "ffn_norm_exps", sizeof("ffn_norm_exps") - 1) == 0)) {
             return true;
         }
         break;
@@ -1006,14 +1020,14 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
         // The GPU plugin can fuse broadcast DIV into the preceding FFN GEMM path
         // and produce infs for per-channel scale vectors. Keep those DIVs on CPU
         // until the fused GPU kernel is reliable. (falied case llama-arch-test mpt)
-        if (requires_broadcast && ggml_openvino_get_device_name() == "GPU") {
+        if (requires_broadcast && ggml_openvino_get_device_name() == "GPU" && !gpu_full_moe_enabled()) {
             return true;
         }
 
         // qwen3next MoE weight normalization is numerically sensitive on the GPU
         // path. Keep the normalization divide on CPU to match the reference. The
         // CPU device path is stable, so only force this off on GPU.
-        if (ggml_openvino_get_device_name() == "GPU" &&
+        if (ggml_openvino_get_device_name() == "GPU" && !gpu_full_moe_enabled() &&
             strncmp(op->name, "ffn_moe_weights_norm", sizeof("ffn_moe_weights_norm") - 1) == 0) {
             return true;
         }
@@ -1025,7 +1039,7 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
             return true;
         }
 
-        if (ggml_openvino_get_device_name() == "GPU" &&
+        if (ggml_openvino_get_device_name() == "GPU" && !gpu_full_moe_enabled() &&
             strncmp(op->name, "ffn_moe_probs", sizeof("ffn_moe_probs") - 1) == 0) {
             return true;
         }
@@ -1033,14 +1047,15 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
         // GPU execution of the MoE routing weights softmax is numerically unstable
         // when fused with the surrounding GET_ROWS/reshape path. Keep this softmax
         // on CPU so the scheduler splits at the same boundary that restores parity.
-        if (op->src[0] != nullptr && op->src[0]->op == GGML_OP_RESHAPE && op->src[0]->src[0] != nullptr &&
+        if (!gpu_full_moe_enabled() && op->src[0] != nullptr && op->src[0]->op == GGML_OP_RESHAPE &&
+            op->src[0]->src[0] != nullptr &&
             strncmp(op->src[0]->src[0]->name, "ffn_moe_weights", sizeof("ffn_moe_weights") - 1) == 0) {
             return true;
         }
         break;
     }
     case GGML_OP_SUM_ROWS: {
-        if (ggml_openvino_get_device_name() == "GPU" &&
+        if (ggml_openvino_get_device_name() == "GPU" && !gpu_full_moe_enabled() &&
             strncmp(op->name, "ffn_moe_weights_sum", sizeof("ffn_moe_weights_sum") - 1) == 0) {
             return true;
         }
@@ -1052,7 +1067,7 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
         break;
     }
     case GGML_OP_CLAMP: {
-        if (ggml_openvino_get_device_name() == "GPU" &&
+        if (ggml_openvino_get_device_name() == "GPU" && !gpu_full_moe_enabled() &&
             strncmp(op->name, "ffn_moe_weights_sum_clamped", sizeof("ffn_moe_weights_sum_clamped") - 1) == 0) {
             return true;
         }
@@ -1141,7 +1156,7 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
         // ffn_moe_gate_up / ffn_moe_down expert matmuls were previously forced to
         // CPU. With 3D quantized expert-weight dequantization in create_weight_node,
         // they can run on the OpenVINO CPU path. Keep them on CPU only for GPU.
-        if (ggml_openvino_get_device_name() == "GPU" &&
+        if (ggml_openvino_get_device_name() == "GPU" && !gpu_full_moe_enabled() &&
             (strncmp(op->name, "ffn_moe_gate_up", sizeof("ffn_moe_gate_up") - 1) == 0 ||
              strncmp(op->name, "ffn_moe_down", sizeof("ffn_moe_down") - 1) == 0)) {
             return true;
@@ -1290,7 +1305,7 @@ static bool ggml_backend_openvino_device_supports_op(ggml_backend_dev_t dev, con
             // GGML_LOG_WARN("OpenVINO backend does not support GLU op %s\n", ggml_glu_op_name(ggml_get_glu_op(op)));
             return false;
         }
-        if (ggml_openvino_get_device_name() == "GPU" && has_view_op_input(op)) {
+        if (ggml_openvino_get_device_name() == "GPU" && !gpu_full_moe_enabled() && has_view_op_input(op)) {
             // GGML_LOG_WARN("OpenVINO backend does not support unary op %s with view input\n",
             //               ggml_glu_op_name(ggml_get_glu_op(op)));
             return false;
