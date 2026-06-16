@@ -1236,6 +1236,9 @@ static bool ggml_backend_openvino_device_supports_op(ggml_backend_dev_t dev, con
             // GGML_LOG_WARN("OpenVINO backend does not support unary op %s\n", ggml_unary_op_name(ggml_get_unary_op(op)));
             return false;
         }
+        if (ggml_get_unary_op(op) == GGML_UNARY_OP_EXP && op->type == GGML_TYPE_F32) {
+            return false;
+        }
         break;
     }
     case GGML_OP_GLU: {
