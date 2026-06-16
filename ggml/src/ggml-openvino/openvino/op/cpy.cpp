@@ -58,6 +58,11 @@ OutputVector translate_cpy(const NodeContext & context) {
     } else {
         res = input;
     }
+
+    if (res.get_node_shared_ptr() == context.get_input(0).get_node_shared_ptr()) {
+        return {res};
+    }
+
     return rename_outputs_with_suffix({res}, context.get_name());
 }
 
