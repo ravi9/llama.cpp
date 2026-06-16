@@ -1131,7 +1131,7 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
             return true;
         }
         // K > 1 (multiple state snapshots) not supported by fused op
-        if (op->src[5]->ne[3] > 1) {
+        if (((const int32_t *) op->op_params)[0] > 1) {
             return true;
         }
         break;
