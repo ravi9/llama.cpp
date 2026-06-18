@@ -192,18 +192,17 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
         (*tensor_map)[it.first] = it.second;
     }
 
-    auto node_visitor = [&](std::shared_ptr<GgmlDecoder> decoder, int node_idx) {
+    auto translate_node = [&](const std::shared_ptr<GgmlDecoder> & decoder, int node_idx) {
         auto operation_type = decoder->get_op_type(node_idx);
         if (operation_type == "GGML_OP_NONE") {
-            return;
+            return ov::OutputVector{};
         }
 
-        ov::OutputVector converted_outputs;
         auto it = m_translator_map.find(operation_type);
         FRONT_END_OP_CONVERSION_CHECK(it != m_translator_map.end(), "Translation for operation type ", operation_type,
                                       " is not implemented.");
         NodeContext node_context(decoder, tensor_map, node_idx, this);
-        converted_outputs = it->second(node_context);
+        ov::OutputVector converted_outputs = it->second(node_context);
 
         const auto & node_output_names = decoder->get_output_names(node_idx);
         FRONT_END_OP_CONVERSION_CHECK(node_output_names.size() == converted_outputs.size(), "Number of ",
@@ -216,13 +215,46 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
                 (*tensor_map)[output_name] = converted_outputs[i];
             }
         }
+        return converted_outputs;
+    };
 
-        const auto & node_output_aliases = decoder->get_output_aliases(node_idx);
-        for (const auto & output_alias : node_output_aliases) {
-            if (!converted_outputs.empty() && converted_outputs[0].get_node_shared_ptr() != nullptr) {
-                (*tensor_map)[output_alias] = converted_outputs[0];
+    // To handle cases like this
+    // 3: [ 18432,     1,     1,     1] RESHAPE              cache_r_l0 (reshaped)#3
+    //     [ 18432,     1,     1,     1]            0: NONE        cache_r_l0
+    // 4: [     0,     1,     1,     1] VIEW                 cache_r_l0 (reshaped) (view)#4
+    //     [ 18432,     1,     1,     1]            0: RESHAPE     cache_r_l0 (reshaped)#3
+    // 5: [     0,     1,     1,     1] SCALE                cache_r_l0 (reshaped) (view) (view)#5
+    //     [     0,     1,     1,     1]            0: VIEW        cache_r_l0 (reshaped) (view)#4
+    // 6: [     1,     1,     1,     1] VIEW                  (view)#6
+    //     [     1,     1,     1,     1]            0: NONE        leaf_5
+    // 7: [ 18432,     1,     1,     1] GET_ROWS             conv_states-0#7
+    //     [ 18432,     1,     1,     1]            0: RESHAPE     cache_r_l0 (reshaped)#3
+    //     [     1,     1,     1,     1]            1: VIEW         (view)#6
+    // The scale is in-place which modifies cache_r_l0 (reshaped)#3
+    // The translation of scale overwrites cache_r in the tensor_map,
+    // but we also need to overwrite the old cache_r_l0 (reshaped)#3
+    auto refresh_inplace_aliases = [&](const std::shared_ptr<GgmlDecoder> & decoder, int inplace_node_idx,
+                                       const std::string & view_src_name) {
+        for (int node_idx = 0; node_idx < inplace_node_idx; node_idx++) {
+            if (decoder->is_view_like_alias_of(node_idx, view_src_name)) {
+                translate_node(decoder, node_idx);
             }
         }
+    };
+
+    auto node_visitor = [&](std::shared_ptr<GgmlDecoder> decoder, int node_idx) {
+        auto converted_outputs = translate_node(decoder, node_idx);
+        if (converted_outputs.empty()) {
+            return;
+        }
+        const auto inplace_src = decoder->get_inplace_op_src(node_idx);
+        if (inplace_src.empty()) {
+            return;
+        }
+        if (converted_outputs[0].get_node_shared_ptr() != nullptr) {
+            (*tensor_map)[inplace_src] = converted_outputs[0];
+        }
+        refresh_inplace_aliases(decoder, node_idx, inplace_src);
     };
 
     if (!m_naive) {
