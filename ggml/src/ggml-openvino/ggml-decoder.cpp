@@ -334,6 +334,12 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         }
         break;
     }
+    case GGML_OP_SCALE: {
+        if (is_kvcache(node->view_src, nullptr)) {
+            op_case = 1;
+        }
+        break;
+    }
     default:
         break;
     }
@@ -518,6 +524,9 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
         if (node->op == GGML_OP_GATED_DELTA_NET) {
             model_params.state_size = node->src[0]->ne[0];
         }
+        if (node->op == GGML_OP_SCALE && is_kvcache(node->view_src, nullptr)) {
+            compute_params.cache_rs_reset = node->ne[0] != 0;
+        }
     }
     auto * output_tensor = cgraph->nodes[cgraph->n_nodes - 1];
     compute_params.output_len = output_tensor->ne[1];
@@ -660,18 +669,8 @@ void GgmlOvDecoder::add_extra_inputs() {
     }
     // create_1d_input("token_len", m_compute_params.token_len_per_seq * m_compute_params.n_seq_active);
 
-    if (m_compute_params.cache_rs_reset_idx != -1) {
-        create_1d_input("cache_rs_reset_idx", m_compute_params.cache_rs_reset_idx);
-        create_1d_input("cache_rs_reset_len", m_compute_params.cache_rs_reset_len);
-    }
-
-    if (m_compute_params.s_copy_active_slot_len != -1) {
-        create_1d_input("s_copy_active_slot_len", m_compute_params.s_copy_active_slot_len);
-    }
-
-    for (const auto & [node_name, writeback] : m_compute_params.rs_writebacks) {
-        create_1d_input("rs_slot_begin_" + node_name, writeback.slot_begin);
-        create_1d_input("rs_src_begin_" + node_name, writeback.src_begin);
+    if (m_compute_params.cache_rs_reset != -1) {
+        create_1d_input("cache_rs_reset", m_compute_params.cache_rs_reset);
     }
 }
 
@@ -764,7 +763,7 @@ void GgmlOvDecoder::compute_model_outputs() {
         auto cur_node_use_count = m_cgraph->use_counts[ggml_hash_find(&m_cgraph->visited_hash_set, cur_node)];
         if (cur_node_use_count == 0) {
             // The output of in-place ops is the view_src tensor, which is updated in place. We should use the view_src name as the output name to make sure it can be correctly matched with the later ops that use the view_src.
-            if (cur_node != nullptr && is_inplace_op(cur_node)) {
+            if (cur_node != nullptr && ::is_inplace_op(cur_node)) {
                 cur_node = cur_node->view_src;
             }
         } else {
@@ -1371,12 +1370,20 @@ std::vector<std::string> GgmlOvDecoder::get_output_names(int node_idx) const {
     return {m_node_info_list[node_idx].node_name};
 }
 
-std::vector<std::string> GgmlOvDecoder::get_output_aliases(int node_idx) const {
-    const auto * node = m_node_info_list[node_idx].node;
-    if (node != nullptr && node->op == GGML_OP_SET_ROWS && node->view_src != nullptr) {
-        return {std::string(node->view_src->name)};
+std::string GgmlOvDecoder::get_inplace_op_src(int node_idx) const {
+    auto * node = m_node_info_list[node_idx].node;
+    if (!::is_inplace_op(node) || node->view_src == nullptr) {
+        return "";
     }
-    return {};
+    return node->view_src->name;
+}
+
+bool GgmlOvDecoder::is_view_like_alias_of(int node_idx, const std::string & view_src_name) const {
+    auto * node = m_node_info_list[node_idx].node;
+    if (node->view_src == nullptr || std::string(node->view_src->name) != view_src_name) {
+        return false;
+    }
+    return node->op == GGML_OP_RESHAPE || node->op == GGML_OP_VIEW;
 }
 
 const std::string & GgmlOvDecoder::get_op_name() const {

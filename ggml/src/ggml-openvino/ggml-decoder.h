@@ -52,46 +52,18 @@ struct ComputeParams {
     int past_kv_len = -1;
     int output_len = 1;
 
-    int cache_rs_reset_idx = -1;
-    int cache_rs_reset_len = -1;
-    // SSM/DeltaNet models otionally clear cache_r and cache_s of certain slots in the cgraph
-    // 3: [ 18432,     4,     1,     1] RESHAPE              cache_r_l0 (reshaped)
-    //    [ 18432,     4,     1,     1]            0: NONE        cache_r_l0
-    // 4: [ 18432,     1,     1,     1] VIEW                 cache_r_l0 (reshaped) (view)
-    //    [ 18432,     4,     1,     1]            0: RESHAPE     cache_r_l0 (reshaped)
-    // 5: [ 18432,     1,     1,     1] SCALE                cache_r_l0 (reshaped) (view) (view)
-    //    [ 18432,     1,     1,     1]            0: VIEW        cache_r_l0 (reshaped) (view)
-
-    int s_copy_active_slot_len = -1;
-    // SSM/DeltaNet models otionally reorder slots of state cache, to make the active slots contiguous
-    // leaf_5 is the inp->s_copy in llama-graph.cpp, eg if there are 8 slots in total and slot 3 and 7
-    // are active in the current batch, leaf_5 will be [3, 7, 5, 6, 4]
-    //  6: [     2,     1,     1,     1] VIEW                  (view)
-    //      [     2,     1,     1,     1]            0: NONE        leaf_5
-    //  7: [ 18432,     2,     1,     1] GET_ROWS             conv_states-0
-    //      [ 18432,     4,     1,     1]            0: RESHAPE     cache_r_l0 (reshaped)
-    //      [     2,     1,     1,     1]            1: VIEW         (view)
-    //  8: [     0,     1,     1,     1] VIEW                  (view)
-    //      [     2,     1,     1,     1]            0: NONE        leaf_5
-    //  9: [ 18432,     0,     1,     1] GET_ROWS             node_9
-    //      [ 18432,     4,     1,     1]            0: RESHAPE     cache_r_l0 (reshaped)
-    //      [     0,     1,     1,     1]            1: VIEW         (view)
-    // 10: [ 18432,     0,     1,     1] VIEW                 cache_r_l0 (view)
-    //      [ 18432,     4,     1,     1]            0: NONE        cache_r_l0
-    // 11: [ 18432,     0,     1,     1] CPY                  cache_r_l0 (view) (copy of )
-    //      [ 18432,     0,     1,     1]            0: GET_ROWS    node_9
-    //      [ 18432,     0,     1,     1]            1: VIEW        cache_r_l0 (view)
-
-    struct RsWriteback {
-        int slot_begin = 0;  // first cache slot written by the CPY
-        int src_begin = 0;   // where the copied data starts in the source tensor (in rows of it)
-    };
-
-    std::map<std::string, RsWriteback> rs_writebacks;
-    // Offsets of the state cache writeback CPY nodes, keyed by node name. They change with the
-    // batch (kv head, active sequence count, token count) and, with rollback enabled
-    // (cparams.n_rs_seq > 0), the conv state is written back once per snapshot slot, each snapshot
-    // taking a different conv_input window. Passed to the cached model as runtime inputs.
+    int cache_rs_reset = -1;
+    // SSM/DeltaNet models otionally clear the cache_r and cache_s in the cgraph
+    // eg in normal decocding stage, cache_r is not cleared
+    // 4: [     0,     1,     1,     1] VIEW                 cache_r_l0 (reshaped) (view)#4
+    //     [ 18432,     1,     1,     1]            0: RESHAPE     cache_r_l0 (reshaped)#3
+    // 5: [     0,     1,     1,     1] SCALE                cache_r_l0 (reshaped) (view) (view)#5
+    //     [     0,     1,     1,     1]            0: VIEW        cache_r_l0 (reshaped) (view)#4
+    // but if switch to a new sequence, cache_r need to be cleared, which is done by the in-place SCALE by 0
+    // 4: [ 18432,     1,     1,     1] VIEW                 cache_r_l0 (reshaped) (view)#4
+    //     [ 18432,     1,     1,     1]            0: RESHAPE     cache_r_l0 (reshaped)#3
+    // 5: [ 18432,     1,     1,     1] SCALE                cache_r_l0 (reshaped) (view) (view)#5
+    //     [ 18432,     1,     1,     1]            0: VIEW        cache_r_l0 (reshaped) (view)#4
 };
 
 class GgmlOvDecoder : public ov::frontend::ggml::GgmlDecoder {
@@ -198,7 +170,9 @@ public:
 
     virtual std::vector<std::string> get_output_names(int node_idx) const override;
 
-    virtual std::vector<std::string> get_output_aliases(int node_idx) const override;
+    virtual std::string get_inplace_op_src(int node_idx) const override;
+
+    virtual bool is_view_like_alias_of(int node_idx, const std::string & view_src_name) const override;
 
     virtual const std::string & get_op_type() const override;
 

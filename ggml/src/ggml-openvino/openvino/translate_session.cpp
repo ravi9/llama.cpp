@@ -245,13 +245,46 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
                 (*tensor_map)[output_name] = converted_outputs[i];
             }
         }
+        return converted_outputs;
+    };
 
-        const auto & node_output_aliases = decoder->get_output_aliases(node_idx);
-        for (const auto & output_alias : node_output_aliases) {
-            if (!converted_outputs.empty() && converted_outputs[0].get_node_shared_ptr() != nullptr) {
-                (*tensor_map)[output_alias] = converted_outputs[0];
+    // To handle cases like this
+    // 3: [ 18432,     1,     1,     1] RESHAPE              cache_r_l0 (reshaped)#3
+    //     [ 18432,     1,     1,     1]            0: NONE        cache_r_l0
+    // 4: [     0,     1,     1,     1] VIEW                 cache_r_l0 (reshaped) (view)#4
+    //     [ 18432,     1,     1,     1]            0: RESHAPE     cache_r_l0 (reshaped)#3
+    // 5: [     0,     1,     1,     1] SCALE                cache_r_l0 (reshaped) (view) (view)#5
+    //     [     0,     1,     1,     1]            0: VIEW        cache_r_l0 (reshaped) (view)#4
+    // 6: [     1,     1,     1,     1] VIEW                  (view)#6
+    //     [     1,     1,     1,     1]            0: NONE        leaf_5
+    // 7: [ 18432,     1,     1,     1] GET_ROWS             conv_states-0#7
+    //     [ 18432,     1,     1,     1]            0: RESHAPE     cache_r_l0 (reshaped)#3
+    //     [     1,     1,     1,     1]            1: VIEW         (view)#6
+    // The scale is in-place which modifies cache_r_l0 (reshaped)#3
+    // The translation of scale overwrites cache_r in the tensor_map,
+    // but we also need to overwrite the old cache_r_l0 (reshaped)#3
+    auto refresh_inplace_aliases = [&](const std::shared_ptr<GgmlDecoder> & decoder, int inplace_node_idx,
+                                       const std::string & view_src_name) {
+        for (int node_idx = 0; node_idx < inplace_node_idx; node_idx++) {
+            if (decoder->is_view_like_alias_of(node_idx, view_src_name)) {
+                translate_node(decoder, node_idx);
             }
         }
+    };
+
+    auto node_visitor = [&](std::shared_ptr<GgmlDecoder> decoder, int node_idx) {
+        auto converted_outputs = translate_node(decoder, node_idx);
+        if (converted_outputs.empty()) {
+            return;
+        }
+        const auto inplace_src = decoder->get_inplace_op_src(node_idx);
+        if (inplace_src.empty()) {
+            return;
+        }
+        if (converted_outputs[0].get_node_shared_ptr() != nullptr) {
+            (*tensor_map)[inplace_src] = converted_outputs[0];
+        }
+        refresh_inplace_aliases(decoder, node_idx, inplace_src);
     };
 
     if (!m_naive) {
