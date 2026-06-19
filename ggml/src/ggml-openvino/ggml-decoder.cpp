@@ -1284,6 +1284,11 @@ const std::string & GgmlOvDecoder::get_op_type(int node_idx) const {
     return m_node_info_list[node_idx].node_op_type;
 }
 
+const std::string & GgmlOvDecoder::get_op_type() const {
+    static const std::string unknown_op = "UNKNOWN_GGML_OP";
+    return unknown_op;
+}
+
 void GgmlOvDecoder::compute_node_dynamic_dims() {
     auto visit_node = [&](auto && self, ggml_tensor * node) -> void {
         if (!node) {
