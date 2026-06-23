@@ -83,6 +83,10 @@ ov::Output<ov::Node> make_mxfp4_weights(ov::Tensor & weight, ov::Tensor & scales
 
 ov::Output<ov::Node> make_mxfp4_moe_packed_weights(ov::Tensor & weight);
 
+ov::Output<ov::Node> make_mxfp4_weights(ov::Tensor & weight, ov::Tensor & scales);
+
+ov::Output<ov::Node> make_mxfp4_moe_packed_weights(ov::Tensor & weight);
+
 // Extract quantized weights from tensor and create weight subgraph
 // If weights/scales/zp are provided (non-empty), uses them as output buffers
 // Otherwise allocates new ov::Tensors internally
