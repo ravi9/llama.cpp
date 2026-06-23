@@ -50,18 +50,15 @@ struct ComputeParams {
     int past_kv_len = -1;
     int output_len = 1;
 
-    int cache_rs_reset = -1;
-    // SSM/DeltaNet models otionally clear the cache_r and cache_s in the cgraph
-    // eg in normal decocding stage, cache_r is not cleared
-    // 4: [     0,     1,     1,     1] VIEW                 cache_r_l0 (reshaped) (view)#4
-    //     [ 18432,     1,     1,     1]            0: RESHAPE     cache_r_l0 (reshaped)#3
-    // 5: [     0,     1,     1,     1] SCALE                cache_r_l0 (reshaped) (view) (view)#5
-    //     [     0,     1,     1,     1]            0: VIEW        cache_r_l0 (reshaped) (view)#4
-    // but if switch to a new sequence, cache_r need to be cleared, which is done by the in-place SCALE by 0
-    // 4: [ 18432,     1,     1,     1] VIEW                 cache_r_l0 (reshaped) (view)#4
-    //     [ 18432,     1,     1,     1]            0: RESHAPE     cache_r_l0 (reshaped)#3
-    // 5: [ 18432,     1,     1,     1] SCALE                cache_r_l0 (reshaped) (view) (view)#5
-    //     [ 18432,     1,     1,     1]            0: VIEW        cache_r_l0 (reshaped) (view)#4
+    int cache_rs_reset_idx = -1;
+    int cache_rs_reset_len = -1;
+    // SSM/DeltaNet models otionally clear cache_r and cache_s of certain slots in the cgraph
+    // 3: [ 18432,     4,     1,     1] RESHAPE              cache_r_l0 (reshaped)
+    //    [ 18432,     4,     1,     1]            0: NONE        cache_r_l0
+    // 4: [ 18432,     1,     1,     1] VIEW                 cache_r_l0 (reshaped) (view)
+    //    [ 18432,     4,     1,     1]            0: RESHAPE     cache_r_l0 (reshaped)
+    // 5: [ 18432,     1,     1,     1] SCALE                cache_r_l0 (reshaped) (view) (view)
+    //    [ 18432,     1,     1,     1]            0: VIEW        cache_r_l0 (reshaped) (view)
 };
 
 class GgmlOvDecoder : public ov::frontend::ggml::GgmlDecoder {
