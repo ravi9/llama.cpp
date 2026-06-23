@@ -514,7 +514,8 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
             model_params.state_size = node->src[0]->ne[0];
         }
         if (node->op == GGML_OP_SCALE && is_kvcache(node->view_src, nullptr)) {
-            compute_params.cache_rs_reset = node->ne[0] != 0;
+            compute_params.cache_rs_reset_len = ggml_nelements(node) / node->view_src->ne[0];
+            compute_params.cache_rs_reset_idx = node->src[0]->view_offs / node->view_src->ne[0];
         }
     }
     auto * output_tensor = cgraph->nodes[cgraph->n_nodes - 1];
@@ -636,8 +637,9 @@ void GgmlOvDecoder::add_extra_inputs() {
     }
     // create_1d_input("token_len", m_compute_params.token_len_per_seq * m_compute_params.n_seq_active);
 
-    if (m_compute_params.cache_rs_reset != -1) {
-        create_1d_input("cache_rs_reset", m_compute_params.cache_rs_reset);
+    if (m_compute_params.cache_rs_reset_idx != -1) {
+        create_1d_input("cache_rs_reset_idx", m_compute_params.cache_rs_reset_idx);
+        create_1d_input("cache_rs_reset_len", m_compute_params.cache_rs_reset_len);
     }
 }
 
