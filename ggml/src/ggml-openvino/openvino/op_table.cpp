@@ -9,7 +9,6 @@
 #include <openvino/op/gelu.hpp>
 #include <openvino/op/matmul.hpp>
 #include <openvino/op/multiply.hpp>
-#include <openvino/op/negative.hpp>
 #include <openvino/op/sigmoid.hpp>
 #include <openvino/op/subtract.hpp>
 #include <openvino/op/tanh.hpp>
