@@ -198,9 +198,7 @@ public:
 
     virtual std::vector<std::string> get_output_names(int node_idx) const override;
 
-    virtual std::string get_inplace_op_src(int node_idx) const override;
-
-    virtual bool is_view_like_alias_of(int node_idx, const std::string & view_src_name) const override;
+    virtual std::vector<std::string> get_output_aliases(int node_idx) const override;
 
     virtual const std::string & get_op_type() const override;
 

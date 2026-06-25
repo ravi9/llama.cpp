@@ -209,7 +209,9 @@ void GgmlOvDecoder::set_input_output() {
         auto * node = m_cgraph->nodes[node_n];
 
         NodeInfo current_node_info;
-        auto node_name = get_tensor_ov_name(m_cgraph, node);
+        auto node_name = std::string(node->name);
+        auto node_output_name = node_name;
+        auto * node_output = node;
 
         current_node_info.node = node;
         current_node_info.node_name = node_name;
@@ -1538,6 +1540,14 @@ bool GgmlOvDecoder::is_view_like_alias_of(int node_idx, const std::string & view
         return false;
     }
     return node->op == GGML_OP_RESHAPE || node->op == GGML_OP_VIEW;
+}
+
+std::vector<std::string> GgmlOvDecoder::get_output_aliases(int node_idx) const {
+    const auto * node = m_node_info_list[node_idx].node;
+    if (node != nullptr && node->op == GGML_OP_SET_ROWS && node->view_src != nullptr) {
+        return {std::string(node->view_src->name)};
+    }
+    return {};
 }
 
 const std::string & GgmlOvDecoder::get_op_name() const {
