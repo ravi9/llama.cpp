@@ -318,14 +318,13 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
             compile_end_time = decoder_end_time;
         } else {
             // Fail fast: a cache-miss recompile feeds weight data to compile_model, but
-            // GGML_OPENVINO_RELEASE_WEIGHTS (or GGML_OPENVINO_MEMORY_OPTIMIZE on GPU)
-            // may have already dropped the host weight pages
+            // GGML_OPENVINO_RELEASE_WEIGHTS may have already dropped the host weight pages
             // (they would read as zeros). That mode requires stable graph shapes.
             if (ggml_openvino_weight_buffers_released()) {
                 GGML_ABORT(
                     "ggml-openvino: a new graph needs to be compiled but host weight buffers were already "
-                    "released via GGML_OPENVINO_RELEASE_WEIGHTS/GGML_OPENVINO_MEMORY_OPTIMIZE. This mode requires "
-                    "stable graph shapes; disable host weight release for dynamic workloads.");
+                    "released via GGML_OPENVINO_RELEASE_WEIGHTS. This mode requires stable graph shapes; "
+                    "unset GGML_OPENVINO_RELEASE_WEIGHTS for dynamic workloads.");
             }
             if (cache_enabled) {
                 std::lock_guard<std::mutex> map_lock(r_ctx->ctx_mutex);
@@ -481,7 +480,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
         }
     }
 
-    // GGML_OPENVINO_RELEASE_WEIGHTS (or GGML_OPENVINO_MEMORY_OPTIMIZE on GPU): the plugin holds its own device copy of
+    // GGML_OPENVINO_RELEASE_WEIGHTS: on GPU the plugin holds its own device copy of
     // every weight after compile, so the host weight buffers can be dropped to reclaim
     // RSS. The GPU backend uses a single dynamic-shape model for both prefill and decode,
     // so once a graph is compiled it is reused for the whole session — the only thing
@@ -490,7 +489,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
     // compiled-model cache so it survives backend teardown (see ggml_backend_openvino_free).
     // Without the pin, a later test/context would recompile against the now-dropped pages.
     // A genuinely new graph still fails fast at the cache-miss compile branch.
-    if (cache_hit && ggml_openvino_release_weights_enabled(device) &&
+    if (cache_hit && device == "GPU" && ggml_openvino_getenv_int("GGML_OPENVINO_RELEASE_WEIGHTS") &&
         !ggml_openvino_weight_buffers_released()) {
         ggml_openvino_release_weight_buffers();
     }
