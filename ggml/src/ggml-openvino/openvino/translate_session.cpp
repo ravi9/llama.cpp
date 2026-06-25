@@ -216,6 +216,13 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
                 (*tensor_map)[output_name] = converted_outputs[i];
             }
         }
+
+        const auto & node_output_aliases = decoder->get_output_aliases(node_idx);
+        for (const auto & output_alias : node_output_aliases) {
+            if (!converted_outputs.empty() && converted_outputs[0].get_node_shared_ptr() != nullptr) {
+                (*tensor_map)[output_alias] = converted_outputs[0];
+            }
+        }
     };
 
     if (!m_naive) {
