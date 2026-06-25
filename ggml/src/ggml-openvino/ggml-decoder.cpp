@@ -106,14 +106,6 @@ void GgmlOvDecoder::set_input_output() {
         auto node_name = std::string(node->name);
         auto node_output_name = node_name;
         auto * node_output = node;
-        if (node->op == GGML_OP_SET_ROWS) {
-            // SET_ROWS updates the tensor in place. For later ov op that uses the
-            // the view_src of SET_ROWS, we need to make sure they get the updated tensor
-            // by putting the view_src name in the tensor_map in
-            // <openvino>/src/frontends/ggml/src/translate_session.cpp
-            node_output_name = std::string(node->view_src->name);
-            node_output = node->view_src;
-        }
 
         current_node_info.node = node;
         current_node_info.node_name = node_name;
@@ -1229,6 +1221,14 @@ std::vector<size_t> GgmlOvDecoder::get_output_stride(int node_idx) const {
 
 std::vector<std::string> GgmlOvDecoder::get_output_names(int node_idx) const {
     return {m_node_info_list[node_idx].node_output_name};
+}
+
+std::vector<std::string> GgmlOvDecoder::get_output_aliases(int node_idx) const {
+    const auto * node = m_node_info_list[node_idx].node;
+    if (node != nullptr && node->op == GGML_OP_SET_ROWS && node->view_src != nullptr) {
+        return {std::string(node->view_src->name)};
+    }
+    return {};
 }
 
 const std::string & GgmlOvDecoder::get_op_name() const {
