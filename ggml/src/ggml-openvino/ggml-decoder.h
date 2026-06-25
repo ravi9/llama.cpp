@@ -156,6 +156,8 @@ public:
 
     virtual std::vector<std::string> get_output_names(int node_idx) const override;
 
+    virtual std::vector<std::string> get_output_aliases(int node_idx) const override;
+
     virtual const std::string & get_op_type() const override;
 
     virtual const std::string & get_op_type(int node_idx) const override;
