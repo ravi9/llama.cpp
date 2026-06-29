@@ -169,11 +169,8 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
     int op_case = 0;
     switch (node->op) {
     case GGML_OP_RESHAPE: {
+        auto name = std::string(node->name);
         auto * src = node->src[0];
-        if (is_same_shape(src, node)) {
-            op_case = 7;
-            break;
-        }
         if (src->op == GGML_OP_RESHAPE && src->src[0]->ne[0] == node->ne[0] && src->src[0]->ne[1] == node->ne[1]) {
             op_case = 4;
         } else if (node->ne[0] * node->ne[1] == src->ne[0]) {
@@ -185,11 +182,12 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
             }
         } else if (src->ne[0] * src->ne[1] * src->ne[2] == node->ne[1]) {
             op_case = 3;
-        } else if (src->ne[1] * src->ne[2] == node->ne[1]) {
+        } else if (name.find("linear_attn_qkv_mixed") == 0 || name.find("alpha") == 0) {
             op_case = 6;
-        }
-        if (op_case == 0 && ggml_nelements(node) == ggml_nelements(src)) {
-            op_case = 6;
+        } else if (name.find("linear_attn_out") == 0) {
+            op_case = 7;
+        } else if (name.find("state_predelta") == 0) {
+            op_case = 8;
         }
         break;
     }
@@ -239,7 +237,14 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
     }
     case GGML_OP_GET_ROWS: {
         if (node->src[1]->op == GGML_OP_VIEW) {
-            op_case = 2;
+            // GET_ROWS gathering recurrent state cache rows via the inp->s_copy index list:
+            // src[0] is a reshape of cache_r/cache_s, src[1] is a view of the s_copy leaf.
+            // op_case 3: main view (active sequences, view offset 0)
+            // op_case 4: extra view (defrag remainder, nonzero view offset)
+            if (node->src[0]->op == GGML_OP_RESHAPE && node->src[0]->src[0] != nullptr &&
+                is_kvcache(node->src[0]->src[0], nullptr)) {
+                op_case = node->src[1]->view_offs == 0 ? 1 : 2;
+            }
         }
         break;
     }
@@ -320,11 +325,22 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
                 op_case = 2;
                 break;
             }
+        } else if (node->src[0]->op == GGML_OP_GET_ROWS && node->src[1] != nullptr &&
+                   node->src[1]->op == GGML_OP_VIEW && node->src[1]->view_src != nullptr &&
+                   is_kvcache(node->src[1]->view_src, nullptr)) {
+            // s_copy defrag remainder writeback: gathered extra state rows copied back into the cache
+            op_case = 3;
         }
         break;
     }
     case GGML_OP_SCALE: {
-        if (is_kvcache(node->view_src, nullptr)) {
+        if (node->view_src && node->buffer->usage == GGML_BACKEND_BUFFER_USAGE_ANY) {
+            op_case = 1;
+        }
+        break;
+    }
+    case GGML_OP_L2_NORM: {
+        if (std::string(node->name).find("predelta") != std::string::npos) {
             op_case = 1;
         }
         break;
@@ -517,6 +533,23 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
             compute_params.cache_rs_reset_len = ggml_nelements(node) / node->view_src->ne[0];
             compute_params.cache_rs_reset_idx = node->src[0]->view_offs / node->view_src->ne[0];
         }
+        // Capture the active-slot block of the recurrent state reorder (inp->s_copy). The active
+        // sequences occupy a contiguous slot block [idx, idx+len) of the state cache; read both from
+        // the active conv/gdn state writeback destination view (idx = head, len = n_seqs).
+        if (node->op == GGML_OP_CPY && node->view_src != nullptr && is_kvcache(node->view_src, nullptr) &&
+            node->src[0]->op == GGML_OP_VIEW && node->src[1] != nullptr) {
+            const bool is_conv = std::string(node->src[0]->name).find("conv_state_last") == 0;
+            const bool is_gdn = node->src[0]->src[0] != nullptr && node->src[0]->src[0]->op == GGML_OP_GATED_DELTA_NET;
+            if (is_conv || is_gdn) {
+                const ggml_tensor * dest_view = node->src[1];
+                const ggml_tensor * cache = node->view_src;
+                const size_t row_bytes = cache->ne[0] * ggml_type_size(cache->type);
+                if (row_bytes > 0) {
+                    compute_params.s_copy_active_slot_idx = (int) (dest_view->view_offs / row_bytes);
+                    compute_params.s_copy_active_slot_len = (int) dest_view->ne[1];
+                }
+            }
+        }
     }
     auto * output_tensor = cgraph->nodes[cgraph->n_nodes - 1];
     compute_params.output_len = output_tensor->ne[1];
@@ -584,6 +617,9 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
         int len = m_is_static ? (m_is_prefill ? m_prefill_chunk_size : 1) : -1;
         input_shape = ov::PartialShape{1, 1, 1, len};
 
+    } else if (is_inp_s_copy(input, op) || is_s_copy_leaf(input)) {
+        input_shape = ov::PartialShape{1, 1, 1, -1};
+
     } else {
         input_shape = ov::PartialShape{get_shape(input)};
     }
@@ -597,6 +633,35 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
         input_shape[3] = -1;
     }
     return input_shape;
+}
+
+bool GgmlOvDecoder::is_s_copy_leaf(const ggml_tensor * tensor) const {
+    if (tensor == nullptr || tensor->op != GGML_OP_NONE || m_cgraph == nullptr) {
+        return false;
+    }
+    for (int i = 0; i < m_cgraph->n_nodes; i++) {
+        const ggml_tensor * node = m_cgraph->nodes[i];
+        if (node->op != GGML_OP_GET_ROWS || node->src[0] == nullptr || node->src[1] == nullptr) {
+            continue;
+        }
+        // The index list may reach the s_copy leaf through one or more VIEWs.
+        const ggml_tensor * idx = node->src[1];
+        while (idx != nullptr && idx->op == GGML_OP_VIEW) {
+            idx = idx->src[0];
+        }
+        if (idx != tensor) {
+            continue;
+        }
+        // The gathered data must be a recurrent state cache (cache_r/cache_s).
+        const ggml_tensor * data = node->src[0];
+        while (data != nullptr && (data->op == GGML_OP_VIEW || data->op == GGML_OP_RESHAPE)) {
+            data = data->src[0];
+        }
+        if (data != nullptr && is_kvcache(data, nullptr)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void GgmlOvDecoder::add_extra_inputs() {
@@ -640,6 +705,11 @@ void GgmlOvDecoder::add_extra_inputs() {
     if (m_compute_params.cache_rs_reset_idx != -1) {
         create_1d_input("cache_rs_reset_idx", m_compute_params.cache_rs_reset_idx);
         create_1d_input("cache_rs_reset_len", m_compute_params.cache_rs_reset_len);
+    }
+
+    if (m_compute_params.s_copy_active_slot_len != -1) {
+        create_1d_input("s_copy_active_slot_idx", m_compute_params.s_copy_active_slot_idx);
+        create_1d_input("s_copy_active_slot_len", m_compute_params.s_copy_active_slot_len);
     }
 }
 

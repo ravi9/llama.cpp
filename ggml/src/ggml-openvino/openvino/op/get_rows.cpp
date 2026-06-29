@@ -2,11 +2,13 @@
 #include "../op_table.h"
 #include "../utils.h"
 
+#include <climits>
 #include <openvino/core/node.hpp>
 #include <openvino/core/node_output.hpp>
 #include <openvino/op/constant.hpp>
 #include <openvino/op/convert.hpp>
 #include <openvino/op/gather.hpp>
+#include <openvino/op/slice.hpp>
 #include <openvino/op/squeeze.hpp>
 #include <openvino/op/unsqueeze.hpp>
 
@@ -20,7 +22,27 @@ OutputVector translate_get_rows(const NodeContext & context) {
 
     Output<Node> res;
     auto data = process_view_input_new(context, 0);
-    auto indices = process_view_input_new(context, 1);
+
+    auto op_case = context.get_op_case();
+    ov::Output<ov::Node> indices;
+    if (op_case == 1 || op_case == 2) {
+        // Recurrent state reorder (inp->s_copy): slice the active (op_case 1) or extra (op_case 2)
+        // segment from the s_copy index list at runtime, instead of baking the static view offset,
+        // so the cached IR works for any number of active sequences.
+        auto s_copy = context.get_input(1);
+        auto len = context.get_input("s_copy_active_slot_len");
+        auto step = ov::op::v0::Constant::create(ov::element::i64, {1}, {1});
+        auto axis = ov::op::v0::Constant::create(ov::element::i64, {1}, {3});
+        if (op_case == 1) {
+            auto begin = ov::op::v0::Constant::create(ov::element::i64, {1}, {0});
+            indices = std::make_shared<ov::op::v8::Slice>(s_copy, begin, len, step, axis);
+        } else {
+            auto end = ov::op::v0::Constant::create(ov::element::i64, {1}, {INT_MAX});
+            indices = std::make_shared<ov::op::v8::Slice>(s_copy, len, end, step, axis);
+        }
+    } else {
+        indices = process_view_input_new(context, 1);
+    }
 
     // data[1,b,x,y] ind[1,1,b,x'] test-backend-ops case
     // data[x,y] ind[1,1,1,x'] normal case
