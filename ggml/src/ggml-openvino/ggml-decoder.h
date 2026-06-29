@@ -61,6 +61,27 @@ struct ComputeParams {
     //    [ 18432,     4,     1,     1]            0: RESHAPE     cache_r_l0 (reshaped)
     // 5: [ 18432,     1,     1,     1] SCALE                cache_r_l0 (reshaped) (view) (view)
     //    [ 18432,     1,     1,     1]            0: VIEW        cache_r_l0 (reshaped) (view)
+
+    int s_copy_active_slot_idx = -1;
+    int s_copy_active_slot_len = -1;
+    // SSM/DeltaNet models otionally reorder slots of state cache, to make the active slots contiguous
+    // leaf_5 is the inp->s_copy in llama-graph.cpp, eg if there are 8 slots in total and slot 3 and 7
+    // are active in the current batch, leaf_5 will be [3, 7, 5, 6, 4]
+    //  6: [     2,     1,     1,     1] VIEW                  (view)
+    //      [     2,     1,     1,     1]            0: NONE        leaf_5
+    //  7: [ 18432,     2,     1,     1] GET_ROWS             conv_states-0
+    //      [ 18432,     4,     1,     1]            0: RESHAPE     cache_r_l0 (reshaped)
+    //      [     2,     1,     1,     1]            1: VIEW         (view)
+    //  8: [     0,     1,     1,     1] VIEW                  (view)
+    //      [     2,     1,     1,     1]            0: NONE        leaf_5
+    //  9: [ 18432,     0,     1,     1] GET_ROWS             node_9
+    //      [ 18432,     4,     1,     1]            0: RESHAPE     cache_r_l0 (reshaped)
+    //      [     0,     1,     1,     1]            1: VIEW         (view)
+    // 10: [ 18432,     0,     1,     1] VIEW                 cache_r_l0 (view)
+    //      [ 18432,     4,     1,     1]            0: NONE        cache_r_l0
+    // 11: [ 18432,     0,     1,     1] CPY                  cache_r_l0 (view) (copy of )
+    //      [ 18432,     0,     1,     1]            0: GET_ROWS    node_9
+    //      [ 18432,     0,     1,     1]            1: VIEW        cache_r_l0 (view)
 };
 
 class GgmlOvDecoder : public ov::frontend::ggml::GgmlDecoder {
@@ -335,7 +356,7 @@ public:
                op->src[0]->buffer->usage == GGML_BACKEND_BUFFER_USAGE_ANY;
     }
 
-    std::string get_graph_input_ov_name(const ggml_tensor * tensor, const ggml_tensor * op) const {
+    std::string get_graph_input_ov_name(const ggml_tensor * tensor, const ggml_tensor * op) {
         if (is_inp_pos(tensor, op)) {
             return "inp_pos";
         }
