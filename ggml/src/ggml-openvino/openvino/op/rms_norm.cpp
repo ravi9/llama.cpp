@@ -7,6 +7,7 @@
 #include <openvino/op/constant.hpp>
 #include <openvino/op/divide.hpp>
 #include <openvino/op/multiply.hpp>
+#include <openvino/op/negative.hpp>
 #include <openvino/op/power.hpp>
 #include <openvino/op/reduce_mean.hpp>
 #include <openvino/op/reshape.hpp>
@@ -28,9 +29,20 @@ OutputVector translate_rms_norm(const NodeContext & context) {
         input_node = context.get_input(0);
     } else if (op_case == 2) {
         auto ssm_state_size = context.get_ssm_state_size();
+        // The GDN op packs [attn | new_state] along the row axis; the state occupies the last
+        // ssm_state_size * n_seqs rows. Slice it off (scaling by the active sequence count) to keep
+        // just the attention output.
+        ov::Output<ov::Node> state_end;
+        if (context.has_input("s_copy_active_slot_len")) {
+            auto len = context.get_input("s_copy_active_slot_len");
+            auto state_rows = std::make_shared<ov::op::v1::Multiply>(
+                ov::op::v0::Constant::create(ov::element::i64, {1}, {ssm_state_size}), len);
+            state_end = std::make_shared<ov::op::v0::Negative>(state_rows);
+        } else {
+            state_end = ov::op::v0::Constant::create(ov::element::i64, {1}, {-ssm_state_size});
+        }
         auto gdn_attn_output = std::make_shared<ov::op::v8::Slice>(
-            context.get_input(0), ov::op::v0::Constant::create(ov::element::i64, {1}, {0}),
-            ov::op::v0::Constant::create(ov::element::i64, {1}, {-ssm_state_size}),
+            context.get_input(0), ov::op::v0::Constant::create(ov::element::i64, {1}, {0}), state_end,
             ov::op::v0::Constant::create(ov::element::i64, {1}, {1}),
             ov::op::v0::Constant::create(ov::element::i64, {1}, {2}));
 
