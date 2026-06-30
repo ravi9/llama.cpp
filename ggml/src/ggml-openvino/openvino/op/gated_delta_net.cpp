@@ -45,6 +45,7 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
     // const int64_t T = v_shape[1];
     const int64_t H_v = v_shape[2];
     const int64_t S_v = v_shape[3];
+    const int64_t H_k = q_shape[2];
     // const int64_t S_k = q_shape[3];
 
     auto q = context.get_input(0);
@@ -53,6 +54,14 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
     auto g = context.get_input(3);
     auto beta = context.get_input(4);
     auto state = context.get_input(5);
+
+    // ggml maps GQA heads in tiled order, while OV GDN maps repeated heads in grouped order.
+    if (H_v != H_k) {
+        const int64_t repeat = H_v / H_k;
+        auto repeats = ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{1, 1, repeat, 1});
+        q = std::make_shared<ov::op::v0::Tile>(q, repeats);
+        k = std::make_shared<ov::op::v0::Tile>(k, repeats);
+    }
 
     if (context.get_view_input_size(2)) {
         // Same as l2_norm case 1
@@ -93,9 +102,6 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
     auto res = std::make_shared<ov::op::v1::Reshape>(packed, out_shape, false);
 
     return rename_outputs_with_suffix({res}, context.get_name());
-
-    // The OV version in CI does not have the GatedDeltaNet op, so use reference implementation for now.
-    // return translate_gated_delta_net_ref(context);
 }
 
 static OutputVector translate_gated_delta_net_ref(const NodeContext & context) {
