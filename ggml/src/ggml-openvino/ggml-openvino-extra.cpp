@@ -46,6 +46,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_DISABLE_KV_SLICE",
         "GGML_OPENVINO_MANUAL_GQA_ATTN",
         "GGML_OPENVINO_RELEASE_WEIGHTS",
+        "GGML_OPENVINO_REDUCE_COMPILE_MEM",
     };
 
     for (const char * const & env_var : env_var_names) {
