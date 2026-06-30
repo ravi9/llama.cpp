@@ -942,42 +942,61 @@ static char * fmt_size(size_t size) {
     return buffer;
 }
 
+static void ggml_backend_debug_print_tensor_info(const struct ggml_tensor * tensor, const char * backend_name) {
+    printf("%20.20s [%5.5s] shape=[%lld,%lld,%lld,%lld] stride=[%zu,%zu,%zu,%zu] offset=%zu",
+        tensor->name,
+        backend_name ? backend_name : "NULL",
+        (long long) tensor->ne[0], (long long) tensor->ne[1], (long long) tensor->ne[2], (long long) tensor->ne[3],
+        tensor->nb[0], tensor->nb[1], tensor->nb[2], tensor->nb[3],
+        tensor->view_offs);
+}
+
+static void ggml_backend_debug_print_tensor_srcs(const struct ggml_tensor * tensor, const char * backend_name) {
+    for (int i = 0; i < GGML_MAX_SRC; i++) {
+        const struct ggml_tensor * src = tensor->src[i];
+        if (src == NULL) {
+            continue;
+        }
+        printf(" ");
+        ggml_backend_debug_print_tensor_info(src, backend_name);
+    }
+}
+
 static void ggml_backend_sched_print_assignments(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
     int cur_split = 0;
-    for (int i = 0; i < graph->n_nodes; i++) {
+    for (int i = 0; i < 200; i++) {
         if (cur_split < sched->n_splits && i == sched->splits[cur_split].i_start) {
             ggml_backend_t split_backend = sched->backends[sched->splits[cur_split].backend_id];
-            GGML_LOG_DEBUG("\n## SPLIT #%d: %s # %d inputs", cur_split, ggml_backend_name(split_backend),
+            printf("\n## SPLIT #%d: %s # %d inputs", cur_split, ggml_backend_name(split_backend),
                 sched->splits[cur_split].n_inputs);
             for (int j = 0; j < sched->splits[cur_split].n_inputs; j++) {
                 if (j == 0) {
-                    GGML_LOG_DEBUG(": ");
+                    printf(": ");
                 }
-                GGML_LOG_DEBUG("[%s (%5.5s)] ", sched->splits[cur_split].inputs[j]->name,
-                    fmt_size(ggml_nbytes(sched->splits[cur_split].inputs[j])));
+                printf("[%s] ", sched->splits[cur_split].inputs[j]->name);
+
             }
-            GGML_LOG_DEBUG("\n");
+            printf("\n");
             cur_split++;
         }
         struct ggml_tensor * node = graph->nodes[i];
-        if (ggml_is_view_op(node->op)) {
-            continue;
-        }
-        if (sched->debug > 1) {
-            ggml_backend_t tensor_backend = ggml_backend_sched_get_tensor_backend(sched, node);
-            GGML_LOG_DEBUG("node #%3d (%10.10s): %20.20s (%5.5s) [%5.5s %8.8s] use=%d,c=%d:", i, ggml_op_desc(node), node->name,
-                fmt_size(ggml_nbytes(node)), tensor_backend ? ggml_backend_name(tensor_backend) : "NULL", GET_CAUSE(node),
-                graph->use_counts[ggml_hash_find(&graph->visited_hash_set, node)], node->flags & GGML_TENSOR_FLAG_COMPUTE ? 1 : 0);
+        if (2 > 1) {
+
+
+
+            printf("node #%3d (%10.10s): %20.20s shape=[%lld,%lld,%lld,%lld] offset=%zu:", i, ggml_op_name(node->op), node->name,
+                (long long) node->ne[0], (long long) node->ne[1], (long long) node->ne[2], (long long) node->ne[3],
+                node->view_offs);
             for (int j = 0; j < GGML_MAX_SRC; j++) {
                 struct ggml_tensor * src = node->src[j];
                 if (src == NULL) {
                     continue;
                 }
-                ggml_backend_t src_backend = ggml_backend_sched_get_tensor_backend(sched, src);
-                GGML_LOG_DEBUG(" %20.20s (%5.5s) [%5.5s %8.8s]", src->name,
-                    fmt_size(ggml_nbytes(src)), src_backend ? ggml_backend_name(src_backend) : "NULL", GET_CAUSE(src));
+                printf(" %20.20s shape=[%lld,%lld,%lld,%lld] offset=%zu", src->name,
+                    (long long) src->ne[0], (long long) src->ne[1], (long long) src->ne[2], (long long) src->ne[3],
+                    src->view_offs);
             }
-            GGML_LOG_DEBUG("\n");
+            printf("\n");
         }
     }
 }
@@ -1398,6 +1417,7 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
         sched->n_splits = i_split + 1;
     }
 
+    // ggml_backend_sched_print_assignments(sched, graph);
     if (sched->debug) {
         ggml_backend_sched_print_assignments(sched, graph);
     }
