@@ -1125,11 +1125,6 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
         if (op->src[3]->ne[0] != 1) {
             return true;
         }
-        // v_repeat > 1 (GQA): ggml uses modulo head mapping (h_q = h_v % H_k)
-        // but the fused op uses consecutive mapping (h_q = h_v / group_size)
-        if (op->src[2]->ne[1] != op->src[0]->ne[1]) {
-            return true;
-        }
         // K > 1 (multiple state snapshots) not supported by fused op
         if (((const int32_t *) op->op_params)[0] > 1) {
             return true;
