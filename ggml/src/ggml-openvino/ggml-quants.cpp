@@ -2,6 +2,7 @@
 
 #include "ggml-common.h"
 #include "ggml-impl.h"
+#include "ggml-openvino-extra.h"
 #include "ggml.h"
 
 #include <algorithm>
@@ -786,19 +787,23 @@ std::shared_ptr<ov::Node> requantize_to_buffers(const ggml_tensor * tensor,
 
     bool is_u4 = (requant_type == ExtraQuantType::Q4_0_C || requant_type == ExtraQuantType::Q4_0_128);
 
-    // Streaming dequant: instead of materializing the full n_elements F32 array (e.g.
-    // ~1 GB for token_embd), dequantize a chunk of complete rows into a small scratch
-    // and quantize/convert it straight into the output buffers. This caps the transient
-    // F32 footprint at CHUNK_ROWS*ne0 floats regardless of tensor size.
+    // Streaming dequant (opt-in via GGML_OPENVINO_REDUCE_COMPILE_MEM): instead of
+    // materializing the full n_elements F32 array (e.g. ~1 GB for token_embd), dequantize
+    // a chunk of complete rows into a small scratch and quantize/convert it straight into
+    // the output buffers, capping the transient F32 footprint at CHUNK_ROWS*ne0 floats.
     //
-    // Preconditions for streaming the quantized targets: the target block size divides
-    // a row (the channel-wise _C targets use block_size == ne0; Q4_0_128 uses 128 which
-    // divides ne0) so no target block straddles a row boundary, and Q8 has no cross-block
-    // packing. The u4 path packs two weights per byte but qk (128 or ne0) is even and
-    // row-aligned, so byte boundaries are also row-aligned.
-    if (block_size > 0 && ne0 % block_size != 0) {
-        // Fallback: target block crosses rows — materialize fully (should not happen for
-        // the requant types we emit, but keep correctness if a new type is added).
+    // Only valid (and only used) for the Q8_0_C / Q8_1_C / F16 targets whose block size
+    // divides a row (channel-wise _C uses block_size == ne0) so no target block straddles
+    // a row boundary, and Q8/F16 have no cross-block packing. The u4 (Q4_0) path packs two
+    // weights per byte with running zp ORs that assume a single whole-array call, so it is
+    // never streamed. When the flag is off, behavior is identical to the original
+    // full-materialization path.
+    const bool stream_requant = ggml_openvino_getenv_int("GGML_OPENVINO_REDUCE_COMPILE_MEM") != 0 && !is_u4 &&
+                                !(block_size > 0 && ne0 % block_size != 0);
+
+    if (!stream_requant) {
+        // Full materialization (original behavior): dequantize the whole tensor to F32,
+        // then convert/quantize in one call.
         std::vector<float> weights_f32(n_elements);
         type_traits->to_float(data, weights_f32.data(), n_elements);
         if (requant_type == ExtraQuantType::F16) {
@@ -814,13 +819,6 @@ std::shared_ptr<ov::Node> requantize_to_buffers(const ggml_tensor * tensor,
         } else {
             quantize_q8_0(weights_f32.data(), weights, scales, zp, n_elements, block_size);
         }
-    } else if (is_u4) {
-        // u4 (Q4_0) packs two weights per byte and writes zp at i/2 with bit ORs that
-        // assume the whole array is processed in one call; keep it non-streaming for
-        // correctness. These targets are NPU-only and small.
-        std::vector<float> weights_f32(n_elements);
-        type_traits->to_float(data, weights_f32.data(), n_elements);
-        quantize_q4_0(weights_f32.data(), weights, scales, zp, n_elements, block_size);
     } else {
         // Streaming path for Q8_0_C / Q8_1_C / F16 (covers token_embd, output.weight,
         // and per-layer Q6_K/Q5_K requant — the large transient cases).
