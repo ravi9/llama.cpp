@@ -779,28 +779,78 @@ std::shared_ptr<ov::Node> requantize_to_buffers(const ggml_tensor * tensor,
                                                 ov::Tensor & scales,
                                                 ov::Tensor & zp) {
     int64_t n_elements = ggml_nelements(tensor);
+    const int64_t ne0 = tensor->ne[0];                 // elements per row
+    const int64_t n_rows = n_elements / ne0;
+    const auto * type_traits = ggml_get_type_traits(tensor->type);
+    const size_t src_row_bytes = ggml_row_size(tensor->type, ne0);
 
-    // First dequantize to F32
-    std::vector<float> weights_f32(n_elements);
-    ggml_get_type_traits(tensor->type)->to_float(data, weights_f32.data(), n_elements);
-
-    // Handle F16 case - just convert and create constant
-    if (requant_type == ExtraQuantType::F16) {
-        ggml_get_type_traits(GGML_TYPE_F16)->from_float_ref(weights_f32.data(), weights.data(), n_elements);
-        auto result = std::make_shared<ov::op::v0::Constant>(weights);
-        result->set_friendly_name(tensor->name);
-        return result;
-    }
-
-    // Requantize to target quantized format
     bool is_u4 = (requant_type == ExtraQuantType::Q4_0_C || requant_type == ExtraQuantType::Q4_0_128);
 
-    if (is_u4) {
+    // Streaming dequant: instead of materializing the full n_elements F32 array (e.g.
+    // ~1 GB for token_embd), dequantize a chunk of complete rows into a small scratch
+    // and quantize/convert it straight into the output buffers. This caps the transient
+    // F32 footprint at CHUNK_ROWS*ne0 floats regardless of tensor size.
+    //
+    // Preconditions for streaming the quantized targets: the target block size divides
+    // a row (the channel-wise _C targets use block_size == ne0; Q4_0_128 uses 128 which
+    // divides ne0) so no target block straddles a row boundary, and Q8 has no cross-block
+    // packing. The u4 path packs two weights per byte but qk (128 or ne0) is even and
+    // row-aligned, so byte boundaries are also row-aligned.
+    if (block_size > 0 && ne0 % block_size != 0) {
+        // Fallback: target block crosses rows — materialize fully (should not happen for
+        // the requant types we emit, but keep correctness if a new type is added).
+        std::vector<float> weights_f32(n_elements);
+        type_traits->to_float(data, weights_f32.data(), n_elements);
+        if (requant_type == ExtraQuantType::F16) {
+            ggml_get_type_traits(GGML_TYPE_F16)->from_float_ref(weights_f32.data(), weights.data(), n_elements);
+            auto result = std::make_shared<ov::op::v0::Constant>(weights);
+            result->set_friendly_name(tensor->name);
+            return result;
+        }
+        if (is_u4) {
+            quantize_q4_0(weights_f32.data(), weights, scales, zp, n_elements, block_size);
+        } else if (requant_type == ExtraQuantType::Q8_1_C) {
+            quantize_q8_1(weights_f32.data(), weights, scales, zp, n_elements, block_size);
+        } else {
+            quantize_q8_0(weights_f32.data(), weights, scales, zp, n_elements, block_size);
+        }
+    } else if (is_u4) {
+        // u4 (Q4_0) packs two weights per byte and writes zp at i/2 with bit ORs that
+        // assume the whole array is processed in one call; keep it non-streaming for
+        // correctness. These targets are NPU-only and small.
+        std::vector<float> weights_f32(n_elements);
+        type_traits->to_float(data, weights_f32.data(), n_elements);
         quantize_q4_0(weights_f32.data(), weights, scales, zp, n_elements, block_size);
-    } else if (requant_type == ExtraQuantType::Q8_1_C) {
-        quantize_q8_1(weights_f32.data(), weights, scales, zp, n_elements, block_size);
     } else {
-        quantize_q8_0(weights_f32.data(), weights, scales, zp, n_elements, block_size);
+        // Streaming path for Q8_0_C / Q8_1_C / F16 (covers token_embd, output.weight,
+        // and per-layer Q6_K/Q5_K requant — the large transient cases).
+        const int64_t CHUNK_ROWS = std::min<int64_t>(n_rows, 256);
+        std::vector<float> scratch(CHUNK_ROWS * ne0);
+        // F16 destination: 2 bytes/element, advanced per chunk by r0*ne0 elements.
+        auto * f16_base = static_cast<uint8_t *>(weights.data());
+        for (int64_t r0 = 0; r0 < n_rows; r0 += CHUNK_ROWS) {
+            const int64_t rows = std::min(CHUNK_ROWS, n_rows - r0);
+            const int64_t elems = rows * ne0;
+            const auto * src = static_cast<const uint8_t *>(data) + r0 * src_row_bytes;
+            type_traits->to_float(src, scratch.data(), elems);
+
+            if (requant_type == ExtraQuantType::F16) {
+                ggml_get_type_traits(GGML_TYPE_F16)
+                    ->from_float_ref(scratch.data(), f16_base + (r0 * ne0) * sizeof(uint16_t), elems);
+            } else {
+                const int64_t block_offset = (r0 * ne0) / block_size;
+                if (requant_type == ExtraQuantType::Q8_1_C) {
+                    quantize_q8_1(scratch.data(), weights, scales, zp, elems, block_size, block_offset);
+                } else {
+                    quantize_q8_0(scratch.data(), weights, scales, zp, elems, block_size, block_offset);
+                }
+            }
+        }
+        if (requant_type == ExtraQuantType::F16) {
+            auto result = std::make_shared<ov::op::v0::Constant>(weights);
+            result->set_friendly_name(tensor->name);
+            return result;
+        }
     }
 
     // Create the OpenVINO weight subgraph
@@ -1055,16 +1105,21 @@ void quantize_q8_0(const float * x,
                    ov::Tensor & scales_arr,
                    ov::Tensor & zp_arr,
                    int64_t k,
-                   int64_t qk) {
+                   int64_t qk,
+                   int64_t block_offset) {
     assert(k % qk == 0);
     const int nb = k / qk;
 
-    auto * weights = static_cast<uint8_t *>(weights_arr.data());
-    auto * scales = scales_arr.data<ov::element_type_traits<ov::element::f16>::value_type>();
+    // block_offset lets a caller quantize a chunk of blocks into the right place in the
+    // output buffers (used for streaming requant). x points at this chunk's first block;
+    // outputs are advanced by block_offset blocks. Q8 has one scale/zp per block (no
+    // nibble packing), so any block boundary is safe.
+    auto * weights = static_cast<uint8_t *>(weights_arr.data()) + block_offset * qk;
+    auto * scales = scales_arr.data<ov::element_type_traits<ov::element::f16>::value_type>() + block_offset;
     bool is_symmetric = (weights_arr.get_element_type() == ov::element::i8);  // Signed i8 path
 
     if (!is_symmetric) {
-        auto * zp = static_cast<uint8_t *>(zp_arr.data());
+        auto * zp = static_cast<uint8_t *>(zp_arr.data()) + block_offset;
         for (int i = 0; i < nb; i++) {
             float amax = 0.0f;
             for (int j = 0; j < qk; j++) {
@@ -1106,13 +1161,15 @@ void quantize_q8_1(const float * x,
                    ov::Tensor & scales_arr,
                    ov::Tensor & zp_arr,
                    int64_t k,
-                   int64_t qk) {
+                   int64_t qk,
+                   int64_t block_offset) {
     assert(k % qk == 0);
     const int nb = k / qk;
 
-    auto * weights = static_cast<uint8_t *>(weights_arr.data());
-    auto * scales = scales_arr.data<ov::element_type_traits<ov::element::f16>::value_type>();
-    auto * zp = static_cast<uint8_t *>(zp_arr.data());
+    // See quantize_q8_0: block_offset places this chunk's output at the right block.
+    auto * weights = static_cast<uint8_t *>(weights_arr.data()) + block_offset * qk;
+    auto * scales = scales_arr.data<ov::element_type_traits<ov::element::f16>::value_type>() + block_offset;
+    auto * zp = static_cast<uint8_t *>(zp_arr.data()) + block_offset;
     for (int i = 0; i < nb; i++) {
         float min = std::numeric_limits<float>::max();
         float max = std::numeric_limits<float>::lowest();
