@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <openvino/op/constant.hpp>
+#include <openvino/core/node_output.hpp>
 #include <openvino/runtime/tensor.hpp>
 
 void unpack_32_4(const uint8_t * data, uint8_t * dst);
@@ -49,6 +50,8 @@ void extract_q6_k_data(const ggml_tensor * tensor,
                        ov::Tensor & scales_arr,
                        ov::Tensor & zp_arr);
 
+void extract_mxfp4_data(const ggml_tensor * tensor, ov::Tensor & weights_arr, ov::Tensor & scales_arr);
+
 static constexpr size_t GGML_QUANTIZATION_GROUP_SIZE = 32;
 
 ov::Output<ov::Node> make_int8_weights(ov::Tensor & weight,
@@ -62,6 +65,10 @@ ov::Output<ov::Node> make_int4_weights(ov::Tensor & weight,
                                        ov::Tensor & zp,
                                        size_t group_size = GGML_QUANTIZATION_GROUP_SIZE,
                                        bool use_bias = false);
+
+ov::Output<ov::Node> make_mxfp4_weights(ov::Tensor & weight, ov::Tensor & scales);
+
+ov::Output<ov::Node> make_mxfp4_moe_packed_weights(ov::Tensor & weight);
 
 // Extract quantized weights from tensor and create weight subgraph
 // If weights/scales/zp are provided (non-empty), uses them as output buffers
