@@ -32,6 +32,7 @@
 #include <stdexcept>
 #include <string>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 
 GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph,
@@ -1094,11 +1095,9 @@ std::shared_ptr<ov::Node> GgmlOvDecoder::create_weight_node(ggml_tensor * tensor
 
     // Non-OV-buffer weights (CPU/mmap, e.g. the GET_ROWS token_embd copy) have no buffer
     // context to cache an extra in, so memoize them here keyed by their (stable) data
-    // pointer to avoid re-extracting on every recompile. Opt-in via
-    // GGML_OPENVINO_REDUCE_COMPILE_MEM or GGML_OPENVINO_MEMORY_OPTIMIZE. Skip
-    // for `naive` (test/naive path) since use_bias changes the produced node.
-    const bool cacheable_nonov = ggml_openvino_reduce_compile_mem_enabled() && !is_ov_buffer &&
-                                 !naive && tensor->data != nullptr;
+    // pointer to avoid re-extracting on every recompile. Skip for `naive` (test/naive
+    // path) since use_bias changes the produced node.
+    const bool cacheable_nonov = !is_ov_buffer && !naive && tensor->data != nullptr;
     if (cacheable_nonov) {
         std::lock_guard<std::mutex> lock(g_nonov_weight_cache_mutex);
         auto it = g_nonov_weight_cache.find(tensor->data);
