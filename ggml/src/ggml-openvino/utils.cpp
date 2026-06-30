@@ -4,6 +4,7 @@
 #include "ggml-openvino-extra.h"
 #include "ggml-openvino/ggml-decoder.h"
 #include "ggml.h"
+#include "model-cache.h"
 #include "openvino/frontend.h"
 #include "openvino/input_model.h"
 
@@ -316,7 +317,86 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
                 r_ctx->infer_request_cache.erase(key);
             }
 
+            // Frontend-level model cache (GGML_OPENVINO_MODEL_CACHE_DIR): if this model
+            // was compiled before, import the saved blob and skip requant + convert +
+            // compile. Only the dynamic single-model path is cached (split models compile
+            // two graphs and are left to the plugin-level ov::cache_dir). The decoder is
+            // still needed for I/O mapping, but can be built without weight nodes since
+            // the weights are baked into the imported CompiledModel.
+            const std::string model_cache_dir = ggml_openvino_model_cache_dir();
+            uint64_t model_fp = 0;
+            std::string blob_path, manifest_path;
+            bool imported = false;
+            // When the frontend model cache is active it supersedes the plugin-level
+            // ov::cache_dir: a blob exported from a model compiled WITH cache_dir cannot
+            // be re-imported (import returns an uninitialized model). Strip cache_dir /
+            // cache_mode from the config used for the cached compile and the import.
+            ov::AnyMap mc_config = config;
+            if (!model_cache_dir.empty()) {
+                mc_config.erase("CACHE_DIR");
+                mc_config.erase("CACHE_MODE");
+            }
+            if (!model_cache_dir.empty() && !model_is_splitted) {
+                uint64_t extra_cfg = 0;
+                extra_cfg = extra_cfg * 131 + (stateful ? 1u : 0u);
+                extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_REDUCE_COMPILE_MEM") ? 2u : 0u);
+                model_fp = ggml_openvino_model_fingerprint(cgraph, device, /*fa=*/true, m_params.rope_params,
+                                                           15, extra_cfg);
+                blob_path = ggml_openvino_model_cache_blob_path(model_cache_dir, model_fp);
+                manifest_path = ggml_openvino_model_cache_manifest_path(model_cache_dir, model_fp);
+
+                std::ifstream blob_in(blob_path, std::ios::binary);
+                bool blob_ok = blob_in.is_open();
+                bool manifest_ok = blob_ok && ggml_openvino_model_cache_verify_manifest(manifest_path, cgraph, model_fp);
+                if (blob_ok && manifest_ok) {
+                    int64_t import_start = ggml_time_us();
+                    try {
+                        ov::CompiledModel cm;
+                        auto remote_context = ggml_openvino_get_remote_context();
+                        if (remote_context.has_value()) {
+                            cm = core.import_model(blob_in, remote_context.value(), mc_config);
+                        } else {
+                            cm = core.import_model(blob_in, device, mc_config);
+                        }
+                        // Lightweight decoder: names-only weight map (membership is all the
+                        // decoder needs; weights live in the imported model).
+                        std::map<std::string, std::shared_ptr<ov::Node>> weight_names;
+                        for (const auto & n : GgmlOvDecoder::collect_weight_names(cgraph)) {
+                            weight_names[n] = nullptr;
+                        }
+                        ggml_decoder = std::make_shared<GgmlOvDecoder>(cgraph, m_params, c_params, weight_names,
+                                                                       is_static, stateful, model_is_splitted);
+                        infer_request = std::make_shared<ov::InferRequest>(cm.create_infer_request());
+                        entry->ptr = ggml_decoder;
+                        // Names must match the decoder's ggml-tensor keys. The non-cached
+                        // path keys off Parameter/Result *friendly names* (set by the
+                        // frontend); export_model preserves these, and each compiled-model
+                        // port's node is exactly that Parameter/Result. Use the port nodes
+                        // directly (NOT get_runtime_model(), whose graph differs and is
+                        // unsafe to deref this way).
+                        for (const auto & p : cm.inputs()) {
+                            ov_input_names.push_back(p.get_node()->get_friendly_name());
+                        }
+                        for (const auto & o : cm.outputs()) {
+                            ov_output_names.push_back(o.get_node()->get_friendly_name());
+                        }
+                        imported = true;
+                        if (ggml_openvino_getenv_int("GGML_OPENVINO_PROFILING")) {
+                            GGML_LOG_INFO("  - Model cache import time: %.3f ms \n",
+                                          (ggml_time_us() - import_start) / 1000.0);
+                        }
+                        GGML_LOG_INFO("ggml-openvino: model cache HIT %s\n", blob_path.c_str());
+                    } catch (const std::exception & e) {
+                        GGML_LOG_WARN("ggml-openvino: model cache import failed (%s), recompiling\n", e.what());
+                        imported = false;
+                    }
+                }
+            }
+
             std::shared_ptr<ov::Model> model;
+            if (imported) {
+                decoder_end_time = conversion_end_time = compile_end_time = ggml_time_us();
+            } else {
             auto model_weights = GgmlOvDecoder::create_weight_nodes(cgraph);
 
             ggml_decoder = std::make_shared<GgmlOvDecoder>(cgraph, m_params, c_params, model_weights, is_static,
@@ -335,14 +415,43 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
                 ov::serialize(model, timestamped_filename);
             }
 
+            // Use the cache-stripped config when the frontend model cache is active, so
+            // the resulting CompiledModel can be exported and later re-imported.
+            const ov::AnyMap & compile_config = model_cache_dir.empty() ? config : mc_config;
             ov::CompiledModel compiled_model;
             auto remote_context = ggml_openvino_get_remote_context();
             if (remote_context.has_value()) {
-                compiled_model = core.compile_model(model, remote_context.value(), config);
+                compiled_model = core.compile_model(model, remote_context.value(), compile_config);
             } else {
-                compiled_model = core.compile_model(model, device, config);
+                compiled_model = core.compile_model(model, device, compile_config);
             }
             compile_end_time = ggml_time_us();
+
+            // Export to the frontend model cache for next time. Write the blob to a
+            // temp file then rename (atomic) so a concurrent/crashed run never sees a
+            // half-written blob; write the manifest first so a present blob always has
+            // a verifiable manifest.
+            if (!model_cache_dir.empty() && !model_is_splitted && model_fp != 0) {
+                try {
+                    if (ggml_openvino_model_cache_write_manifest(manifest_path, cgraph, model_fp)) {
+                        const std::string tmp = blob_path + ".tmp";
+                        std::ofstream blob_out(tmp, std::ios::binary | std::ios::trunc);
+                        if (blob_out.is_open()) {
+                            compiled_model.export_model(blob_out);
+                            blob_out.close();
+                            if (blob_out.good()) {
+                                std::rename(tmp.c_str(), blob_path.c_str());
+                                GGML_LOG_INFO("ggml-openvino: model cache WROTE %s\n", blob_path.c_str());
+                            } else {
+                                std::remove(tmp.c_str());
+                            }
+                        }
+                    }
+                } catch (const std::exception & e) {
+                    GGML_LOG_WARN("ggml-openvino: model cache export failed: %s\n", e.what());
+                }
+            }
+
             infer_request = std::make_shared<ov::InferRequest>(compiled_model.create_infer_request());
             entry->ptr = ggml_decoder;
 
@@ -352,6 +461,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
             for (const auto & ov_output : model->get_results()) {
                 ov_output_names.push_back(ov_output->get_friendly_name());
             }
+            }  // end non-imported (compile) path
 
             if (cache_enabled) {
                 std::lock_guard<std::mutex> map_lock(r_ctx->ctx_mutex);
