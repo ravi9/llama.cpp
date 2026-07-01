@@ -86,26 +86,7 @@ OutputVector translate_cpy(const NodeContext & context) {
         return rename_outputs_with_suffix({res}, context.get_name());
     }
 
-    ov::Output<Node> input;
-    if (op_case == 1) {
-        int ssm_state_size = context.get_ssm_state_size();
-        auto gdn_output_state = std::make_shared<ov::op::v8::Slice>(
-            context.get_input(0), ov::op::v0::Constant::create(ov::element::i64, {1}, {-ssm_state_size}),
-            ov::op::v0::Constant::create(ov::element::i64, {1}, {INT_MAX}),
-            ov::op::v0::Constant::create(ov::element::i64, {1}, {1}),
-            ov::op::v0::Constant::create(ov::element::i64, {1}, {2}));
-        input = gdn_output_state;
-    } else if (op_case == 2) {
-        auto cache_r_size = input_shape[3].get_length();
-        auto conv_state_last = std::make_shared<ov::op::v8::Slice>(
-            context.get_input(0), ov::op::v0::Constant::create(ov::element::i64, {1}, {-cache_r_size}),
-            ov::op::v0::Constant::create(ov::element::i64, {1}, {INT_MAX}),
-            ov::op::v0::Constant::create(ov::element::i64, {1}, {1}),
-            ov::op::v0::Constant::create(ov::element::i64, {1}, {3}));
-        input = conv_state_last;
-    } else {
-        input = process_view_input_new(context, 0);
-    }
+    auto input = process_view_input_new(context, 0);
 
     if (input_shape != output_shape) {
         auto new_shape = ov::op::v0::Constant::create(
