@@ -25,7 +25,6 @@
 #include <openvino/core/type/float16.hpp>
 #include <openvino/op/constant.hpp>
 #include <openvino/op/convert.hpp>
-#include <openvino/op/parameter.hpp>
 #include <openvino/runtime/tensor.hpp>
 #include <ostream>
 #include <set>
@@ -553,21 +552,7 @@ void GgmlOvDecoder::add_extra_inputs() {
     // 2. `n_seq_active` and `seq_active_start`, used in FLASH_ATTN_EXT to indicate the active sequences in the batch
 
     auto create_1d_input = [this](const std::string & name, int64_t value) {
-        if (m_is_static) {
-            auto constant =
-                std::make_shared<ov::op::v0::Constant>(ov::element::i64, ov::Shape{1}, std::vector<int64_t>{value});
-            constant->set_friendly_name(name);
-            m_model_extra_inputs[name] = constant;
-        } else {
-            auto param_node = std::make_shared<ov::op::v0::Parameter>(ov::element::i64, ov::Shape{1});
-            param_node->set_friendly_name(name);
-            param_node->output(0).get_tensor().set_names({name});
-            m_model_extra_inputs[name] = param_node;
-
-            auto tensor = std::make_shared<ov::Tensor>(ov::element::i64, ov::Shape{1});
-            *tensor->data<int64_t>() = value;
-            m_model_extra_input_values[name] = tensor;
-        }
+        m_model_extra_inputs[name] = {ov::element::i64, ov::Shape{1}, value, !m_is_static};
     };
 
     if (m_compute_params.attention_size != -1) {
