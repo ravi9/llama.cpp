@@ -773,11 +773,8 @@ void GgmlOvDecoder::compute_model_inputs() {
             std::string node_name = get_tensor_ov_name(m_cgraph, node);
             if (m_model_weights.find(node_name) == m_model_weights.end()) {
                 m_inputs[node_name] = node;
-                auto param_node = std::make_shared<ov::op::v0::Parameter>(
-                    get_ov_type(node), get_graph_input_shape(node, nullptr, m_node_dynamic_dims[node]));
-                param_node->set_friendly_name(node_name);
-                param_node->output(0).get_tensor().set_names({node_name});
-                m_model_inputs[node_name] = param_node;
+                m_model_inputs[node_name] = {get_ov_type(node),
+                                             get_graph_input_shape(node, nullptr, m_node_dynamic_dims[node])};
             }
             continue;
         }
@@ -824,11 +821,8 @@ void GgmlOvDecoder::compute_model_inputs() {
                 src_name = get_tensor_ov_name(m_cgraph, src);
             }
             m_inputs[src_name] = src;
-            ov::PartialShape param_shape = get_graph_input_shape(node, src, m_node_dynamic_dims[src]);
-            auto param_node = std::make_shared<ov::op::v0::Parameter>(get_ov_type(src), param_shape);
-            param_node->set_friendly_name(src_name);
-            param_node->output(0).get_tensor().set_names({src_name});
-            m_model_inputs[src_name] = param_node;
+            m_model_inputs[src_name] = {get_ov_type(src),
+                                        get_graph_input_shape(node, src, m_node_dynamic_dims[src])};
         }
     }
 }
