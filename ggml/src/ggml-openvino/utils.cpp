@@ -847,8 +847,10 @@ ov::Tensor convert_ggml_input_to_ov(std::shared_ptr<GgmlOvDecoder> ggml_decoder,
 
 ov::Tensor get_ov_input_tensor(std::shared_ptr<GgmlOvDecoder> ggml_decoder, const std::string & param_name) {
     ov::Tensor input_tensor;
-    if (ggml_decoder->get_model_extra_inputs().find(param_name) != ggml_decoder->get_model_extra_inputs().end()) {
-        input_tensor = *ggml_decoder->get_model_extra_input_values().at(param_name);
+    auto extra_input = ggml_decoder->get_model_extra_inputs().find(param_name);
+    if (extra_input != ggml_decoder->get_model_extra_inputs().end()) {
+        input_tensor = ov::Tensor(extra_input->second.type, extra_input->second.shape);
+        *input_tensor.data<int64_t>() = extra_input->second.value;
     } else {
         input_tensor = convert_ggml_input_to_ov(ggml_decoder, param_name);
     }
