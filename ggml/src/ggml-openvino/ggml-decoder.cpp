@@ -210,8 +210,6 @@ void GgmlOvDecoder::set_input_output() {
 
         NodeInfo current_node_info;
         auto node_name = std::string(node->name);
-        auto node_output_name = node_name;
-        auto * node_output = node;
 
         current_node_info.node = node;
         current_node_info.node_name = node_name;
@@ -932,9 +930,9 @@ void GgmlOvDecoder::compute_model_outputs() {
             }
         }
         if (cur_node != nullptr) {
-            std::string cur_node_name = get_tensor_ov_name(m_cgraph, cur_node);
+            std::string cur_node_name(cur_node->name);
             m_model_outputs[cur_node_name] = cur_node;
-            m_model_output_names.insert(cur_node_name);
+            m_model_output_names.push_back(cur_node_name);
         }
     }
 }
@@ -1519,27 +1517,6 @@ std::vector<size_t> GgmlOvDecoder::get_output_stride(int node_idx) const {
 
 std::vector<std::string> GgmlOvDecoder::get_output_names(int node_idx) const {
     return {m_node_info_list[node_idx].node_name};
-}
-
-std::string GgmlOvDecoder::get_inplace_op_src(int node_idx) const {
-    auto * node = m_node_info_list[node_idx].node;
-    if (!::is_inplace_op(node) || node->view_src == nullptr || ggml_nbytes(node) == 0) {
-        return "";
-    }
-    const int op_case = m_node_info_list[node_idx].node_op_case;
-    if (node->op == GGML_OP_CPY && (op_case == 1 || op_case == 2 || op_case == 3) &&
-        m_compute_params.s_copy_active_slot_len == -1) {
-        return "";
-    }
-    return get_tensor_ov_name(m_cgraph, node->view_src);
-}
-
-bool GgmlOvDecoder::is_view_like_alias_of(int node_idx, const std::string & view_src_name) const {
-    auto * node = m_node_info_list[node_idx].node;
-    if (node->view_src == nullptr || get_tensor_ov_name(m_cgraph, node->view_src) != view_src_name) {
-        return false;
-    }
-    return node->op == GGML_OP_RESHAPE || node->op == GGML_OP_VIEW;
 }
 
 std::vector<std::string> GgmlOvDecoder::get_output_aliases(int node_idx) const {
