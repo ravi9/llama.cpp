@@ -59,8 +59,6 @@ public:
         std::map<std::string, ggml_tensor *> node_inputs;
         std::map<std::string, std::vector<std::pair<std::string, ggml_tensor *>>> node_inputs_views;
         std::vector<std::string> node_inputs_names;
-        ggml_tensor * node_output;
-        std::string node_output_name;
         int node_op_case = 0;
         void * data_addr;
     };
