@@ -62,8 +62,6 @@ std::pair<ov::Output<Node>, ov::Output<Node>> make_sin_cos(int32_t * rope_params
                                                            bool imrope = false,
                                                            bool stateful = false);
 
-ov::Output<ov::Node> process_view_input(const NodeContext & context, int input_index, int slice_len = 0);
-
 ov::Output<ov::Node> process_view_input_new(const NodeContext & context, int input_index);
 
 namespace op {
