@@ -18,13 +18,6 @@ struct ModelInputInfo {
     PartialShape shape;
 };
 
-struct ModelExtraInputInfo {
-    element::Type type;
-    Shape shape;
-    int64_t value;
-    bool is_parameter;
-};
-
 class GgmlDecoder : public DecoderBase {
 public:
     virtual ov::Any get_attribute(const std::string & name) const = 0;
@@ -104,9 +97,9 @@ public:
 
     virtual int get_op_case(int node_idx) const = 0;
 
-    virtual const std::map<std::string, std::shared_ptr<ov::Node>>& get_model_inputs() const = 0;
-    virtual const std::map<std::string, std::shared_ptr<ov::Node>>& get_model_extra_inputs() const = 0;
-    virtual const std::map<std::string, std::shared_ptr<ov::Node>>& get_model_weights() const = 0;
+    virtual const std::map<std::string, ModelInputInfo> & get_model_inputs() const = 0;
+    virtual const std::map<std::string, std::shared_ptr<ov::Node>> & get_model_extra_inputs() const = 0;
+    virtual const std::map<std::string, std::shared_ptr<ov::Node>> & get_model_weights() const = 0;
     virtual std::set<std::string> get_model_output_names() const = 0;
 
     virtual int32_t * get_rope_params() const = 0;
