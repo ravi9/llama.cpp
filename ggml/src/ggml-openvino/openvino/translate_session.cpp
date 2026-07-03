@@ -44,6 +44,14 @@ using namespace ov::op;
 
 namespace {
 
+std::shared_ptr<ov::op::v0::Parameter> create_parameter(const std::string & name,
+                                                        const ModelInputInfo & input_info) {
+    auto param_node = std::make_shared<ov::op::v0::Parameter>(input_info.type, input_info.shape);
+    param_node->set_friendly_name(name);
+    param_node->output(0).get_tensor().set_names({name});
+    return param_node;
+}
+
 ov::pass::MakeStateful::ParamResPairs get_kv_param_res_pairs(
     const std::shared_ptr<ov::Model> & model,
     const std::map<std::string, std::string> & kv_param_res_names) {
@@ -177,8 +185,9 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
     std::shared_ptr<GgmlDecoder> ggml_model_decoder = ggml_model->get_model_decoder();
 
     for (const auto & it : ggml_model_decoder->get_model_inputs()) {
-        params.push_back(std::dynamic_pointer_cast<ov::op::v0::Parameter>(it.second));
-        (*tensor_map)[it.first] = it.second;
+        auto param_node = create_parameter(it.first, it.second);
+        params.push_back(param_node);
+        (*tensor_map)[it.first] = param_node;
     }
 
     for (const auto & it : ggml_model_decoder->get_model_extra_inputs()) {
