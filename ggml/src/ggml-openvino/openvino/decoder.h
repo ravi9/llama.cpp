@@ -12,6 +12,11 @@ namespace ov {
 namespace frontend {
 namespace ggml {
 
+struct ModelInputInfo {
+    element::Type type;
+    PartialShape shape;
+};
+
 class GgmlDecoder : public DecoderBase {
 public:
     virtual ov::Any get_attribute(const std::string & name) const = 0;
@@ -89,7 +94,7 @@ public:
 
     virtual int get_op_case(int node_idx) const = 0;
 
-    virtual const std::map<std::string, std::shared_ptr<ov::Node>> & get_model_inputs() const = 0;
+    virtual const std::map<std::string, ModelInputInfo> & get_model_inputs() const = 0;
     virtual const std::map<std::string, std::shared_ptr<ov::Node>> & get_model_extra_inputs() const = 0;
     virtual const std::map<std::string, std::shared_ptr<ov::Node>> & get_model_weights() const = 0;
     virtual std::vector<std::string> get_model_output_names() const = 0;
