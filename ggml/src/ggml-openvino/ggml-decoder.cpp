@@ -104,13 +104,9 @@ void GgmlOvDecoder::set_input_output() {
 
         NodeInfo current_node_info;
         auto node_name = std::string(node->name);
-        auto node_output_name = node_name;
-        auto * node_output = node;
 
         current_node_info.node = node;
         current_node_info.node_name = node_name;
-        current_node_info.node_output = node_output;
-        current_node_info.node_output_name = node_output_name;
         current_node_info.node_op_case = 0;
         current_node_info.data_addr = node->data;
 
@@ -702,9 +698,9 @@ void GgmlOvDecoder::compute_model_outputs() {
             }
         }
         if (cur_node != nullptr) {
-            std::string node_output_name(cur_node->name);
-            m_model_outputs[node_output_name] = cur_node;
-            m_model_output_names.push_back(node_output_name);
+            std::string cur_node_name(cur_node->name);
+            m_model_outputs[cur_node_name] = cur_node;
+            m_model_output_names.push_back(cur_node_name);
         }
     }
 }
@@ -1206,7 +1202,7 @@ std::vector<std::string> GgmlOvDecoder::get_input_names(int node_idx) const {
 }
 
 ov::PartialShape GgmlOvDecoder::get_output_shape(int node_idx) const {
-    auto * ggml_tensor = m_node_info_list[node_idx].node_output;
+    auto * ggml_tensor = m_node_info_list[node_idx].node;
     return ov::PartialShape(get_shape(ggml_tensor));
 }
 
@@ -1220,7 +1216,7 @@ std::vector<size_t> GgmlOvDecoder::get_output_stride(int node_idx) const {
 }
 
 std::vector<std::string> GgmlOvDecoder::get_output_names(int node_idx) const {
-    return {m_node_info_list[node_idx].node_output_name};
+    return {m_node_info_list[node_idx].node_name};
 }
 
 std::vector<std::string> GgmlOvDecoder::get_output_aliases(int node_idx) const {
