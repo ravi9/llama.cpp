@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <openvino/core/except.hpp>
 #include <openvino/core/shape.hpp>
 #include <openvino/core/strides.hpp>
 #include <openvino/op/constant.hpp>
@@ -19,6 +20,38 @@ namespace ov {
 namespace frontend {
 namespace ggml {
 namespace op {
+
+int infer_dynamic_dim_im2col(const NodeContext & context) {
+    int src_dyn = context.get_input_dynamic_dim(1);
+    if (src_dyn == -1) {
+        return -1;
+    }
+
+    int dynamic_dim = -1;
+    const bool is_2D = context.get_output_op_params()[6] == 1;
+    if (is_2D) {
+        if (src_dyn == 0) {
+            dynamic_dim = 1;  // IW -> OW
+        } else if (src_dyn == 1) {
+            dynamic_dim = 2;  // IH -> OH
+        } else if (src_dyn == 3) {
+            dynamic_dim = 3;  // N  -> N
+        }
+    } else {
+        if (src_dyn == 0) {
+            dynamic_dim = 1;  // IW -> OW
+        } else if (src_dyn == 2) {
+            dynamic_dim = 2;  // N  -> N  (1D: b->ne[2] is the batch/channel dim)
+        }
+    }
+    if (dynamic_dim != -1) {
+        auto input_shape = context.get_input_ggml_shape(1);
+        auto output_shape = context.get_output_ggml_shape();
+        OPENVINO_ASSERT(input_shape[src_dyn] == output_shape[dynamic_dim],
+                        "Dynamic dim value mismatch for IM2COL node: " + context.get_name());
+    }
+    return dynamic_dim;
+}
 
 OutputVector translate_im2col(const NodeContext & context) {
     num_inputs_check(context, 2, 2);

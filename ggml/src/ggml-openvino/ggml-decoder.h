@@ -86,6 +86,22 @@ public:
 
     virtual std::vector<size_t> get_input_stride(int node_idx, const std::string & name) const override;
 
+    virtual ov::Shape get_input_ggml_shape(int node_idx, const std::string & name) const override;
+
+    virtual std::vector<size_t> get_input_ggml_stride(int node_idx, const std::string & name) const override;
+
+    virtual int32_t get_input_dynamic_dim(int node_idx, const std::string & name) const override;
+
+    virtual size_t get_input_type_size(int node_idx, const std::string & name) const override;
+
+    virtual int64_t get_input_block_size(int node_idx, const std::string & name) const override;
+
+    virtual bool input_has_same_shape_as_output(int node_idx, const std::string & name) const override;
+
+    virtual bool input_is_none_op(int node_idx, const std::string & name) const override;
+
+    virtual bool input_has_org_src(int node_idx, const std::string & name) const override;
+
     virtual size_t get_view_input_size(int node_idx, const std::string & name) const override;
 
     virtual size_t get_view_input_offset(int node_idx, const std::string & name, size_t view_index) const override;
@@ -145,6 +161,12 @@ public:
     virtual ov::element::Type get_output_type(int node_idx) const override;
 
     virtual std::vector<size_t> get_output_stride(int node_idx) const override;
+
+    virtual ov::Shape get_output_ggml_shape(int node_idx) const override;
+
+    virtual std::vector<size_t> get_output_ggml_stride(int node_idx) const override;
+
+    virtual size_t get_output_type_size(int node_idx) const override;
 
     virtual int32_t * get_input_op_params(int node_idx, const std::string & name) const override;
 

@@ -16,6 +16,30 @@ namespace ov {
 namespace frontend {
 namespace ggml {
 
+namespace {
+
+int infer_dynamic_dim_unknown(const NodeContext &) {
+    return -1;
+}
+
+int infer_dynamic_dim_input0(const NodeContext & context) {
+    return context.get_input_dynamic_dim(0);
+}
+
+int infer_dynamic_dim_input1(const NodeContext & context) {
+    return context.get_input_dynamic_dim(1);
+}
+
+int infer_dynamic_dim_input1_or_input0(const NodeContext & context) {
+    int dynamic_dim = context.get_input_dynamic_dim(0);
+    if (context.get_input_dynamic_dim(1) != -1) {
+        dynamic_dim = context.get_input_dynamic_dim(1);
+    }
+    return dynamic_dim;
+}
+
+}  // namespace
+
 std::unordered_map<std::string, CreatorFunction> get_supported_ops() {
     using namespace ov::op;
     return {
@@ -62,6 +86,41 @@ std::unordered_map<std::string, CreatorFunction> get_supported_ops() {
         {"GGML_OP_SSM_CONV",        op::translate_ssm_conv                         },
         {"GGML_OP_GATED_DELTA_NET", op::translate_gated_delta_net                  },
         {"GGML_OP_REPEAT",          op::translate_repeat                           },
+    };
+}
+
+std::unordered_map<std::string, DynamicDimInferFunction> get_dynamic_dim_infer_map() {
+    return {
+        {"GGML_OP_NONE",           infer_dynamic_dim_unknown        },
+        {"GGML_OP_GET_ROWS",       op::infer_dynamic_dim_get_rows   },
+        {"GGML_OP_MUL",            infer_dynamic_dim_input1_or_input0},
+        {"GGML_OP_MUL_MAT",        infer_dynamic_dim_input1_or_input0},
+        {"GGML_OP_PERMUTE",        op::infer_dynamic_dim_permute    },
+        {"GGML_OP_VIEW",           op::infer_dynamic_dim_view       },
+        {"GGML_OP_TRANSPOSE",      op::infer_dynamic_dim_transpose  },
+        {"GGML_OP_RESHAPE",        op::infer_dynamic_dim_reshape    },
+        {"GGML_OP_FLASH_ATTN_EXT", op::infer_dynamic_dim_flash_attn_ext},
+        {"GGML_OP_CONT",           op::infer_dynamic_dim_cont       },
+        {"GGML_OP_RMS_NORM",       infer_dynamic_dim_input0         },
+        {"GGML_OP_NORM",           infer_dynamic_dim_input0         },
+        {"GGML_OP_ADD",            infer_dynamic_dim_input0         },
+        {"GGML_GLU_OP_SWIGLU",     infer_dynamic_dim_input0         },
+        {"GGML_GLU_OP_SWIGLU_OAI", infer_dynamic_dim_input0         },
+        {"GGML_GLU_OP_GEGLU",      infer_dynamic_dim_input0         },
+        {"GGML_OP_ROPE",           infer_dynamic_dim_input0         },
+        {"GGML_OP_SCALE",          infer_dynamic_dim_input0         },
+        {"GGML_OP_SOFT_MAX",       infer_dynamic_dim_input0         },
+        {"GGML_OP_ARGSORT",        infer_dynamic_dim_input0         },
+        {"GGML_OP_ADD_ID",         infer_dynamic_dim_input0         },
+        {"GGML_UNARY_OP_GELU",     infer_dynamic_dim_input0         },
+        {"GGML_UNARY_OP_SIGMOID",  infer_dynamic_dim_input0         },
+        {"GGML_UNARY_OP_SILU",     infer_dynamic_dim_input0         },
+        {"GGML_UNARY_OP_SOFTPLUS", infer_dynamic_dim_input0         },
+        {"GGML_UNARY_OP_TANH",     infer_dynamic_dim_input0         },
+        {"GGML_OP_MUL_MAT_ID",     infer_dynamic_dim_input1         },
+        {"GGML_OP_CPY",            infer_dynamic_dim_unknown        },
+        {"GGML_OP_SET_ROWS",       infer_dynamic_dim_unknown        },
+        {"GGML_OP_IM2COL",         op::infer_dynamic_dim_im2col     },
     };
 }
 
