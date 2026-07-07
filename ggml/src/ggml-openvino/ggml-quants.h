@@ -146,13 +146,15 @@ void quantize_q8_1(const float * x,
                    ov::Tensor & scales_arr,
                    ov::Tensor & zp_arr,
                    int64_t k,
-                   int64_t qk);
+                   int64_t qk,
+                   int64_t block_offset = 0);
 void quantize_q8_0(const float * x,
                    ov::Tensor & weights_arr,
                    ov::Tensor & scales_arr,
                    ov::Tensor & zp_arr,
                    int64_t k,
-                   int64_t qk);
+                   int64_t qk,
+                   int64_t block_offset = 0);
 
 namespace ov {
 namespace op {
