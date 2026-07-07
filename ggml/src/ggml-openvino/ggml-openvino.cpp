@@ -858,6 +858,32 @@ static bool checked_mul_size(size_t a, size_t b, size_t & out) {
     return true;
 }
 
+static bool tensor_view_fits_src_buffer(const ggml_tensor * tensor) {
+    if (tensor->view_src == nullptr) {
+        return true;
+    }
+
+    const size_t src_nbytes = ggml_nbytes(tensor->view_src);
+    if (tensor->view_offs > src_nbytes) {
+        return false;
+    }
+
+    const size_t tensor_nbytes = ggml_nbytes(tensor);
+    return tensor_nbytes <= src_nbytes - tensor->view_offs;
+}
+
+static bool cpy_output_view_is_supported(const ggml_tensor * op) {
+    if (op->view_src == nullptr) {
+        return true;
+    }
+
+    if (!tensor_view_fits_src_buffer(op)) {
+        return false;
+    }
+
+    return ggml_nbytes(op) == 0 || ggml_is_contiguous(op);
+}
+
 static bool mul_mat_id_requires_large_tmp(const ggml_tensor * op) {
     const ggml_tensor * as = op->src[0];
     const ggml_tensor * ids = op->src[2];
@@ -1001,8 +1027,7 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
             (op->ne[0] == 2 && op->ne[1] == 4 && op->ne[2] == 3 && op->ne[3] == 2)) {
             return true;
         }
-        // CPY into a strided view of a larger buffer (recurrent-state snapshots) not supported
-        if (op->view_src && ggml_nbytes(op) != ggml_nbytes(op->view_src)) {
+        if (!cpy_output_view_is_supported(op)) {
             return true;
         }
         break;
