@@ -27,7 +27,7 @@ OutputVector translate_get_rows(const NodeContext & context) {
 
     auto op_case = context.get_op_case();
     ov::Output<ov::Node> indices;
-    if (op_case == 1 || op_case == 2) {
+    if ((op_case == 1 || op_case == 2) && context.has_input("s_copy_active_slot_len")) {
         // Recurrent state reorder (inp->s_copy): slice the active (op_case 1) or extra (op_case 2)
         // segment from the s_copy index list at runtime, instead of baking the static view offset,
         // so the cached IR works for any number of active sequences.

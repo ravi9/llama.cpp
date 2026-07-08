@@ -1063,23 +1063,6 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
         }
         break;
     }
-    case GGML_OP_SET: {
-        const auto nb1 = static_cast<size_t>(op->op_params[0]);
-        const auto nb2 = static_cast<size_t>(op->op_params[1]);
-        const auto nb3 = static_cast<size_t>(op->op_params[2]);
-
-        // OpenVINO SET translation currently supports dst layouts that match src0 strides.
-        if (op->src[0] == nullptr || nb1 != op->src[0]->nb[1] || nb2 != op->src[0]->nb[2] || nb3 != op->src[0]->nb[3]) {
-            // std::cout << "Unsupported SET op with dst nb1=" << nb1 << ", nb2=" << nb2 << ", nb3=" << nb3
-            //           << " that does not match src0 strides nb[1]="
-            //           << (op->src[0] != nullptr ? std::to_string(op->src[0]->nb[1]) : "null")
-            //           << ", nb[2]=" << (op->src[0] != nullptr ? std::to_string(op->src[0]->nb[2]) : "null")
-            //           << ", nb[3]=" << (op->src[0] != nullptr ? std::to_string(op->src[0]->nb[3]) : "null")
-            //           << std::endl;
-            return true;
-        }
-        break;
-    }
     case GGML_OP_GET_ROWS:
     case GGML_OP_SET_ROWS: {
         if (op->ne[3] != 1) {
@@ -1089,13 +1072,9 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
             op->src[0]->type == GGML_TYPE_BF16) {
             return true;
         }
-        if (op->ne[0] == 256 && (op->src[0]->type == GGML_TYPE_Q4_K || op->src[0]->type == GGML_TYPE_Q5_K ||
-                                 op->src[0]->type == GGML_TYPE_Q4_1 || op->src[0]->type == GGML_TYPE_Q5_1)) {
-            // These are all f16-arithmetic dequant rounding errors that intermittently exceed the
-            // tight 1e-7 NMSE threshold depending on the random test data (see ggml-quants.cpp
-            // make_int8_weights/make_int4_weights: dequant is done in f16, not f32, to keep the
-            // Convert/Subtract/Multiply chain fusable into GatherMatmulCompressed/FullyConnectedCompressed
-            // for the shared non-test code paths).
+        if (op->ne[0] == 256 && (op->src[0]->type == GGML_TYPE_Q4_K || op->src[0]->type == GGML_TYPE_Q5_K)) {
+            // ERR = 0.000000306 > 0.000000100   GET_ROWS(type=q4_K,n=256,m=5,r=4,be1=1,be2=1,v=0)
+            // ERR = 0.000000197 > 0.000000100   GET_ROWS(type=q5_K,n=256,m=5,r=4,be1=1,be2=1,v=0)
             return true;
         }
 
@@ -1214,6 +1193,9 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
         break;
     }
     case GGML_OP_MUL_MAT_ID: {
+        if (ggml_openvino_get_device_name() == "GPU" && op->src[0] != nullptr && op->src[0]->type == GGML_TYPE_BF16) {
+            return true;
+        }
         if (mul_mat_id_requires_large_tmp(op) &&
             !(op->src[0] != nullptr && op->src[0]->type == GGML_TYPE_MXFP4)) {
             return true;

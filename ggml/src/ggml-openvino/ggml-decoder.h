@@ -356,7 +356,7 @@ public:
                op->src[0]->buffer->usage == GGML_BACKEND_BUFFER_USAGE_ANY;
     }
 
-    std::string get_graph_input_ov_name(const ggml_tensor * tensor, const ggml_tensor * op) {
+    std::string get_graph_input_ov_name(const ggml_tensor * tensor, const ggml_tensor * op) const {
         if (is_inp_pos(tensor, op)) {
             return "inp_pos";
         }

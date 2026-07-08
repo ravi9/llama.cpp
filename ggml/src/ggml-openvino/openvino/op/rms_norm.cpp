@@ -26,7 +26,7 @@ OutputVector translate_rms_norm(const NodeContext & context) {
 
     ov::Output<ov::Node> input_node;
     if (op_case == 1) {
-        input_node = context.get_input(0);
+        input_node = process_view_input_new(context, 0);
     } else if (op_case == 2) {
         auto ssm_state_size = context.get_ssm_state_size();
         // The GDN op packs [attn | new_state] along the row axis; the state occupies the last
@@ -56,8 +56,7 @@ OutputVector translate_rms_norm(const NodeContext & context) {
     } else {
         input_node = process_view_input_new(context, 0);
     }
-    auto square = std::make_shared<ov::op::v1::Power>(
-        input_node, ov::op::v0::Constant::create(ov::element::f32, ov::Shape{1}, {2.0f}));
+    auto square = std::make_shared<ov::op::v1::Multiply>(input_node, input_node);
 
     auto mean = std::make_shared<ov::op::v1::ReduceMean>(
         square, ov::op::v0::Constant::create(ov::element::i64, ov::Shape{1}, {-1}), true);
