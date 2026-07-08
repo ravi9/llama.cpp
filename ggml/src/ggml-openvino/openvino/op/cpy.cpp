@@ -25,6 +25,41 @@ OutputVector translate_cpy(const NodeContext & context) {
     auto input_shape = context.get_input_shape(0);
     auto output_shape = context.get_input_shape(1);
 
+    if (op_case == 4) {
+        auto src = process_view_input_new(context, 0);
+        auto base = context.get_input(1);
+
+        int64_t n_elems = 1;
+        for (const auto & dim : context.get_output_shape().to_shape()) {
+            n_elems *= static_cast<int64_t>(dim);
+        }
+
+        const auto output_stride = context.get_output_stride();
+        const size_t elem_size = output_stride.empty() ? context.get_output_type().size() : output_stride.back();
+        FRONT_END_OP_CONVERSION_CHECK(elem_size > 0, "CPY conv state view update has invalid element size");
+
+        const int64_t begin_val = static_cast<int64_t>(context.get_output_op_offset() / elem_size);
+        const int64_t end_val = begin_val + n_elems;
+
+        auto flat_shape = ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{1, 1, 1, -1});
+        src = std::make_shared<ov::op::v1::Reshape>(src, flat_shape, false);
+        if (src.get_element_type() != context.get_output_type()) {
+            src = std::make_shared<ov::op::v0::Convert>(src, context.get_output_type());
+        }
+
+        auto zero = ov::op::v0::Constant::create(ov::element::i64, {1}, {0});
+        auto begin = ov::op::v0::Constant::create(ov::element::i64, {1}, {begin_val});
+        auto end = ov::op::v0::Constant::create(ov::element::i64, {1}, {end_val});
+        auto int_max = ov::op::v0::Constant::create(ov::element::i64, {1}, {INT_MAX});
+        auto one = ov::op::v0::Constant::create(ov::element::i64, {1}, {1});
+        auto axis = ov::op::v0::Constant::create(ov::element::i64, {1}, {3});
+
+        auto head_part = std::make_shared<ov::op::v8::Slice>(base, zero, begin, one, axis);
+        auto tail_part = std::make_shared<ov::op::v8::Slice>(base, end, int_max, one, axis);
+        auto res = std::make_shared<ov::op::v0::Concat>(ov::OutputVector{head_part, src, tail_part}, 3);
+        return rename_outputs_with_suffix({res}, context.get_name());
+    }
+
     // Recurrent state cache writeback with a dynamic active-slot block (inp->s_copy reorder).
     // The active sequences occupy a contiguous slot block [idx, idx+len) of the state cache; write
     // the new rows into that block while preserving the rest, so the result is the full updated

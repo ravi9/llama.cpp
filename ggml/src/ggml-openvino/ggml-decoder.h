@@ -325,7 +325,10 @@ public:
 
     // also returns true for cache_s and cache_r in SSM/DeltaNet models
     inline static bool is_kvcache(const ggml_tensor * tensor, const ggml_tensor * op) {
-        return tensor->buffer->usage == GGML_BACKEND_BUFFER_USAGE_ANY ||
+        if (tensor == nullptr) {
+            return false;
+        }
+        return (tensor->buffer != nullptr && tensor->buffer->usage == GGML_BACKEND_BUFFER_USAGE_ANY) ||
                (op != nullptr && op->op == GGML_OP_SET_ROWS && op->src[2] == tensor);
     }
 
@@ -344,7 +347,7 @@ public:
                op->src[0]->buffer->usage == GGML_BACKEND_BUFFER_USAGE_ANY;
     }
 
-    std::string get_graph_input_ov_name(const ggml_tensor * tensor, const ggml_tensor * op) {
+    std::string get_graph_input_ov_name(const ggml_tensor * tensor, const ggml_tensor * op) const {
         if (is_inp_pos(tensor, op)) {
             return "inp_pos";
         }
