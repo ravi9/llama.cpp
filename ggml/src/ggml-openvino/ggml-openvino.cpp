@@ -917,6 +917,9 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
         if (op->type == GGML_TYPE_I64) {
             return true;
         }
+        if (ggml_openvino_get_device_name() == "GPU" && op->type == GGML_TYPE_BF16 && has_view_op_input(op)) {
+            return true;
+        }
         break;
     }
     case GGML_OP_SET: {
@@ -939,6 +942,10 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
     case GGML_OP_GET_ROWS:
     case GGML_OP_SET_ROWS: {
         if (op->ne[3] != 1) {
+            return true;
+        }
+        if (op->op == GGML_OP_GET_ROWS && ggml_openvino_get_device_name() == "GPU" &&
+            op->src[0]->type == GGML_TYPE_BF16) {
             return true;
         }
         if (op->ne[0] == 256 && (op->src[0]->type == GGML_TYPE_Q4_K || op->src[0]->type == GGML_TYPE_Q5_K)) {
@@ -1062,6 +1069,9 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
         break;
     }
     case GGML_OP_MUL_MAT_ID: {
+        if (ggml_openvino_get_device_name() == "GPU" && op->src[0] != nullptr && op->src[0]->type == GGML_TYPE_BF16) {
+            return true;
+        }
         if (mul_mat_id_requires_large_tmp(op) &&
             !(op->src[0] != nullptr && op->src[0]->type == GGML_TYPE_MXFP4)) {
             return true;
@@ -1108,6 +1118,12 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
         // if the type is bf16, will return true
         if (op->type == GGML_TYPE_BF16) {
             // GGML_LOG_WARN("OpenVINO backend does not support CONT with BF16 type\n");
+            return true;
+        }
+        break;
+    }
+    case GGML_OP_REPEAT: {
+        if (ggml_openvino_get_device_name() == "GPU" && op->type == GGML_TYPE_BF16) {
             return true;
         }
         break;

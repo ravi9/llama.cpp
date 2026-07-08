@@ -79,13 +79,17 @@ OutputVector translate_reshape(const NodeContext & context) {
         // 14: [  6144,     1,     2,     1] RESHAPE              linear_attn_qkv_mixed-0
         //     [  6144,     2,     1,     1]            0: MUL_MAT     node_13
         // reshape to [1, n_slot_active_len, -1, 6144]
-        auto n_slot_active_len = context.get_input("s_copy_active_slot_len");
-        auto emb_size =
-            ov::op::v0::Constant::create(ov::element::i64, {1}, {(int64_t) context.get_output_shape().to_shape()[3]});
-        auto one = ov::op::v0::Constant::create(ov::element::i64, {1}, {1});
-        auto neg_one = ov::op::v0::Constant::create(ov::element::i64, {1}, {-1});
-        new_shape_node =
-            std::make_shared<ov::op::v0::Concat>(ov::OutputVector{one, n_slot_active_len, neg_one, emb_size}, 0);
+        if (context.has_input("s_copy_active_slot_len")) {
+            auto n_slot_active_len = context.get_input("s_copy_active_slot_len");
+            auto emb_size = ov::op::v0::Constant::create(ov::element::i64, {1},
+                                                         {(int64_t) context.get_output_shape().to_shape()[3]});
+            auto one = ov::op::v0::Constant::create(ov::element::i64, {1}, {1});
+            auto neg_one = ov::op::v0::Constant::create(ov::element::i64, {1}, {-1});
+            new_shape_node =
+                std::make_shared<ov::op::v0::Concat>(ov::OutputVector{one, n_slot_active_len, neg_one, emb_size}, 0);
+        } else {
+            new_shape_node = ov::op::v0::Constant::create(ov::element::i64, {4}, context.get_output_shape().to_shape());
+        }
     } else if (op_case == 7) {
         // 57: [  2048,     2,     1,     1] RESHAPE              linear_attn_out-0 (reshaped)
         //     [  2048,     1,     2,     1]            0: MUL_MAT     linear_attn_out-0
