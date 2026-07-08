@@ -19,7 +19,6 @@ namespace ggml {
 namespace op {
 
 // GGML SET writes src1 into a view of src0 and returns the updated tensor.
-// This translation supports the contiguous destination-layout form used in llama.cpp.
 OutputVector translate_set(const NodeContext & context) {
     num_inputs_check(context, 2, 2);
 
@@ -31,16 +30,10 @@ OutputVector translate_set(const NodeContext & context) {
     const auto dst_stride = context.get_input_stride(0);
     FRONT_END_OP_CONVERSION_CHECK(dst_stride.size() >= 4, "SET requires 4D destination strides");
 
-    const auto * op_params = context.get_output_op_params();
-    const size_t nb1 = static_cast<size_t>(op_params[0]);
-    const size_t nb2 = static_cast<size_t>(op_params[1]);
-    const size_t nb3 = static_cast<size_t>(op_params[2]);
+    const auto * op_params = reinterpret_cast<const uint32_t *>(context.get_output_op_params());
     const size_t offset = static_cast<size_t>(op_params[3]);
 
-    FRONT_END_OP_CONVERSION_CHECK(nb1 == dst_stride[1] && nb2 == dst_stride[2] && nb3 == dst_stride[3],
-                                  "SET requires destination strides that match src0 layout");
-
-    const size_t elem_size = dst_stride[0];
+    const size_t elem_size = dst_stride.back();
     FRONT_END_OP_CONVERSION_CHECK(elem_size != 0 && offset % elem_size == 0,
                                   "SET offset must be aligned to destination element size");
 
