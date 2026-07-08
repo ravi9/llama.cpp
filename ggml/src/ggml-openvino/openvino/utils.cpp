@@ -17,6 +17,7 @@
 #include <openvino/op/reshape.hpp>
 #include <openvino/op/shape_of.hpp>
 #include <openvino/op/sin.hpp>
+#include <openvino/op/slice.hpp>
 #include <openvino/op/split.hpp>
 #include <openvino/op/squeeze.hpp>
 #include <openvino/op/subtract.hpp>
@@ -195,7 +196,24 @@ std::pair<ov::Output<Node>, ov::Output<Node>> make_sin_cos(int32_t * rope_params
                 std::make_shared<ov::op::v0::Constant>(ov::element::f32, ov::Shape{1, 1, 1, factor.size()}, factor);
         }
         if (rope_freqs_weight) {
-            freq_factors = std::make_shared<ov::op::v1::Divide>(freq_factors, rope_freqs_weight);
+            Output<Node> rope_factors = std::make_shared<ov::op::v8::Slice>(
+                rope_freqs_weight,
+                ov::op::v0::Constant::create(ov::element::i64, {1}, {0}),
+                ov::op::v0::Constant::create(ov::element::i64, {1}, {(int64_t) n_dims_half}),
+                ov::op::v0::Constant::create(ov::element::i64, {1}, {1}),
+                ov::op::v0::Constant::create(ov::element::i64, {1}, {rope_freqs_weight->get_output_partial_shape(0).rank().get_length() - 1}));
+            if (stateful) {
+                rope_factors = std::make_shared<ov::op::v1::Reshape>(
+                    rope_factors,
+                    ov::op::v0::Constant::create(ov::element::i64, {3}, {(int64_t) 1, (int64_t) 1, (int64_t) n_dims_half}),
+                    false);
+            } else {
+                rope_factors = std::make_shared<ov::op::v1::Reshape>(
+                    rope_factors,
+                    ov::op::v0::Constant::create(ov::element::i64, {4}, {(int64_t) 1, (int64_t) 1, (int64_t) 1, (int64_t) n_dims_half}),
+                    false);
+            }
+            freq_factors = std::make_shared<ov::op::v1::Divide>(freq_factors, rope_factors);
         }
 
         auto theta_extrap = std::make_shared<ov::op::v1::Multiply>(freq_factors, inp_pos);
