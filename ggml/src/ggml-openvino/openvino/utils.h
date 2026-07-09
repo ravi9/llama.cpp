@@ -66,9 +66,8 @@ std::pair<ov::Output<Node>, ov::Output<Node>> make_sin_cos(int32_t * rope_params
  * @param input_index - input index to resolve
  * @return OpenVINO output for the resolved input
  */
+ov::Output<ov::Node> process_view_input(const NodeContext & context, int input_index, int slice_len = 0, int axis = -1);
 ov::Output<ov::Node> process_view_input_new(const NodeContext & context, int input_index);
-
-ov::Output<ov::Node> process_view_input(const NodeContext & context, int input_index, int slice_len = 0);
 
 namespace op {
 /**

@@ -20,6 +20,7 @@ struct ModelParams {
     int n_seq = 1;
     int n_heads_kv = -1;
     int head_size = -1;
+    int state_size = -1;  // for SSM molels, eg qwen35
     int32_t rope_params[15];
     bool mixed_rope_params = false;
     std::vector<int> swa_layers;
@@ -48,6 +49,37 @@ struct ComputeParams {
     int token_len_per_seq = -1;
     int past_kv_len = -1;
     int output_len = 1;
+
+    int cache_rs_reset_idx = -1;
+    int cache_rs_reset_len = -1;
+    // SSM/DeltaNet models otionally clear cache_r and cache_s of certain slots in the cgraph
+    // 3: [ 18432,     4,     1,     1] RESHAPE              cache_r_l0 (reshaped)
+    //    [ 18432,     4,     1,     1]            0: NONE        cache_r_l0
+    // 4: [ 18432,     1,     1,     1] VIEW                 cache_r_l0 (reshaped) (view)
+    //    [ 18432,     4,     1,     1]            0: RESHAPE     cache_r_l0 (reshaped)
+    // 5: [ 18432,     1,     1,     1] SCALE                cache_r_l0 (reshaped) (view) (view)
+    //    [ 18432,     1,     1,     1]            0: VIEW        cache_r_l0 (reshaped) (view)
+
+    int s_copy_active_slot_idx = -1;
+    int s_copy_active_slot_len = -1;
+    // SSM/DeltaNet models otionally reorder slots of state cache, to make the active slots contiguous
+    // leaf_5 is the inp->s_copy in llama-graph.cpp, eg if there are 8 slots in total and slot 3 and 7
+    // are active in the current batch, leaf_5 will be [3, 7, 5, 6, 4]
+    //  6: [     2,     1,     1,     1] VIEW                  (view)
+    //      [     2,     1,     1,     1]            0: NONE        leaf_5
+    //  7: [ 18432,     2,     1,     1] GET_ROWS             conv_states-0
+    //      [ 18432,     4,     1,     1]            0: RESHAPE     cache_r_l0 (reshaped)
+    //      [     2,     1,     1,     1]            1: VIEW         (view)
+    //  8: [     0,     1,     1,     1] VIEW                  (view)
+    //      [     2,     1,     1,     1]            0: NONE        leaf_5
+    //  9: [ 18432,     0,     1,     1] GET_ROWS             node_9
+    //      [ 18432,     4,     1,     1]            0: RESHAPE     cache_r_l0 (reshaped)
+    //      [     0,     1,     1,     1]            1: VIEW         (view)
+    // 10: [ 18432,     0,     1,     1] VIEW                 cache_r_l0 (view)
+    //      [ 18432,     4,     1,     1]            0: NONE        cache_r_l0
+    // 11: [ 18432,     0,     1,     1] CPY                  cache_r_l0 (view) (copy of )
+    //      [ 18432,     0,     1,     1]            0: GET_ROWS    node_9
+    //      [ 18432,     0,     1,     1]            1: VIEW        cache_r_l0 (view)
 };
 
 class GgmlOvDecoder : public ov::frontend::ggml::GgmlDecoder {
@@ -154,7 +186,9 @@ public:
 
     virtual std::vector<std::string> get_output_names(int node_idx) const override;
 
-    virtual std::vector<std::string> get_output_aliases(int node_idx) const override;
+    virtual std::string get_inplace_op_src(int node_idx) const override;
+
+    virtual bool is_view_like_alias_of(int node_idx, const std::string & view_src_name) const override;
 
     virtual const std::string & get_op_type() const override;
 
@@ -185,7 +219,7 @@ public:
         return m_model_weights;
     }
 
-    virtual std::vector<std::string> get_model_output_names() const override { return m_model_output_names; }
+    virtual std::set<std::string> get_model_output_names() const override { return m_model_output_names; }
 
     const std::map<std::string, ggml_tensor *> & get_model_outputs() const { return m_model_outputs; }
 
@@ -209,6 +243,8 @@ public:
     virtual int32_t * get_rope_params() const override { return const_cast<int32_t *>(m_model_params.rope_params); }
 
     virtual bool has_mixed_rope_params() const override { return m_model_params.mixed_rope_params; }
+
+    virtual int get_ssm_state_size() const override { return m_model_params.state_size; }
 
     virtual std::map<std::string, std::string> get_kv_param_res_names() const override;
 
@@ -263,7 +299,7 @@ public:
     void update_io(ggml_cgraph * cgraph);
 
     inline static bool is_inp_tok(const ggml_tensor * tensor, const ggml_tensor * op) {
-        return op->op == GGML_OP_GET_ROWS && tensor == op->src[1] && op->src[0]->op == GGML_OP_NONE && op->src[0]->org_src == nullptr;
+        return op->op == GGML_OP_GET_ROWS && tensor == op->src[1] && op->src[0]->op == GGML_OP_NONE;
     }
 
     inline static bool is_inp_pos(const ggml_tensor * tensor, const ggml_tensor * op) {
@@ -283,8 +319,12 @@ public:
         return op->op == GGML_OP_ROPE && tensor == op->src[2];
     }
 
+    // also returns true for cache_s and cache_r in SSM/DeltaNet models
     inline static bool is_kvcache(const ggml_tensor * tensor, const ggml_tensor * op) {
-        return tensor->buffer->usage == GGML_BACKEND_BUFFER_USAGE_ANY ||
+        if (tensor == nullptr) {
+            return false;
+        }
+        return (tensor->buffer != nullptr && tensor->buffer->usage == GGML_BACKEND_BUFFER_USAGE_ANY) ||
                (op != nullptr && op->op == GGML_OP_SET_ROWS && op->src[2] == tensor);
     }
 
@@ -297,7 +337,13 @@ public:
                op->src[1]->op == GGML_OP_NONE;
     }
 
-    std::string get_graph_input_ov_name(const ggml_tensor * tensor, const ggml_tensor * op) {
+    // the state permutation index input used in SSM/DeltaNet models (inp->s_copy in llama-graph.cpp)
+    inline static bool is_inp_s_copy(const ggml_tensor * tensor, const ggml_tensor * op) {
+        return op->op == GGML_OP_GET_ROWS && tensor == op->src[1] &&
+               op->src[0]->buffer->usage == GGML_BACKEND_BUFFER_USAGE_ANY;
+    }
+
+    std::string get_graph_input_ov_name(const ggml_tensor * tensor, const ggml_tensor * op) const {
         if (is_inp_pos(tensor, op)) {
             return "inp_pos";
         }
@@ -317,6 +363,10 @@ private:
     void compute_model_inputs();
     void compute_model_outputs();
 
+    // True if tensor is the inp->s_copy index leaf gathered by a recurrent state cache GET_ROWS
+    // (possibly through a VIEW), so it gets a dynamic [1,1,1,-1] graph-input shape.
+    bool is_s_copy_leaf(const ggml_tensor * tensor) const;
+
     // Infer and propagate dynamic-dimension indices for all tensors in the GGML graph.
     void compute_node_dynamic_dims();
 
@@ -329,7 +379,7 @@ private:
     std::map<std::string, ov::frontend::ggml::ModelExtraInputInfo> m_model_extra_inputs;
     std::map<std::string, std::shared_ptr<ov::Node>> m_model_weights;
     std::map<std::string, ggml_tensor *> m_model_outputs;
-    std::vector<std::string> m_model_output_names;
+    std::set<std::string> m_model_output_names;
     std::vector<NodeInfo> m_node_info_list;
     std::map<ggml_tensor *, int> m_node_dynamic_dims;
 

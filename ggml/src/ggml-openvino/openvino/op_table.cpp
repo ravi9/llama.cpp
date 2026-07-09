@@ -4,10 +4,12 @@
 
 #include <openvino/op/add.hpp>
 #include <openvino/op/divide.hpp>
+#include <openvino/op/exp.hpp>
 #include <openvino/op/gather.hpp>
 #include <openvino/op/gelu.hpp>
 #include <openvino/op/matmul.hpp>
 #include <openvino/op/multiply.hpp>
+#include <openvino/op/negative.hpp>
 #include <openvino/op/sigmoid.hpp>
 #include <openvino/op/subtract.hpp>
 #include <openvino/op/tanh.hpp>
@@ -50,6 +52,9 @@ std::unordered_map<std::string, CreatorFunction> get_supported_ops() {
         {"GGML_UNARY_OP_SILU",      op::translate_unary_silu                       },
         {"GGML_UNARY_OP_SOFTPLUS",  op::translate_unary_softplus                   },
         {"GGML_UNARY_OP_TANH",      op::translate_1to1_match_1_input<v0::Tanh>     },
+        {"GGML_UNARY_OP_SIGMOID",   op::translate_1to1_match_1_input<v0::Sigmoid>  },
+        {"GGML_UNARY_OP_EXP",       op::translate_1to1_match_1_input<v0::Exp>      },
+        {"GGML_UNARY_OP_NEG",       op::translate_1to1_match_1_input<v0::Negative> },
         {"GGML_OP_VIEW",            op::translate_view                             },
         {"GGML_GLU_OP_SWIGLU",      op::translate_glu_swiglu                       },
         {"GGML_GLU_OP_SWIGLU_OAI",  op::translate_glu_swiglu_oai                   },
@@ -62,6 +67,13 @@ std::unordered_map<std::string, CreatorFunction> get_supported_ops() {
         {"GGML_OP_SSM_CONV",        op::translate_ssm_conv                         },
         {"GGML_OP_GATED_DELTA_NET", op::translate_gated_delta_net                  },
         {"GGML_OP_REPEAT",          op::translate_repeat                           },
+        {"GGML_OP_CUMSUM",          op::translate_cumsum                           },
+        {"GGML_OP_FILL",            op::translate_fill                             },
+        {"GGML_OP_DIAG",            op::translate_diag                             },
+        {"GGML_OP_TRI",             op::translate_tri                              },
+        {"GGML_OP_SET",             op::translate_set                              },
+        // solve_tri has accuracy issues on GPU
+        // {"GGML_OP_SOLVE_TRI",       op::translate_solve_tri                        },
     };
 }
 

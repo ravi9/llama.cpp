@@ -87,7 +87,9 @@ public:
 
     virtual std::vector<std::string> get_output_names(int node_idx) const = 0;
 
-    virtual std::vector<std::string> get_output_aliases(int node_idx) const = 0;
+    virtual std::string get_inplace_op_src(int node_idx) const = 0;
+
+    virtual bool is_view_like_alias_of(int node_idx, const std::string & view_src_name) const = 0;
 
     virtual const std::string & get_op_type() const = 0;
 
@@ -109,6 +111,8 @@ public:
     virtual int32_t * get_rope_params() const = 0;
 
     virtual bool has_mixed_rope_params() const = 0;
+
+    virtual int get_ssm_state_size() const = 0;
 
     virtual std::map<std::string, std::string> get_kv_param_res_names() const = 0;
 
