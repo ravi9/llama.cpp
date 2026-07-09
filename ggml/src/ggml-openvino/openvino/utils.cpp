@@ -215,6 +215,27 @@ std::pair<ov::Output<Node>, ov::Output<Node>> make_sin_cos(int32_t * rope_params
     return std::make_pair(sin_theta, cos_theta);
 }
 
+ov::Output<ov::Node> process_view_input(const NodeContext & context, int input_index, int slice_len) {
+    // Only works for VIEW operations that slice at the lowest dimension
+    // If the VIEW also reshape the result, `slice_len` should be provided
+    auto input = context.get_input(input_index);
+    auto * op_params = (size_t *) context.get_input_op_params(input_index);
+    auto src1_stride = context.get_input_stride(input_index);
+
+    int64_t split_addr = op_params[0] / src1_stride[3];
+    if (slice_len == 0) {
+        slice_len = context.get_input_shape(input_index)[3].get_length();
+    }
+    int64_t slice_end = split_addr + slice_len;
+
+    auto begin = ov::op::v0::Constant::create(ov::element::i64, {1}, {split_addr});
+    auto end = ov::op::v0::Constant::create(ov::element::i64, {1}, {slice_end});
+    auto stride = ov::op::v0::Constant::create(ov::element::i64, {1}, {1});
+    auto axes = ov::op::v0::Constant::create(ov::element::i64, {1}, {context.is_stateful() ? 2 : 3});
+    auto sliced = std::make_shared<ov::op::v8::Slice>(input, begin, end, stride, axes);
+    return sliced;
+}
+
 ov::Output<ov::Node> process_view_input_new(const NodeContext & context, int input_index) {
     auto input = context.get_input(input_index);
 

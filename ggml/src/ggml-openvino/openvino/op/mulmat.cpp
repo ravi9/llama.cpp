@@ -33,8 +33,8 @@ OutputVector translate_mulmat(const NodeContext & context) {
     ov::Output<ov::Node> B;
     ov::Output<ov::Node> A;
     if (op_case == 3) {
-        B = process_view_input_new(context, 0);
-        A = process_view_input_new(context, 1);
+        B = process_view_input(context, 0);
+        A = process_view_input(context, 1);
     } else {
         B = process_view_input_new(context, 0);
         A = process_view_input_new(context, 1);

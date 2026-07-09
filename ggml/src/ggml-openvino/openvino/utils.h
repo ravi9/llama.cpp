@@ -68,6 +68,8 @@ std::pair<ov::Output<Node>, ov::Output<Node>> make_sin_cos(int32_t * rope_params
  */
 ov::Output<ov::Node> process_view_input_new(const NodeContext & context, int input_index);
 
+ov::Output<ov::Node> process_view_input(const NodeContext & context, int input_index, int slice_len = 0);
+
 namespace op {
 /**
  * @brief Translates a binary GGML op to a matching OpenVINO op after VIEW input resolution
