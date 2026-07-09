@@ -206,7 +206,7 @@ cmake -B build/ReleaseOV -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_OPENVINO=ON
 cmake --build build/ReleaseOV --parallel
 ```
 
-- **Windows:** Open a **Developer Command Prompt for VS 2022** (so the MSVC toolchain is on `PATH`), then run:
+- **Windows:** Open a **x64 Native Tools Command Prompt for VS** (so the MSVC toolchain is on `PATH`), then run:
 
 ```cmd
 C:\Intel\openvino\setupvars.bat
