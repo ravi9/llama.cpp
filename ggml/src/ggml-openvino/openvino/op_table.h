@@ -2,9 +2,6 @@
 
 #include "node_context.h"
 
-#include <functional>
-#include <unordered_map>
-
 namespace ov {
 namespace frontend {
 namespace ggml {
@@ -12,7 +9,6 @@ namespace ggml {
 namespace op {
 
 #define GGML_OP_CONVERTER(op) OutputVector op(const NodeContext & context)
-#define GGML_OP_DYNAMIC_DIM_INFER(op) int op(const NodeContext & context)
 
 GGML_OP_CONVERTER(translate_cont);
 GGML_OP_CONVERTER(translate_concat);
@@ -51,22 +47,9 @@ GGML_OP_CONVERTER(translate_ssm_conv);
 GGML_OP_CONVERTER(translate_gated_delta_net);
 GGML_OP_CONVERTER(translate_repeat);
 
-GGML_OP_DYNAMIC_DIM_INFER(infer_dynamic_dim_cont);
-GGML_OP_DYNAMIC_DIM_INFER(infer_dynamic_dim_get_rows);
-GGML_OP_DYNAMIC_DIM_INFER(infer_dynamic_dim_im2col);
-GGML_OP_DYNAMIC_DIM_INFER(infer_dynamic_dim_permute);
-GGML_OP_DYNAMIC_DIM_INFER(infer_dynamic_dim_reshape);
-GGML_OP_DYNAMIC_DIM_INFER(infer_dynamic_dim_transpose);
-GGML_OP_DYNAMIC_DIM_INFER(infer_dynamic_dim_view);
-GGML_OP_DYNAMIC_DIM_INFER(infer_dynamic_dim_flash_attn_ext);
-
 }  // namespace op
 
 std::unordered_map<std::string, CreatorFunction> get_supported_ops();
-
-using DynamicDimInferFunction = std::function<int(const NodeContext &)>;
-
-std::unordered_map<std::string, DynamicDimInferFunction> get_dynamic_dim_infer_map();
 
 }  // namespace ggml
 }  // namespace frontend

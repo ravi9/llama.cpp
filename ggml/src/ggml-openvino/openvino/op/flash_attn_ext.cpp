@@ -25,12 +25,6 @@ namespace frontend {
 namespace ggml {
 namespace op {
 
-int infer_dynamic_dim_flash_attn_ext(const NodeContext & context) {
-    constexpr int q_to_out[] = {0, 2, 1, 3};
-    int q_dynamic_dim = context.get_input_dynamic_dim(0);
-    return q_dynamic_dim == -1 ? -1 : q_to_out[q_dynamic_dim];
-}
-
 OutputVector translate_flash_attn_ext(const NodeContext & context) {
     num_inputs_check(context, 4, 4);
     auto q_f32 = context.get_input(0);

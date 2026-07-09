@@ -47,47 +47,9 @@ public:
         return m_decoder->get_input_stride(m_node_idx, m_input_names[index]);
     }
 
-    ov::Shape get_input_ggml_shape(size_t index) const {
-        return m_decoder->get_input_ggml_shape(m_node_idx, m_input_names[index]);
-    }
-
-    std::vector<size_t> get_input_ggml_stride(size_t index) const {
-        return m_decoder->get_input_ggml_stride(m_node_idx, m_input_names[index]);
-    }
-
-    int32_t get_input_dynamic_dim(size_t index) const {
-        return m_decoder->get_input_dynamic_dim(m_node_idx, m_input_names[index]);
-    }
-
-    size_t get_input_type_size(size_t index) const {
-        return m_decoder->get_input_type_size(m_node_idx, m_input_names[index]);
-    }
-
-    int64_t get_input_block_size(size_t index) const {
-        return m_decoder->get_input_block_size(m_node_idx, m_input_names[index]);
-    }
-
-    bool input_has_same_shape_as_output(size_t index) const {
-        return m_decoder->input_has_same_shape_as_output(m_node_idx, m_input_names[index]);
-    }
-
-    bool input_is_none_op(size_t index) const {
-        return m_decoder->input_is_none_op(m_node_idx, m_input_names[index]);
-    }
-
-    bool input_has_org_src(size_t index) const {
-        return m_decoder->input_has_org_src(m_node_idx, m_input_names[index]);
-    }
-
     std::string get_output_name() const { return m_output_names[0]; }
 
     PartialShape get_output_shape() const { return m_decoder->get_output_shape(m_node_idx); }
-
-    ov::Shape get_output_ggml_shape() const { return m_decoder->get_output_ggml_shape(m_node_idx); }
-
-    std::vector<size_t> get_output_ggml_stride() const { return m_decoder->get_output_ggml_stride(m_node_idx); }
-
-    size_t get_output_type_size() const { return m_decoder->get_output_type_size(m_node_idx); }
 
     int32_t * get_input_op_params(size_t index) const {
         return m_decoder->get_input_op_params(m_node_idx, m_input_names[index]);

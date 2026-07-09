@@ -19,20 +19,6 @@ namespace frontend {
 namespace ggml {
 namespace op {
 
-int infer_dynamic_dim_permute(const NodeContext & context) {
-    int dynamic_dim_idx = context.get_input_dynamic_dim(0);
-    if (dynamic_dim_idx == -1) {
-        return -1;
-    }
-    int32_t * op_params = context.get_output_op_params();
-    for (size_t i = 0; i < context.get_output_ggml_shape().size(); i++) {
-        if (op_params[i] == dynamic_dim_idx) {
-            return static_cast<int>(i);
-        }
-    }
-    return -1;
-}
-
 OutputVector translate_permute(const NodeContext & context) {
     num_inputs_check(context, 1, 1);
 

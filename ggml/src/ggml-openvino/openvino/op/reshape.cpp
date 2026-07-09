@@ -17,24 +17,6 @@ namespace frontend {
 namespace ggml {
 namespace op {
 
-int infer_dynamic_dim_reshape(const NodeContext & context) {
-    int dynamic_dim_idx = context.get_input_dynamic_dim(0);
-    if (dynamic_dim_idx == -1) {
-        return -1;
-    }
-    auto input_shape = context.get_input_ggml_shape(0);
-    auto input_stride = context.get_input_ggml_stride(0);
-    auto output_shape = context.get_output_ggml_shape();
-    auto output_stride = context.get_output_ggml_stride();
-    auto dynamic_dim_stride = input_stride[dynamic_dim_idx];
-    for (size_t i = 0; i < output_stride.size(); i++) {
-        if (output_stride[i] == dynamic_dim_stride && output_shape[i] == input_shape[dynamic_dim_idx]) {
-            return static_cast<int>(i);
-        }
-    }
-    return -1;
-}
-
 OutputVector translate_reshape(const NodeContext & context) {
     num_inputs_check(context, 1, 1);
     if (context.get_input(0).get_partial_shape().is_static() &&
