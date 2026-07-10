@@ -122,10 +122,26 @@ static std::string get_tensor_ov_name(const ggml_cgraph * cgraph, const ggml_ten
     if (tensor == nullptr) {
         return "";
     }
-    const size_t hash_pos = ggml_hash_find(&cgraph->visited_hash_set, tensor);
-    if (((tensor->flags & GGML_TENSOR_FLAG_COMPUTE) || GgmlOvDecoder::is_kvcache(tensor, nullptr)) &&
-        hash_pos != GGML_HASHSET_FULL && ggml_bitset_get(cgraph->visited_hash_set.used, hash_pos)) {
-        return std::string(tensor->name) + "#" + std::to_string(hash_pos);
+    // Disambiguate distinct COMPUTE/kvcache tensors that share a ggml name by appending a
+    // per-graph index suffix. This MUST be stable across cgraph instances that share the same
+    // structure: the decoder/infer-request cache is keyed by graph_key (node names + count) and
+    // is process-global, so the same OV name is generated at compile time and looked up again on
+    // a cache hit from a *different* cgraph instance (e.g. another context or same-architecture
+    // model in test-thread-safety). ggml_hash_find() returns a hash-set slot derived from the
+    // tensor POINTER, which differs per instance -> the cached name would miss on reuse and throw
+    // map::at. Use the tensor's topological index in nodes[]/leafs[] instead, which is identical
+    // for corresponding tensors across same-structure graphs.
+    if ((tensor->flags & GGML_TENSOR_FLAG_COMPUTE) || GgmlOvDecoder::is_kvcache(tensor, nullptr)) {
+        for (int i = 0; i < cgraph->n_nodes; i++) {
+            if (cgraph->nodes[i] == tensor) {
+                return std::string(tensor->name) + "#" + std::to_string(i);
+            }
+        }
+        for (int i = 0; i < cgraph->n_leafs; i++) {
+            if (cgraph->leafs[i] == tensor) {
+                return std::string(tensor->name) + "#l" + std::to_string(i);
+            }
+        }
     }
     return tensor->name;
 }
