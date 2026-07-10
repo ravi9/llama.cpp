@@ -170,8 +170,9 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
     const auto & stateful = r_ctx->stateful;
     static auto is_static = false;
 
+    bool model_is_splitted = is_model_splitted(cgraph);
     if (is_naive(cgraph)) {
-        if (!is_model_splitted(cgraph)) {
+        if (!model_is_splitted) {
             return naive_compute(cgraph, core, device, config);
         }
     }
@@ -185,7 +186,8 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
     std::tie(m_params, c_params) = GgmlOvDecoder::compute_llm_params(cgraph, is_static);
 
     graph_key key(cgraph);
-    static const bool cache_enabled = !ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_CACHE");
+    static const bool cache_disabled = ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_CACHE");
+    const bool cache_enabled = !model_is_splitted && !cache_disabled;
     bool cache_hit = false;
 
     int64_t decoder_end_time;
@@ -205,6 +207,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
             if (cache_hit) {
                 entry = it->second;
             } else {
+                r_ctx->clear_caches_locked();
                 auto mutex = std::make_shared<std::mutex>();
                 entry = std::make_shared<decoder_runtime_ctx>(mutex);
                 r_ctx->decoder_cache[key] = entry;
@@ -290,7 +293,6 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
                 std::lock_guard<std::mutex> map_lock(r_ctx->ctx_mutex);
                 r_ctx->infer_request_cache.erase(key);
             }
-            bool model_is_splitted = is_model_splitted(cgraph);
 
             std::shared_ptr<ov::Model> model;
             auto model_weights = GgmlOvDecoder::create_weight_nodes(cgraph);
@@ -446,6 +448,7 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
         if (cache_hit) {
             entry = it->second;
         } else {
+            r_ctx->clear_caches_locked();
             auto mutex = std::make_shared<std::mutex>();
             entry = std::make_shared<decoder_runtime_ctx>(mutex);
             r_ctx->decoder_cache[key] = entry;
