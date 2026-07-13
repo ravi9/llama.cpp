@@ -207,16 +207,12 @@ public:
 
     virtual int get_op_case(int node_idx) const override { return m_node_info_list[node_idx].node_op_case; }
 
-    virtual const std::map<std::string, std::shared_ptr<ov::Node>> & get_model_inputs() const override {
+    virtual const std::map<std::string, ov::frontend::ggml::ModelInputInfo> & get_model_inputs() const override {
         return m_model_inputs;
     }
 
-    virtual const std::map<std::string, std::shared_ptr<ov::Node>> & get_model_extra_inputs() const override {
+    virtual const std::map<std::string, ov::frontend::ggml::ModelExtraInputInfo> & get_model_extra_inputs() const override {
         return m_model_extra_inputs;
-    }
-
-    virtual const std::map<std::string, std::shared_ptr<ov::Tensor>> & get_model_extra_input_values() const {
-        return m_model_extra_input_values;
     }
 
     virtual const std::map<std::string, std::shared_ptr<ov::Node>> & get_model_weights() const override {
@@ -379,9 +375,8 @@ private:
     ggml_cgraph * m_cgraph = nullptr;
     std::map<std::string, ggml_tensor *> m_inputs;
 
-    std::map<std::string, std::shared_ptr<ov::Node>> m_model_inputs;
-    std::map<std::string, std::shared_ptr<ov::Node>> m_model_extra_inputs;
-    std::map<std::string, std::shared_ptr<ov::Tensor>> m_model_extra_input_values;
+    std::map<std::string, ov::frontend::ggml::ModelInputInfo> m_model_inputs;
+    std::map<std::string, ov::frontend::ggml::ModelExtraInputInfo> m_model_extra_inputs;
     std::map<std::string, std::shared_ptr<ov::Node>> m_model_weights;
     std::map<std::string, ggml_tensor *> m_model_outputs;
     std::set<std::string> m_model_output_names;

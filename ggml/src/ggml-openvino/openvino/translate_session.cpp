@@ -44,6 +44,28 @@ using namespace ov::op;
 
 namespace {
 
+std::shared_ptr<ov::op::v0::Parameter> create_parameter(const std::string & name,
+                                                        const ModelInputInfo & input_info) {
+    auto param_node = std::make_shared<ov::op::v0::Parameter>(input_info.type, input_info.shape);
+    param_node->set_friendly_name(name);
+    param_node->output(0).get_tensor().set_names({name});
+    return param_node;
+}
+
+std::shared_ptr<ov::Node> create_extra_input(const std::string & name, const ModelExtraInputInfo & input_info) {
+    if (input_info.is_parameter) {
+        auto param_node = std::make_shared<ov::op::v0::Parameter>(input_info.type, input_info.shape);
+        param_node->set_friendly_name(name);
+        param_node->output(0).get_tensor().set_names({name});
+        return param_node;
+    }
+
+    auto constant = std::make_shared<ov::op::v0::Constant>(input_info.type, input_info.shape,
+                                                          std::vector<int64_t>{input_info.value});
+    constant->set_friendly_name(name);
+    return constant;
+}
+
 ov::pass::MakeStateful::ParamResPairs get_kv_param_res_pairs(
     const std::shared_ptr<ov::Model> & model,
     const std::map<std::string, std::string> & kv_param_res_names) {
@@ -177,15 +199,17 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
     std::shared_ptr<GgmlDecoder> ggml_model_decoder = ggml_model->get_model_decoder();
 
     for (const auto & it : ggml_model_decoder->get_model_inputs()) {
-        params.push_back(std::dynamic_pointer_cast<ov::op::v0::Parameter>(it.second));
-        (*tensor_map)[it.first] = it.second;
+        auto param_node = create_parameter(it.first, it.second);
+        params.push_back(param_node);
+        (*tensor_map)[it.first] = param_node;
     }
 
     for (const auto & it : ggml_model_decoder->get_model_extra_inputs()) {
-        if (std::dynamic_pointer_cast<ov::op::v0::Parameter>(it.second)) {
-            params.push_back(std::dynamic_pointer_cast<ov::op::v0::Parameter>(it.second));
+        auto input_node = create_extra_input(it.first, it.second);
+        if (it.second.is_parameter) {
+            params.push_back(std::dynamic_pointer_cast<ov::op::v0::Parameter>(input_node));
         }
-        (*tensor_map)[it.first] = it.second;
+        (*tensor_map)[it.first] = input_node;
     }
 
     for (const auto & it : ggml_model_decoder->get_model_weights()) {
