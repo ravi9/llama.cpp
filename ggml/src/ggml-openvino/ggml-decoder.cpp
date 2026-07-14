@@ -25,7 +25,6 @@
 #include <openvino/core/type/float16.hpp>
 #include <openvino/op/constant.hpp>
 #include <openvino/op/convert.hpp>
-#include <openvino/op/parameter.hpp>
 #include <openvino/runtime/tensor.hpp>
 #include <ostream>
 #include <set>
@@ -708,21 +707,7 @@ void GgmlOvDecoder::add_extra_inputs() {
     // 2. `n_seq_active` and `seq_active_start`, used in FLASH_ATTN_EXT to indicate the active sequences in the batch
 
     auto create_1d_input = [this](const std::string & name, int64_t value) {
-        if (m_is_static) {
-            auto constant =
-                std::make_shared<ov::op::v0::Constant>(ov::element::i64, ov::Shape{1}, std::vector<int64_t>{value});
-            constant->set_friendly_name(name);
-            m_model_extra_inputs[name] = constant;
-        } else {
-            auto param_node = std::make_shared<ov::op::v0::Parameter>(ov::element::i64, ov::Shape{1});
-            param_node->set_friendly_name(name);
-            param_node->output(0).get_tensor().set_names({name});
-            m_model_extra_inputs[name] = param_node;
-
-            auto tensor = std::make_shared<ov::Tensor>(ov::element::i64, ov::Shape{1});
-            *tensor->data<int64_t>() = value;
-            m_model_extra_input_values[name] = tensor;
-        }
+        m_model_extra_inputs[name] = {ov::element::i64, ov::Shape{1}, value, !m_is_static};
     };
 
     if (m_compute_params.attention_size != -1) {
@@ -773,11 +758,8 @@ void GgmlOvDecoder::compute_model_inputs() {
             std::string node_name = get_tensor_ov_name(m_cgraph, node);
             if (m_model_weights.find(node_name) == m_model_weights.end()) {
                 m_inputs[node_name] = node;
-                auto param_node = std::make_shared<ov::op::v0::Parameter>(
-                    get_ov_type(node), get_graph_input_shape(node, nullptr, m_node_dynamic_dims[node]));
-                param_node->set_friendly_name(node_name);
-                param_node->output(0).get_tensor().set_names({node_name});
-                m_model_inputs[node_name] = param_node;
+                m_model_inputs[node_name] = {get_ov_type(node),
+                                             get_graph_input_shape(node, nullptr, m_node_dynamic_dims[node])};
             }
             continue;
         }
@@ -824,11 +806,8 @@ void GgmlOvDecoder::compute_model_inputs() {
                 src_name = get_tensor_ov_name(m_cgraph, src);
             }
             m_inputs[src_name] = src;
-            ov::PartialShape param_shape = get_graph_input_shape(node, src, m_node_dynamic_dims[src]);
-            auto param_node = std::make_shared<ov::op::v0::Parameter>(get_ov_type(src), param_shape);
-            param_node->set_friendly_name(src_name);
-            param_node->output(0).get_tensor().set_names({src_name});
-            m_model_inputs[src_name] = param_node;
+            m_model_inputs[src_name] = {get_ov_type(src),
+                                        get_graph_input_shape(node, src, m_node_dynamic_dims[src])};
         }
     }
 }
