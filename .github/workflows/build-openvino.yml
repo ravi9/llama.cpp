@@ -87,7 +87,7 @@ jobs:
         run: |
           cd ${{ github.workspace }}
           export GGML_OPENVINO_DEVICE=GPU
-          ctest --test-dir build/ReleaseOV -L main --verbose --timeout 4000
+          ctest --test-dir build/ReleaseOV -L main --verbose --output-on-failure --timeout 8000
 
   openvino-windows-2022:
     runs-on: windows-2022
