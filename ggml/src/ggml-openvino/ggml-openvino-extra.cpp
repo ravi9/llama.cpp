@@ -45,6 +45,10 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_DISABLE_CACHE",
         "GGML_OPENVINO_DISABLE_KV_SLICE",
         "GGML_OPENVINO_MANUAL_GQA_ATTN",
+        "GGML_OPENVINO_NPUW_FOLD",
+        "GGML_OPENVINO_NPUW_FUNCALL_FOR_ALL",
+        "GGML_OPENVINO_DECODE_NPUW_FOLD",
+        "GGML_OPENVINO_DECODE_NPUW_FUNCALL_FOR_ALL",
     };
 
     for (const char * const & env_var : env_var_names) {
@@ -75,13 +79,46 @@ void ggml_openvino_device_config::init() {
             {"NPUW_DQ",                           "YES"   },
             {"NPUW_DQ_FULL",                      "NO"    },
         };
+        // Optional env overrides for the prefill/base config.
+        auto apply_npuw_env = [](ov::AnyMap & cfg) {
+            if (const char * v = ggml_openvino_getenv_str("GGML_OPENVINO_NPUW_FOLD")) {
+                cfg["NPUW_FOLD"] = (std::atoi(v) != 0) ? "YES" : "NO";
+            }
+            if (const char * v = ggml_openvino_getenv_str("GGML_OPENVINO_NPUW_FUNCALL_FOR_ALL")) {
+                cfg["NPUW_FUNCALL_FOR_ALL"] = (std::atoi(v) != 0) ? "YES" : "NO";
+            }
+        };
+        apply_npuw_env(compile_config);
+
+        // Decode (1-token) model starts from the same config as prefill. For gemma3/4-style
+        // archs (per-layer input embedding) the NPUW funcall per-call overhead dominates
+        // decode, so NPUW_FUNCALL_FOR_ALL is disabled there -- but that decision needs the
+        // model, so it is applied at compile time in ov_graph_compute_static, not here.
+        // This just carries the base config + any explicit env overrides.
+        compile_config_decode = compile_config;
+        apply_npuw_env(compile_config_decode);
+        // Decode-only overrides (take precedence over the shared ones above).
+        if (const char * v = ggml_openvino_getenv_str("GGML_OPENVINO_DECODE_NPUW_FOLD")) {
+            compile_config_decode["NPUW_FOLD"] = (std::atoi(v) != 0) ? "YES" : "NO";
+        }
+        if (const char * v = ggml_openvino_getenv_str("GGML_OPENVINO_DECODE_NPUW_FUNCALL_FOR_ALL")) {
+            compile_config_decode["NPUW_FUNCALL_FOR_ALL"] = (std::atoi(v) != 0) ? "YES" : "NO";
+        }
+
         if (cache_dir && strlen(cache_dir) > 0) {
             compile_config["NPUW_CACHE_DIR"] = cache_dir;
             compile_config.insert(ov::cache_mode(ov::CacheMode::OPTIMIZE_SIZE));
+            compile_config_decode["NPUW_CACHE_DIR"] = cache_dir;
+            compile_config_decode.insert(ov::cache_mode(ov::CacheMode::OPTIMIZE_SIZE));
         }
     } else if (cache_dir && strlen(cache_dir) > 0) {
         compile_config.insert(ov::cache_dir(cache_dir));
         compile_config.insert(ov::cache_mode(ov::CacheMode::OPTIMIZE_SIZE));
+    }
+
+    // On CPU/GPU the decode model uses the same config as prefill.
+    if (device_name != "NPU") {
+        compile_config_decode = compile_config;
     }
 
     // Initialize remote context with queue sharing for GPU
@@ -181,6 +218,10 @@ std::optional<ov::RemoteContext> ggml_openvino_get_remote_context() {
 // Get the compile config for the current device
 const ov::AnyMap & ggml_openvino_get_compile_config() {
     return ggml_openvino_get_device_config().compile_config;
+}
+
+const ov::AnyMap & ggml_openvino_get_compile_config_decode() {
+    return ggml_openvino_get_device_config().compile_config_decode;
 }
 
 // Get the OpenCL command queue for GPU operations

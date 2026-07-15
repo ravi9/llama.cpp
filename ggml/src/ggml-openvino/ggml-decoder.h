@@ -23,6 +23,10 @@ struct ModelParams {
     int state_size = -1;  // for SSM molels, eg qwen35
     int32_t rope_params[15];
     bool mixed_rope_params = false;
+    // True for gemma3/gemma4-style archs that carry a per-layer input embedding
+    // (inp_per_layer / per_layer_proj tensors). Such layers make each NPUW folded
+    // funcall expensive; used to disable NPUW_FUNCALL_FOR_ALL for the decode model.
+    bool has_per_layer_embd = false;
     std::vector<int> swa_layers;
 
     std::vector<std::string> kv_names;

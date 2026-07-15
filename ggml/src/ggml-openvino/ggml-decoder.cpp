@@ -459,6 +459,9 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
     for (int i = 0; i < cgraph->n_nodes; i++) {
         auto * node = cgraph->nodes[i];
         std::string name = std::string(node->name);
+        if (name.find("per_layer") != std::string::npos) {
+            model_params.has_per_layer_embd = true;
+        }
         const int attention_pattern_case = get_attention_pattern_case(node);
         if (attention_pattern_case != -1) {
             ggml_tensor * cache_k_permute = nullptr;

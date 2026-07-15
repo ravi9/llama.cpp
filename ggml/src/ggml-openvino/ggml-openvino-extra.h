@@ -25,6 +25,10 @@ std::optional<ov::RemoteContext> ggml_openvino_get_remote_context();
 // Get the compile config for the current device
 const ov::AnyMap & ggml_openvino_get_compile_config();
 
+// Get the compile config for the NPU decode (1-token) model. On CPU/GPU this is
+// identical to ggml_openvino_get_compile_config().
+const ov::AnyMap & ggml_openvino_get_compile_config_decode();
+
 // Get the OpenCL command queue for GPU operations (returns nullptr for CPU/NPU)
 cl_command_queue ggml_openvino_get_cl_queue();
 
@@ -64,6 +68,12 @@ struct ggml_openvino_device_config {
     bool initialized = false;
     std::optional<ov::RemoteContext> remote_context;
     ov::AnyMap compile_config;
+    // NPU-only: compile config for the decode (1-token) model. Starts as a copy of
+    // compile_config plus optional decode-specific env overrides; NPUW_FUNCALL_FOR_ALL
+    // is additionally disabled for gemma3/4-style archs at compile time (see
+    // ov_graph_compute_static), where per-call funcall overhead dominates decode.
+    // Identical to compile_config on CPU/GPU.
+    ov::AnyMap compile_config_decode;
     std::unordered_map<std::string, std::string> environment_variables;
     cl_command_queue cl_queue = nullptr;
 
