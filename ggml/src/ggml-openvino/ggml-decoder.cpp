@@ -565,7 +565,7 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
         if (node->op == GGML_OP_GATED_DELTA_NET) {
             model_params.state_size = node->src[0]->ne[0];
         }
-        if (node->op == GGML_OP_SCALE && is_kvcache(node->view_src, nullptr)) {
+        if (node->op == GGML_OP_SCALE && node->view_src != nullptr && is_kvcache(node->view_src, nullptr)) {
             compute_params.cache_rs_reset_len = ggml_nelements(node) / node->view_src->ne[0];
             compute_params.cache_rs_reset_idx = node->src[0]->view_offs / node->view_src->ne[0];
         }
@@ -956,6 +956,30 @@ std::shared_ptr<ov::Node> GgmlOvDecoder::create_weight_node(ggml_tensor * tensor
         auto weight_node = std::make_shared<ov::op::v0::Constant>(weight_tensor);
         weight_node->set_friendly_name(tensor->name);
         return weight_node;
+    }
+
+    // 3D quantized MoE expert weights [k, m, n_expert]: flatten to a rank-2
+    // [n_expert, m*k] tensor and build the dequant subgraph with use_bias=true (the
+    // exact f16 zero-point form). This is the path hit by test-backend-ops and the
+    // host-buffer load; the backend-buffer path builds the same node in set_tensor.
+    // translate_mul_mat_id gathers experts on axis 0 of this node and splits m*k.
+    if (ggml_is_quantized(tensor->type) && tensor->ne[2] > 1) {
+        GGML_ASSERT(tensor->ne[3] == 1 && "4D quantized expert weights are not supported");
+        GGML_ASSERT(ggml_is_contiguous(tensor) && "expert weights must be contiguous to flatten");
+        const int64_t n_expert = tensor->ne[2];
+        const int64_t m = tensor->ne[1];
+        const int64_t k = tensor->ne[0];
+        ggml_tensor flat_tensor = *tensor;
+        flat_tensor.ne[0] = m * k;
+        flat_tensor.ne[1] = n_expert;
+        flat_tensor.ne[2] = 1;
+        flat_tensor.ne[3] = 1;
+        flat_tensor.nb[1] = ggml_row_size(tensor->type, m * k);
+        flat_tensor.nb[2] = ggml_nbytes(tensor);
+        flat_tensor.nb[3] = ggml_nbytes(tensor);
+        OvWeight flat_weight = process_weight_tensor(&flat_tensor, tensor->data, nullptr, /*use_bias=*/true);
+        flat_weight.weight_node->set_friendly_name(tensor->name);
+        return flat_weight.weight_node;
     }
 
     // There are three cases where we need to create a new weight node:
@@ -1673,7 +1697,21 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
         case GGML_OP_DIAG:
         case GGML_OP_TRI:
         case GGML_OP_REPEAT:
+        // Shape-preserving elementwise ops: the dynamic dim is unchanged from src[0].
+        // DIV/CLAMP are used in the MoE routing-weight normalization
+        // (sum_rows -> clamp -> div). If they are left untracked here the dynamic
+        // (token) dim is lost there, the captured prefill token count gets baked into
+        // the downstream reshapes, and every decoder layer after layer 0 turns static
+        // (which then triggers the GPU in-place-concat KV-cache corruption).
+        case GGML_OP_DIV:
+        case GGML_OP_CLAMP:
             m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[0]];
+            break;
+        case GGML_OP_SUM_ROWS:
+            // SUM_ROWS reduces ggml axis 0 to size 1 and preserves all other axes, so the
+            // dynamic dim is preserved unless it was axis 0 (then it is summed away).
+            m_node_dynamic_dims[node] =
+                (m_node_dynamic_dims[node->src[0]] == 0) ? -1 : m_node_dynamic_dims[node->src[0]];
             break;
         case GGML_OP_MUL_MAT_ID:
         case GGML_OP_SOLVE_TRI:

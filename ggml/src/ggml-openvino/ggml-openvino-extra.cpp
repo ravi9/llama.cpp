@@ -173,6 +173,28 @@ bool ggml_openvino_is_npu() {
     return ggml_openvino_get_device_config().is_npu;
 }
 
+// Latched true once a MUL_MAT_ID op is seen during op placement; see header. Plain
+// non-atomic bool: placement runs single-threaded before the multi-threaded compute
+// that reads it, and the flag only ever transitions false->true (idempotent).
+static bool g_has_moe_expert_weights = false;
+
+void ggml_openvino_note_moe_expert_weight() {
+    g_has_moe_expert_weights = true;
+}
+
+bool ggml_openvino_has_moe_expert_weights() {
+    return g_has_moe_expert_weights;
+}
+
+bool ggml_openvino_full_moe_enabled() {
+    // Keep the whole MoE on one OV submodel instead of fragmenting the graph at every
+    // MoE routing node. Auto-detected: a MoE model is recognized when the expert-routed
+    // matmul (MUL_MAT_ID) has been seen (see ggml_openvino_note_moe_expert_weight).
+    // Enabled on the dynamic-shape devices (CPU and GPU); NPU uses the static path and
+    // keeps the fragmented behavior for now.
+    return !ggml_openvino_is_npu() && ggml_openvino_has_moe_expert_weights();
+}
+
 // Get the remote context for the current device (returns empty optional for CPU)
 std::optional<ov::RemoteContext> ggml_openvino_get_remote_context() {
     return ggml_openvino_get_device_config().remote_context;
@@ -252,9 +274,12 @@ ggml_openvino_extracted_layout ggml_openvino_get_extracted_layout(const ggml_ten
         return layout;
     }
 
-    // Most quantized weights use the existing 2D extraction path. MXFP4 also
-    // appears as 3D expert weights for MUL_MAT_ID, so allow that type through.
-    if (tensor->type != GGML_TYPE_MXFP4 && (tensor->ne[2] != 1 || tensor->ne[3] != 1)) {
+    // Handle 2D weight tensors, and 3D MoE expert weights [k, m, n_expert] which
+    // are treated as a flattened 2D [n_expert*m, k] tensor (each row is quantized
+    // independently along k, so the block layout is identical when flattened). This
+    // covers both our quantized gemma4 experts (Q4_K/Q5_1) and MXFP4 3D experts,
+    // which are handled by the dedicated block just below.
+    if (tensor->ne[3] != 1) {
         return layout;
     }
 
@@ -390,6 +415,10 @@ ggml_openvino_extracted_layout ggml_openvino_get_extracted_layout(const ggml_ten
     // For symmetric quantization, no zp needed (weights stored as signed)
     if (layout.is_symmetric) {
         layout.zp_size = 0;
+    } else if (use_bias) {
+        // use_bias stores the zero-point/bias as F16 (2 bytes/block), not a packed
+        // integer. Must size the buffer accordingly so the extracted data fits in-place.
+        layout.zp_size = n_blocks * sizeof(uint16_t);
     } else {
         layout.zp_size = layout.is_u4 ? ((n_blocks + 1) / 2) : n_blocks;
     }

@@ -99,6 +99,24 @@ int ggml_openvino_getenv_int(const char * var, int default_value = 0);
 // Check if running on NPU
 bool ggml_openvino_is_npu();
 
+// MoE detection. ggml_openvino_note_moe_expert_weight() latches a process-global flag
+// that ggml_openvino_has_moe_expert_weights() reports. It is called from supports_op()
+// the first time a GGML_OP_MUL_MAT_ID (the expert-routed matmul) is seen, which is the
+// defining op of a MoE model. The latch is set at op-placement time (not weight load):
+// the scheduler queries op placement before the expert weights are streamed in, and it
+// makes multiple placement passes, so the first pass that encounters MUL_MAT_ID sets the
+// flag and subsequent passes converge on the full-MoE layout. This lets the backend
+// recognize "this is a MoE model" without any architecture name.
+void ggml_openvino_note_moe_expert_weight();
+bool ggml_openvino_has_moe_expert_weights();
+
+// Whether to keep the whole MoE on one OV submodel instead of fragmenting at every
+// MoE node (see the per-node "force to CPU" gates). Auto-detected: ON when the model
+// has expert-routed matmuls (a MoE model) on the dynamic-shape devices (CPU/GPU),
+// OFF on NPU (static path). Keeping the whole MoE on OV is numerically correct on both
+// CPU and GPU and avoids the graph fragmentation that caused index corruption on GPU.
+bool ggml_openvino_full_moe_enabled();
+
 // Get requantization type for a tensor type (returns nullopt if no requant needed)
 std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor * tensor, bool no_requant = false);
 
