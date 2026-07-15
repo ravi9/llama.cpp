@@ -959,24 +959,25 @@ static bool mul_mat_id_requires_large_tmp(const ggml_tensor * op) {
     if (ggml_openvino_get_device_name() != "GPU") {
         return false;
     }
-    // On the full-MoE GPU path the real gemma4 expert matmuls (ffn_moe_gate_up /
-    // ffn_moe_down) legitimately exceed this cap and are handled correctly, so
-    // exempt those named ops. The scheduler also queries these same expert matmuls
-    // during its reserve/measurement pass with an EMPTY name (and a worst-case
-    // full-batch ids->ne[1] that blows past the tmp cap); if we send them to CPU there
-    // the placement can stick for the real graph, and the expert matmul then runs on
-    // CPU reading OpenVINO-produced routing ids across the split boundary — which are
-    // garbage (crash in ggml-cpu mul_mat_id: "i02 >= 0 && i02 < n_as"). So for the
-    // unnamed reserve-pass query, fall back to a STRUCTURAL match: a genuine gemma4
-    // expert matmul routes over a 3D quantized expert-weight tensor
-    // (as->ne[2] == n_expert > 1). Real graph ops always have a name, so the named
-    // MUL_MAT_ID_FUSION test cases (op named "out") are unaffected and still hit the
-    // cap / stay on CPU as before.
-    if (full_moe_enabled()) {
-        const bool name_match = strncmp(op->name, "ffn_moe_gate_up", sizeof("ffn_moe_gate_up") - 1) == 0 ||
-                                strncmp(op->name, "ffn_moe_down", sizeof("ffn_moe_down") - 1) == 0;
-        const bool unnamed_expert_matmul = op->name[0] == '\0' && as->ne[2] > 1 && ggml_is_quantized(as->type);
-        if (name_match || unnamed_expert_matmul) {
+    // On the full-MoE GPU path a real model's expert matmuls legitimately exceed this
+    // cap and are handled correctly, so they must NOT be forced to CPU: if they are, the
+    // expert matmul runs on ggml-CPU reading OpenVINO-produced routing ids across the
+    // OV<->CPU split boundary — garbage (crash in ggml-cpu mul_mat_id: "i02 >= 0 &&
+    // i02 < n_as", or a hard segfault at ubatch>=32).
+    //
+    // A genuine MoE-model expert matmul routes over a 3D quantized expert-weight tensor
+    // (as->ne[2] == n_expert > 1). That structural signal, plus the "as" tensor living in
+    // a WEIGHTS buffer, cleanly separates it from test-backend-ops MUL_MAT_ID/_FUSION
+    // cases (whose "as" is an ANY/COMPUTE buffer) without depending on op names — EXCEPT
+    // the scheduler's earliest reserve/measurement query, which runs before weights are
+    // bound and reports an ANY buffer under an empty op name. Treat that empty-name
+    // reserve query as an expert matmul too (test ops are explicitly named, never empty),
+    // so the exemption is consistent across both scheduler passes.
+    if (full_moe_enabled() && as->ne[2] > 1 && ggml_is_quantized(as->type)) {
+        const bool weights_buffer =
+            as->buffer != nullptr && ggml_backend_buffer_get_usage(as->buffer) == GGML_BACKEND_BUFFER_USAGE_WEIGHTS;
+        const bool reserve_measurement = op->name[0] == '\0';
+        if (weights_buffer || reserve_measurement) {
             return false;
         }
     }
