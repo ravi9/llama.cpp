@@ -20,7 +20,10 @@
 #include <openvino/runtime/allocator.hpp>
 #include <openvino/runtime/intel_gpu/ocl/ocl.hpp>
 #include <openvino/runtime/intel_npu/level_zero/level_zero.hpp>
+#include <openvino/runtime/properties.hpp>
 #include <openvino/runtime/tensor.hpp>
+#include <algorithm>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -756,7 +759,7 @@ static const ggml_backend_i ggml_backend_openvino_interface = {
 };
 
 int ggml_backend_openvino_get_device_count() {
-    return 1;
+    return (int) ggml_openvino_get_available_devices().size();
 }
 
 static ggml_guid_t ggml_backend_openvino_guid(void) {
@@ -816,7 +819,89 @@ struct ggml_backend_openvino_device_context {
     int device;
     std::string name;
     std::string description;
+    size_t total_memory;
 };
+
+static bool ov_device_has_prefix(const std::string & s, const std::string & prefix) {
+    return s.size() >= prefix.size() && std::equal(prefix.begin(), prefix.end(), s.begin());
+}
+
+static std::string ov_device_description_from_name(const std::string & device_name) {
+    std::string description = device_name;
+    try {
+        description = ov_singleton_core().get_property(device_name, ov::device::full_name);
+    } catch (...) {
+        return device_name;
+    }
+
+    if (ov_device_has_prefix(device_name, "NPU")) {
+        try {
+            const std::string arch = ov_singleton_core().get_property(device_name, "DEVICE_ARCHITECTURE").as<std::string>();
+            if (!arch.empty()) {
+                description += " (NPU " + arch + ")";
+            }
+        } catch (...) {
+        }
+    }
+
+    return description;
+}
+
+static bool ov_try_get_size_t_property(const std::string & device, const std::string & property, size_t & out) {
+    try {
+        const ov::Any value = ov_singleton_core().get_property(device, property);
+        if (value.is<size_t>()) {
+            out = value.as<size_t>();
+            return true;
+        }
+        if (value.is<uint64_t>()) {
+            out = (size_t) value.as<uint64_t>();
+            return true;
+        }
+        if (value.is<unsigned long long>()) {
+            out = (size_t) value.as<unsigned long long>();
+            return true;
+        }
+        if (value.is<int64_t>()) {
+            const int64_t v = value.as<int64_t>();
+            if (v >= 0) {
+                out = (size_t) v;
+                return true;
+            }
+        }
+    } catch (...) {
+    }
+    return false;
+}
+
+static bool ov_try_get_gpu_used_memory(const std::string & device, size_t & out) {
+    out = 0;
+    try {
+        const ov::Any stats_any = ov_singleton_core().get_property(device, "GPU_MEMORY_STATISTICS");
+        if (stats_any.is<std::map<std::string, uint64_t>>()) {
+            const auto stats = stats_any.as<std::map<std::string, uint64_t>>();
+            for (const auto & kv : stats) {
+                out += (size_t) kv.second;
+            }
+            return true;
+        }
+        if (stats_any.is<ov::AnyMap>()) {
+            const auto stats = stats_any.as<ov::AnyMap>();
+            for (const auto & kv : stats) {
+                if (kv.second.is<size_t>()) {
+                    out += kv.second.as<size_t>();
+                } else if (kv.second.is<uint64_t>()) {
+                    out += (size_t) kv.second.as<uint64_t>();
+                } else if (kv.second.is<unsigned long long>()) {
+                    out += (size_t) kv.second.as<unsigned long long>();
+                }
+            }
+            return true;
+        }
+    } catch (...) {
+    }
+    return false;
+}
 
 static const char * ggml_backend_openvino_device_get_name(ggml_backend_dev_t dev) {
     ggml_backend_openvino_device_context * ctx = (ggml_backend_openvino_device_context *) dev->context;
@@ -829,6 +914,34 @@ static const char * ggml_backend_openvino_device_get_description(ggml_backend_de
 }
 
 static void ggml_backend_openvino_device_get_memory(ggml_backend_dev_t dev, size_t * free, size_t * total) {
+    ggml_backend_openvino_device_context * ctx = (ggml_backend_openvino_device_context *) dev->context;
+
+    if (ov_device_has_prefix(ctx->name, "GPU")) {
+        size_t used = 0;
+        if (ctx->total_memory == 0 || !ov_try_get_gpu_used_memory(ctx->name, used)) {
+            *total = 0;
+            *free = 0;
+            return;
+        }
+
+        *total = ctx->total_memory;
+        *free = (used >= *total) ? 0 : (*total - used);
+        return;
+    }
+
+    if (ov_device_has_prefix(ctx->name, "NPU")) {
+        size_t allocated = 0;
+        if (ctx->total_memory == 0 || !ov_try_get_size_t_property(ctx->name, "NPU_DEVICE_ALLOC_MEM_SIZE", allocated)) {
+            *total = 0;
+            *free = 0;
+            return;
+        }
+
+        *total = ctx->total_memory;
+        *free = (allocated >= *total) ? 0 : (*total - allocated);
+        return;
+    }
+
 #ifdef _WIN32
     MEMORYSTATUSEX status;
     status.dwLength = sizeof(status);
@@ -1320,6 +1433,11 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
 static bool ggml_backend_openvino_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
     GGML_ASSERT(dev->reg != nullptr);
 
+    ggml_backend_openvino_device_context * dev_ctx = (ggml_backend_openvino_device_context *) dev->context;
+    if (dev_ctx->name != ggml_openvino_get_device_name()) {
+        return false;
+    }
+
     static std::unordered_set<ggml_type> supported_types{
         GGML_TYPE_F32,  GGML_TYPE_F16,  GGML_TYPE_BF16, GGML_TYPE_I64,  GGML_TYPE_I32,  GGML_TYPE_Q4_0,
         GGML_TYPE_Q4_1, GGML_TYPE_Q4_K, GGML_TYPE_Q5_1, GGML_TYPE_Q5_K, GGML_TYPE_Q8_0, GGML_TYPE_Q6_K,
@@ -1498,15 +1616,21 @@ GGML_BACKEND_API ggml_backend_reg_t ggml_backend_openvino_reg(void) {
         std::lock_guard<std::mutex> lock(mutex);
         if (!initialized) {
             ggml_openvino_init();
+            const std::vector<std::string> openvino_devices = ggml_openvino_get_available_devices();
 
             ggml_backend_openvino_reg_context * ctx = new ggml_backend_openvino_reg_context;
 
             for (int i = 0; i < ggml_backend_openvino_get_device_count(); i++) {
                 ggml_backend_openvino_device_context * dev_ctx = new ggml_backend_openvino_device_context;
                 dev_ctx->device = i;
-                dev_ctx->name = GGML_OPENVINO_NAME + std::to_string(i);
-
-                dev_ctx->description = ov::get_openvino_version().description;
+                dev_ctx->name = openvino_devices[i];
+                dev_ctx->description = ov_device_description_from_name(dev_ctx->name);
+                dev_ctx->total_memory = 0;
+                if (ov_device_has_prefix(dev_ctx->name, "GPU")) {
+                    ov_try_get_size_t_property(dev_ctx->name, "GPU_DEVICE_TOTAL_MEM_SIZE", dev_ctx->total_memory);
+                } else if (ov_device_has_prefix(dev_ctx->name, "NPU")) {
+                    ov_try_get_size_t_property(dev_ctx->name, "NPU_DEVICE_TOTAL_MEM_SIZE", dev_ctx->total_memory);
+                }
 
                 ggml_backend_dev_t dev =
                     new ggml_backend_device{/* .interface = */ ggml_backend_openvino_device_interface,
