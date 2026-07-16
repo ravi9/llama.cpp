@@ -3,16 +3,23 @@
 #include "../utils.h"
 
 #include <climits>
+#include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <vector>
+#include <openvino/frontend/exception.hpp>
 #include <openvino/op/add.hpp>
 #include <openvino/op/concat.hpp>
 #include <openvino/op/constant.hpp>
 #include <openvino/op/convert.hpp>
-#include <openvino/op/gather.hpp>
 #include <openvino/op/multiply.hpp>
+#include <openvino/op/range.hpp>
+#include <openvino/op/gather.hpp>
 #include <openvino/op/negative.hpp>
 #include <openvino/op/reshape.hpp>
+#include <openvino/op/scatter_update.hpp>
+#include <openvino/op/subtract.hpp>
+#include <openvino/op/squeeze.hpp>
 #include <openvino/op/shape_of.hpp>
 #include <openvino/op/slice.hpp>
 
@@ -23,6 +30,7 @@ namespace op {
 
 OutputVector translate_cpy(const NodeContext & context) {
     auto op_case = context.get_op_case();
+    auto input = process_view_input_new(context, 0);
     auto input_shape = context.get_input_shape(0);
     auto output_shape = context.get_input_shape(1);
 
@@ -155,7 +163,64 @@ OutputVector translate_cpy(const NodeContext & context) {
         return rename_outputs_with_suffix({res}, context.get_name());
     }
 
-    auto input = process_view_input_new(context, 0);
+    if (op_case == 5 || op_case == 6) {
+        auto input_shape = context.get_input_shape(0);
+        auto output_shape = context.get_output_shape();
+        auto dst_ggml_shape = context.get_view_input_ggml_shape(1, 0);
+        auto dst_stride = context.get_view_input_stride(1, 0);
+        size_t offset_bytes = context.get_view_input_offset(1, 0);
+        auto n_state = (int64_t)context.get_input_shape(0)[3].get_length();
+        auto n_state_c  = ov::op::v0::Constant::create(ov::element::i64, {1}, {n_state});
+        auto kv_buf = context.get_input(1);  // shape {1,1,1,N}
+
+        Output<Node> token_len_per_seq;
+        Output<Node> n_write_dyn;
+        if (context.has_input("token_len_per_seq")){
+            token_len_per_seq = context.get_input("token_len_per_seq");
+            n_write_dyn = std::make_shared<ov::op::v1::Multiply>(token_len_per_seq, n_state_c);
+        } else {
+            n_write_dyn = ov::op::v0::Constant::create(ov::element::i64, {1}, {(int64_t)dst_ggml_shape[3]});
+        }
+        size_t elem_size = dst_stride[3];
+        FRONT_END_OP_CONVERSION_CHECK(elem_size > 0, "CPY KV cache view update has invalid element size");
+        int64_t start_elem = (int64_t)(offset_bytes / elem_size);
+        // op_case 5: decoder self-attention – write offset advances each step.
+        // op_case 6: encoder self-attn or cross-attn – offset fixed at compile time.
+        const bool is_decoder_self_attn = (op_case == 5);
+        auto ones_c   = ov::op::v0::Constant::create(ov::element::i64, {3}, std::vector<int64_t>{1, 1, 1});
+        auto new_shape = std::make_shared<ov::op::v0::Concat>(
+            ov::OutputVector{ones_c, n_write_dyn}, 0);
+
+        auto reshaped = std::make_shared<ov::op::v1::Reshape>(input, new_shape, false);
+        auto data = std::make_shared<ov::op::v0::Convert>(
+            reshaped,
+            context.get_output_type());
+        // Indices [start_elem .. start_elem + n_write) on axis 3 of {1,1,1,N}
+        // For decoder self-attention the write offset advances each step, so compute it
+        // dynamically from the model inputs: start = (attention_size - token_len_per_seq) * n_state.
+        // For encoder self-attn and cross-attn the offset is fixed at graph-compile time.
+        ov::Output<ov::Node> start;
+        if (is_decoder_self_attn &&
+                context.has_input("attention_size") && context.has_input("token_len_per_seq")) {
+            auto attention_size_in = context.get_input("attention_size");
+            auto token_len_in = context.get_input("token_len_per_seq");
+            auto past_tokens = std::make_shared<ov::op::v1::Subtract>(attention_size_in, token_len_in);
+            auto new_start = std::make_shared<ov::op::v1::Multiply>(past_tokens, n_state_c);
+            start = std::make_shared<ov::op::v1::Add>(new_start, ov::op::v0::Constant::create(ov::element::i64, {1}, {start_elem}));
+        } else {
+            start = ov::op::v0::Constant::create(ov::element::i64, {1}, {start_elem});
+        }
+        auto start_squeezed = std::make_shared<ov::op::v0::Squeeze>(start);
+        auto end = std::make_shared<ov::op::v1::Add>(start_squeezed, n_write_dyn);
+        auto end_squeezed = std::make_shared<ov::op::v0::Squeeze>(end);
+        auto step = ov::op::v0::Constant::create(ov::element::i64, {1}, {1});
+        auto step_squeezed = std::make_shared<ov::op::v0::Squeeze>(step);
+        auto indices = std::make_shared<ov::op::v4::Range>(start_squeezed, end_squeezed, step_squeezed, ov::element::i64);
+        auto axis = ov::op::v0::Constant::create(ov::element::i64, {1}, {3});
+
+        auto kv_updated = std::make_shared<ov::op::v3::ScatterUpdate>(kv_buf, indices, data, axis);
+        return rename_outputs_with_suffix({kv_updated}, context.get_name());
+    }
 
     if (input_shape != output_shape) {
         auto new_shape = ov::op::v0::Constant::create(

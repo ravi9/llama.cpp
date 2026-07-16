@@ -110,7 +110,8 @@ ov::pass::MakeStateful::ParamResPairs get_kv_param_res_pairs(
 void add_sliced_mask_stateful(TensorMap & tensor_map) {
     auto create_sliced_mask = [&](const std::string & mask_name, const std::string & sliced_name) {
         if ((tensor_map.find(mask_name) != tensor_map.end()) &&
-            (tensor_map.find("token_len_per_seq") != tensor_map.end())) {
+            (tensor_map.find("token_len_per_seq") != tensor_map.end()) &&
+            (tensor_map.find("inp_pos") != tensor_map.end())) {
             auto token_len_per_seq = tensor_map.at("token_len_per_seq").get_node_shared_ptr();
             auto mask = tensor_map.at(mask_name).get_node_shared_ptr();
             std::shared_ptr<ov::Node> mask_sliced = mask;
@@ -138,6 +139,7 @@ void add_sliced_mask_stateful(TensorMap & tensor_map) {
     };
 
     create_sliced_mask("self_kq_mask", "KQ_mask_sliced");
+    create_sliced_mask("KQ_mask", "KQ_mask_sliced");
     create_sliced_mask("self_kq_mask_swa", "KQ_mask_swa_sliced");
 }
 

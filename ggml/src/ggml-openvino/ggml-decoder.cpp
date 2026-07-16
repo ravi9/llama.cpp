@@ -425,6 +425,32 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
                    is_kvcache(node->src[1]->view_src, nullptr)) {
             // s_copy defrag remainder writeback: gathered extra state rows copied back into the cache
             op_case = 3;
+        } else if (node->src[1] != nullptr && node->src[1]->op == GGML_OP_VIEW &&
+                node->src[1]->view_src != nullptr) {
+            // op_case 5: KV write for decoder self-attention (dynamic write offset)
+            // op_case 6: KV write for encoder self-attn or cross-attn (static offset)
+            const ggml_tensor * kv_buf = node->src[1]->view_src;
+            if (kv_buf->ne[1] == 1 && kv_buf->ne[2] == 1 && kv_buf->ne[3] == 1) {
+                op_case = 6;
+                // Forward-scan the graph for a FLASH_ATTN_EXT that reads from
+                // the same buffer. Having a mask (src[3] != nullptr) implies
+                // decoder self-attention and the write offset is dynamic.
+                for (int i = 0; i < m_cgraph->n_nodes; i++) {
+                    const ggml_tensor * n = m_cgraph->nodes[i];
+                    if (n->op != GGML_OP_FLASH_ATTN_EXT) {
+                        continue;
+                    }
+                    // K (src[1]) and V (src[2]) are 3-D views whose view_src is
+                    // the flat KV buffer we are writing to.
+                    if ((n->src[1] != nullptr && n->src[1]->view_src == kv_buf) ||
+                            (n->src[2] != nullptr && n->src[2]->view_src == kv_buf)) {
+                        if (n->src[3] != nullptr) {
+                            op_case = 5;  // decoder self-attention: mask present
+                        }
+                        break;
+                    }
+                }
+            }
         }
         break;
     }
@@ -445,6 +471,16 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
     case GGML_OP_L2_NORM: {
         if (std::string(node->name).find("predelta") != std::string::npos) {
             op_case = 1;
+        }
+        break;
+    }
+        case GGML_OP_FLASH_ATTN_EXT: {
+        if (node->src[1] != nullptr && node->src[1]->op == GGML_OP_VIEW &&
+                node->src[1]->view_src != nullptr) {
+            const ggml_tensor * kv_buf = node->src[1]->view_src;
+            if (kv_buf->ne[1] == 1 && kv_buf->ne[2] == 1 && kv_buf->ne[3] == 1) {
+                op_case = (node->src[3] != nullptr) ? 1 : 2;
+            }
         }
         break;
     }
@@ -479,21 +515,34 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
 
         switch (node->op) {
         case GGML_OP_FLASH_ATTN_EXT:
-            if (node->src[0] == nullptr || node->src[1] == nullptr || node->src[3] == nullptr) {
+            if (node->src[0] == nullptr || node->src[1] == nullptr) {
                 return -1;
             }
             switch (node->src[1]->op) {
             case GGML_OP_PERMUTE:
-                // case 0: node op is FLASH_ATTN_EXT, src 1 not null & op is PERMUTE & the permuted tensor src is the view of cache k
-                if (node->src[1]->src[0] != nullptr && node->src[1]->src[0]->op == GGML_OP_VIEW) {
+                // case 0: src[1] is PERMUTE of a cache VIEW, mask required
+                if (node->src[3] != nullptr && node->src[1]->src[0] != nullptr &&
+                    node->src[1]->src[0]->op == GGML_OP_VIEW) {
                     return 0;
                 }
                 break;
             case GGML_OP_CPY:
-                // case 1: node op is FLASH_ATTN_EXT, src 1 not null & op is CPY & the copied tensor src is PERMUTE & the permuted tensor src is the view of cache k
-                if (node->src[1]->src[0] != nullptr && node->src[1]->src[0]->op == GGML_OP_PERMUTE &&
-                    node->src[1]->src[0]->src[0] != nullptr && node->src[1]->src[0]->src[0]->op == GGML_OP_VIEW) {
+                // case 1: src[1] is CPY of a PERMUTE(VIEW), mask required
+                if (node->src[3] != nullptr && node->src[1]->src[0] != nullptr &&
+                    node->src[1]->src[0]->op == GGML_OP_PERMUTE &&
+                    node->src[1]->src[0]->src[0] != nullptr &&
+                    node->src[1]->src[0]->src[0]->op == GGML_OP_VIEW) {
                     return 1;
+                }
+                break;
+            case GGML_OP_VIEW:
+                // cases 4/5/6: whisper - K is a direct non-contiguous VIEW_3D of a KV cache
+                if (node->src[1]->view_src != nullptr) {
+                    if (node->src[3] != nullptr) {
+                        return 4; // decoder self-attention
+                    } else {
+                        return 5; // cross-attention or encoder self-attention
+                    };
                 }
                 break;
             default:
@@ -548,6 +597,18 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
                 cache_k_permute = node->src[0]->src[0]->src[0];
                 mask = node->src[1];
                 break;
+            case 4:
+            case 5: {
+                // whisper: K is a direct VIEW_3D of the KV buffer, no PERMUTE node
+                auto * cache_k_view = node->src[1];  // VIEW_3D of kv_self.k or kv_cross.k`
+                compute_params.token_len_per_seq = node->src[0]->ne[1];
+                if (attention_pattern_case == 4) {
+                    compute_params.attention_size = cache_k_view->ne[1];
+                } else {
+                    compute_params.attention_size_static = cache_k_view->ne[1];
+                }
+                continue;
+            }
             default:
                 break;
             }
@@ -718,11 +779,15 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
     } else if (is_kvcache(input, op)) {
         // kvcache
         input_shape = ov::PartialShape{get_shape(input)};
-        if (!m_is_static) {
+        // Whisper.cpp uses a fixed size 1D KV buffer [N, 1, 1, 1] (GGML) or [1, 1, 1, N] (OV).
+        // the token fill level is handled by token_len_per_seq + dynamic mask input.
+        // skip dynamic dim and stateful reshape for this layout.
+        const bool is_flat_kv = (input->ne[1] == 1 && input->ne[2] == 1 && input->ne[3] == 1);
+        if (!m_is_static && !is_flat_kv) {
             // do not fix ctx size to make llama-bench work across test params
             input_shape[2] = -1;
         }
-        if (is_stateful()) {
+        if (is_stateful() && !is_flat_kv) {
             // Convert stateless KV cache layout [1, 1, seq, n_heads_kv * head_size]
             // to stateful layout [1, seq, n_heads_kv, head_size].
             assert(input_shape.size() == 4 && input_shape[0] == 1 && input_shape[1] == 1 &&
@@ -796,6 +861,9 @@ void GgmlOvDecoder::add_extra_inputs() {
 
     if (m_compute_params.attention_size != -1) {
         create_1d_input("attention_size", m_compute_params.attention_size);
+    }
+    if (m_compute_params.attention_size_static != -1) {
+        create_1d_input("attention_size_static", m_compute_params.attention_size_static);
     }
     if (m_compute_params.attention_size_swa != -1) {
         create_1d_input("attention_size_swa", m_compute_params.attention_size_swa);

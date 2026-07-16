@@ -908,11 +908,27 @@ static bool has_non_contiguous_view_input(const ggml_tensor * op) {
 }
 
 static bool is_supported_flash_attn_pattern(const ggml_tensor * op) {
-    // pattern of q,k,v should be q->op==PERMUTE, q->src[0]->op==VIEW, q->src[0]->src[0]->view_src==nullptr
+    // Each Q/K/V input must follow one of:
+    //   PERMUTE -> VIEW  -> base (view_src==nullptr)   (llama KV-cache path)
+    //   PERMUTE -> RESHAPE -> base (view_src==nullptr)  (whisper Q)
+    //   VIEW -> base (view_src==nullptr)                (whisper K/V from kv_pad)
     for (int i = 0; i < 3; i++) {
         const ggml_tensor * src = op->src[i];
-        if (src->op != GGML_OP_PERMUTE || src->src[0] == nullptr || src->src[0]->op != GGML_OP_VIEW ||
-            src->src[0]->src[0] == nullptr || src->src[0]->src[0]->view_src != nullptr) {
+        if (src->op == GGML_OP_PERMUTE) {
+            if (src->src[0] == nullptr) {
+                return false;
+            }
+            if (src->src[0]->op != GGML_OP_VIEW && src->src[0]->op != GGML_OP_RESHAPE) {
+                return false;
+            }
+            if (src->src[0]->src[0] == nullptr || src->src[0]->src[0]->view_src != nullptr) {
+                return false;
+            }
+        } else if (src->op == GGML_OP_VIEW) {
+            if (src->src[0] == nullptr || src->src[0]->view_src != nullptr) {
+                return false;
+            }
+        } else {
             return false;
         }
     }

@@ -47,6 +47,7 @@ struct ComputeParams {
     int seq_active_start = 0;
     int attention_size = -1;
     int attention_size_swa = -1;
+    int attention_size_static = -1;  // encoder/cross-attn KV fill level (whisper)
     int input_len = -1;
     int token_len_per_seq = -1;
     int past_kv_len = -1;
