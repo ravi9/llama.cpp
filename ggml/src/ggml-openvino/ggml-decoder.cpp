@@ -814,11 +814,17 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
         if (is_stateful() && !is_flat_kv) {
             // Convert stateless KV cache layout [1, 1, seq, n_heads_kv * head_size]
             // to stateful layout [1, seq, n_heads_kv, head_size].
+            // NOTE: Gemma4 uses per-layer-type head sizes (sliding_attention layers
+            // head_dim=256, full_attention layers global_head_dim=512), so the single
+            // scalar m_model_params.head_size cannot describe every layer. Derive the
+            // head size from THIS tensor's own combined dim instead, so SWA and full
+            // layers each get their correct head_size.
             assert(input_shape.size() == 4 && input_shape[0] == 1 && input_shape[1] == 1 &&
-                   input_shape[2].is_dynamic() &&
-                   input_shape[3] == (m_model_params.n_heads_kv * m_model_params.head_size));
-            input_shape = {input_shape[0], ov::Dimension::dynamic(), m_model_params.n_heads_kv,
-                           m_model_params.head_size};
+                   input_shape[2].is_dynamic() && input_shape[3].is_static() &&
+                   input_shape[3].get_length() % m_model_params.n_heads_kv == 0);
+            const int64_t combined_dim = input_shape[3].get_length();  // n_heads_kv * head_size
+            const int64_t head_size = combined_dim / m_model_params.n_heads_kv;
+            input_shape = {input_shape[0], ov::Dimension::dynamic(), m_model_params.n_heads_kv, head_size};
         }
 
     } else if (is_kv_idx(input, op)) {
