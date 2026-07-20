@@ -575,7 +575,7 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
         if (node->op == GGML_OP_GATED_DELTA_NET) {
             model_params.state_size = node->src[0]->ne[0];
         }
-        if (node->op == GGML_OP_SCALE && is_kvcache(node->view_src, nullptr)) {
+        if (node->op == GGML_OP_SCALE && node->view_src != nullptr && is_kvcache(node->view_src, nullptr)) {
             compute_params.cache_rs_reset_len = ggml_nelements(node) / node->view_src->ne[0];
             compute_params.cache_rs_reset_idx = node->src[0]->view_offs / node->view_src->ne[0];
         }
@@ -915,6 +915,16 @@ std::map<std::string, std::string> GgmlOvDecoder::get_kv_param_res_names() const
     return kv_param_res_names;
 }
 
+// MUL_MAT_ID's src[0] is the [k, m, n_expert] expert-weight tensor. It is always a constant per-expert
+// weight table -- never a computed activation -- regardless of whether the backend happened to mark its
+// buffer as GGML_BACKEND_BUFFER_USAGE_WEIGHTS (test-backend-ops, for example, never sets that usage
+// flag, unlike real inference). Without this, non-quantized (F16/F32/BF16) expert weights would fall
+// through the check below as "not a weight", get decoded as a Parameter/activation instead of a
+// Constant, and crash GatherMatmul's "only constant weights are supported" check.
+static bool is_mul_mat_id_expert_weight(const ggml_tensor * node, int src_index) {
+    return node->op == GGML_OP_MUL_MAT_ID && src_index == 0;
+}
+
 std::map<std::string, std::shared_ptr<ov::Node>> GgmlOvDecoder::create_weight_nodes(ggml_cgraph * cgraph, bool naive) {
     std::map<std::string, std::shared_ptr<ov::Node>> model_weights;
     auto * nodes = cgraph->nodes;
@@ -933,7 +943,8 @@ std::map<std::string, std::shared_ptr<ov::Node>> GgmlOvDecoder::create_weight_no
             }
             if (!src->view_src) {
                 ggml_backend_buffer * buffer = src->buffer;
-                if (buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS || ggml_is_quantized(src->type)) {
+                if (buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS || ggml_is_quantized(src->type) ||
+                    is_mul_mat_id_expert_weight(node, i)) {
                     if (model_weights.find(src_name) == model_weights.end()) {
                         auto weight_node = create_weight_node(src, naive);
                         weight_node->set_friendly_name(src_name);
@@ -1700,7 +1711,21 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
         case GGML_OP_DIAG:
         case GGML_OP_TRI:
         case GGML_OP_REPEAT:
+        // Shape-preserving elementwise ops: the dynamic dim is unchanged from src[0].
+        // DIV/CLAMP are used in the MoE routing-weight normalization
+        // (sum_rows -> clamp -> div). If they are left untracked here the dynamic
+        // (token) dim is lost there, the captured prefill token count gets baked into
+        // the downstream reshapes, and every decoder layer after layer 0 turns static
+        // (which then triggers the GPU in-place-concat KV-cache corruption).
+        case GGML_OP_DIV:
+        case GGML_OP_CLAMP:
             m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[0]];
+            break;
+        case GGML_OP_SUM_ROWS:
+            // SUM_ROWS reduces ggml axis 0 to size 1 and preserves all other axes, so the
+            // dynamic dim is preserved unless it was axis 0 (then it is summed away).
+            m_node_dynamic_dims[node] =
+                (m_node_dynamic_dims[node->src[0]] == 0) ? -1 : m_node_dynamic_dims[node->src[0]];
             break;
         case GGML_OP_MUL_MAT_ID:
         case GGML_OP_SOLVE_TRI:

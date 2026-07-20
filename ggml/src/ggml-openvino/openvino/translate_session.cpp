@@ -4,6 +4,7 @@
 #include "ggml-openvino/openvino/utils.h"
 #include "input_model.h"
 #include "pass/mark_decompression_convert_constant_folding.h"
+#include "pass/mark_dequantization_subgraph.h"
 #include "pass/squeeze_matmul.h"
 #include "rt_info/weightless_caching_attributes.hpp"
 
@@ -13,6 +14,7 @@
 #include <memory>
 #include <openvino/core/node.hpp>
 #include <openvino/core/preprocess/pre_post_process.hpp>
+#include <openvino/core/shape.hpp>
 #include <openvino/core/type/element_type.hpp>
 #include <openvino/op/add.hpp>
 #include <openvino/op/broadcast.hpp>
@@ -320,10 +322,13 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
     //
     // Small constants (< 16 elements) are excluded since they may be introduced by
     // optimization patterns and the overhead is negligible.
+    //
+    // Note: use shape_size() rather than byte_size()/element_type().size() - GatherMatmul's default
+    // bias is a Constant(element::dynamic, Shape{0}), whose element_type().size() is 0 and would
+    // divide by zero.
     size_t offset = 0;
     for (auto & node : resulting_model->get_ordered_ops()) {
-        if (auto cnst = ov::as_type_ptr<ov::op::v0::Constant>(node);
-            cnst && cnst->get_byte_size() / cnst->get_element_type().size() >= 16) {
+        if (auto cnst = ov::as_type_ptr<ov::op::v0::Constant>(node); cnst && ov::shape_size(cnst->get_shape()) >= 16) {
             auto & rt_info = cnst->get_rt_info();
             if (rt_info.find(ov::WeightlessCacheAttribute::get_type_info_static()) == rt_info.end()) {
                 rt_info[ov::WeightlessCacheAttribute::get_type_info_static()] =
@@ -340,6 +345,12 @@ std::shared_ptr<Model> TranslateSession::apply_transformations(std::shared_ptr<M
         ov::pass::Manager manager;
         manager.set_per_pass_validation(true);
         manager.register_pass<ov::pass::MarkCompressedFloatConstants>();
+        // Marks the Convert/Subtract/Multiply nodes of our GatherMatmul dequantization chain
+        // (make_int4_weights/make_int8_weights, for_gather_matmul=true) with disable_constant_folding,
+        // so it survives ConstantFolding regardless of whether the target plugin's own
+        // is_decompression_multiply() recognizes GatherMatmul as a valid consumer.
+        manager.register_pass<ov::pass::MarkDequantization>(
+            std::vector<ov::element::Type>{ov::element::u8, ov::element::i8, ov::element::u4, ov::element::i4});
 
         if (ggml_model_decoder->is_stateful()) {
             const auto kv_param_res_names = ggml_model_decoder->get_kv_param_res_names();
