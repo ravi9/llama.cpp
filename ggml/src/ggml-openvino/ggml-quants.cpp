@@ -19,8 +19,8 @@
 #include <openvino/core/shape.hpp>
 #include <openvino/core/type/element_type.hpp>
 #include <openvino/core/type/element_type_traits.hpp>
-#include <openvino/core/type/float4_e2m1.hpp>
 #include <openvino/core/type/float16.hpp>
+#include <openvino/core/type/float4_e2m1.hpp>
 #include <openvino/core/type/float8_e8m0.hpp>
 #include <openvino/op/add.hpp>
 #include <openvino/op/constant.hpp>
@@ -983,6 +983,14 @@ OvWeight process_weight_tensor(const ggml_tensor * tensor, const void * data, vo
         OPENVINO_THROW("Unsupported quantized type: ", ggml_type_name(tensor->type));
     }
 
+    // 3D MoE expert weights (for_gather_matmul) always use the exact f16 zero-point path (see
+    // extract_quantized_weights) -- must be kept in sync with the "use_bias || for_gather_matmul"
+    // check in ggml_openvino_get_extracted_layout, which sizes/offsets the zp slot accordingly.
+    // Requantized tensors (layout.is_requant) are handled by requantize_to_buffers instead, whose
+    // zp sizing/type is unaffected by for_gather_matmul, so they are excluded here.
+    const bool for_gather_matmul = tensor->ne[2] > 1;
+    const bool zp_is_f16 = !layout.is_requant && (use_bias || for_gather_matmul);
+
     const bool is_3d_mxfp4_moe = tensor->type == GGML_TYPE_MXFP4 && (tensor->ne[2] > 1 || tensor->ne[3] > 1);
     if (is_3d_mxfp4_moe) {
         ov::Shape packed_shape = {static_cast<size_t>(tensor->ne[3]),
@@ -1032,7 +1040,8 @@ OvWeight process_weight_tensor(const ggml_tensor * tensor, const void * data, vo
                                         ov::element::f4e2m1 :
                                         (layout.is_symmetric ? (layout.is_u4 ? ov::element::i4 : ov::element::i8) :
                                                                (layout.is_u4 ? ov::element::u4 : ov::element::u8));
-    ov::Shape scale_shape = {node_shape[0], node_shape[1] / layout.weights_per_block};
+    ov::Shape scale_shape = node_shape;
+    scale_shape.back() /= layout.weights_per_block;
 
     if (tensor->type == GGML_TYPE_MXFP4) {
         if (tensor->ne[2] == 1 && tensor->ne[3] == 1) {

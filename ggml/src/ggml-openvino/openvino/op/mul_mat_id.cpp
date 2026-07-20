@@ -2,7 +2,6 @@
 #include "../op_table.h"
 #include "../utils.h"
 #include "gather_matmul.hpp"
-#include "ggml-openvino/ggml-openvino-extra.h"
 
 #include <cstdint>
 #include <cstring>
@@ -229,14 +228,17 @@ OutputVector translate_mul_mat_id(const NodeContext & context) {
     auto expert_weights_rank = expert_weights.get_partial_shape().rank();
     FRONT_END_OP_CONVERSION_CHECK(expert_weights_rank.is_static(),
                                   "Expected static rank for MUL_MAT_ID expert weights");
-    const bool use_gpu_fallback = ggml_openvino_get_device_name() == "GPU";
     if (expert_weights_rank.get_length() == 4) {
-        auto expert_weights_shape_3d = static_shape_dims_or_shapeof(expert_weights, {1, 2, 3});
+        auto expert_weights_shape_4d = std::make_shared<ov::op::v3::ShapeOf>(expert_weights, ov::element::i64);
+        auto expert_weights_shape_3d = get_dimensions(expert_weights_shape_4d, {1, 2, 3});
         expert_weights = std::make_shared<ov::op::v1::Reshape>(expert_weights, expert_weights_shape_3d, false);
     }
 
-    auto activations_shape_3d = static_shape_dims_or_shapeof(activations, {1, 2, 3});
-    auto ids_shape_2d = static_shape_dims_or_shapeof(ids, {2, 3});
+    auto activations_shape_4d = std::make_shared<ov::op::v3::ShapeOf>(activations, ov::element::i64);
+    auto ids_shape_4d = std::make_shared<ov::op::v3::ShapeOf>(ids, ov::element::i64);
+
+    auto activations_shape_3d = get_dimensions(activations_shape_4d, {1, 2, 3});
+    auto ids_shape_2d = get_dimensions(ids_shape_4d, {2, 3});
 
     activations = std::make_shared<ov::op::v1::Reshape>(activations, activations_shape_3d, false);
     ids = std::make_shared<ov::op::v1::Reshape>(ids, ids_shape_2d, false);
@@ -248,12 +250,6 @@ OutputVector translate_mul_mat_id(const NodeContext & context) {
     const auto output_type = context.get_output_type();
     if (activations.get_element_type() != ov::element::f32) {
         activations = std::make_shared<ov::op::v0::Convert>(activations, ov::element::f32);
-    }
-
-    if (use_gpu_fallback || !expert_weights.get_partial_shape().is_static() || !activations.get_partial_shape().is_static() ||
-        !ids.get_partial_shape().is_static()) {
-        return rename_outputs_with_suffix({translate_mul_mat_id_gather_matmul_fallback(context, expert_weights, activations, ids)},
-                                          context.get_name());
     }
 
     // GatherMatmul's A input is [n_used_or_1, n_tokens, k]; activations_3d is

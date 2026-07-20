@@ -576,7 +576,7 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
         if (node->op == GGML_OP_GATED_DELTA_NET) {
             model_params.state_size = node->src[0]->ne[0];
         }
-        if (node->op == GGML_OP_SCALE && is_kvcache(node->view_src, nullptr)) {
+        if (node->op == GGML_OP_SCALE && node->view_src != nullptr && is_kvcache(node->view_src, nullptr)) {
             compute_params.cache_rs_reset_len = ggml_nelements(node) / node->view_src->ne[0];
             compute_params.cache_rs_reset_idx = node->src[0]->view_offs / node->view_src->ne[0];
         }
@@ -1773,6 +1773,14 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
         case GGML_OP_DIAG:
         case GGML_OP_TRI:
         case GGML_OP_REPEAT:
+        // Shape-preserving elementwise ops: the dynamic dim is unchanged from src[0].
+        // DIV/CLAMP are used in the MoE routing-weight normalization
+        // (sum_rows -> clamp -> div). If they are left untracked here the dynamic
+        // (token) dim is lost there, the captured prefill token count gets baked into
+        // the downstream reshapes, and every decoder layer after layer 0 turns static
+        // (which then triggers the GPU in-place-concat KV-cache corruption).
+        case GGML_OP_DIV:
+        case GGML_OP_CLAMP:
             m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[0]];
             break;
         case GGML_OP_SUM_ROWS:

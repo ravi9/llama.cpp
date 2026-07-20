@@ -274,9 +274,10 @@ ggml_openvino_extracted_layout ggml_openvino_get_extracted_layout(const ggml_ten
         return layout;
     }
 
-    // Most quantized weights use the existing 2D extraction path. MXFP4 also
-    // appears as 3D expert weights for MUL_MAT_ID, so allow that type through.
-    if (tensor->type != GGML_TYPE_MXFP4 && (tensor->ne[2] != 1 || tensor->ne[3] != 1)) {
+    // Most quantized weights use the existing 2D extraction path. 3D expert weights for
+    // MUL_MAT_ID (MoE) are also supported, either as MXFP4 (packed, dedicated branch below) or via the
+    // generic sizing math below, which is shape-agnostic (based on total element count). Only reject 4D.
+    if (tensor->ne[3] != 1) {
         return layout;
     }
 
@@ -415,7 +416,10 @@ ggml_openvino_extracted_layout ggml_openvino_get_extracted_layout(const ggml_ten
     // Scales: F16 per block, except MXFP4 which stores one E8M0 byte per block.
     int64_t n_blocks = n_elements / layout.weights_per_block;
     layout.scales_size = n_blocks * (tensor->type == GGML_TYPE_MXFP4 ? sizeof(uint8_t) : sizeof(uint16_t));
-    // For symmetric quantization, no zp needed (weights stored as signed)
+    // For symmetric quantization, no zp needed (weights stored as signed). Asymmetric
+    // for_gather_matmul (3D MoE expert) weights use an exact f16 zero point (see
+    // extract_quantized_weights/make_int8_weights/make_int4_weights), which needs one f16 per
+    // block instead of a packed u4/u8 integer zero point.
     if (layout.is_symmetric) {
         layout.zp_size = 0;
     } else if (use_bias || for_gather_matmul) {

@@ -314,7 +314,7 @@ static void ggml_backend_openvino_buffer_set_tensor(ggml_backend_buffer_t buffer
     // 2D tensor (typical weight shape), or a 3D quantized MoE expert weight (MUL_MAT_ID). Dense 3D
     // expert weights are handled later in create_weight_node instead.
     bool is_2d = (tensor->ne[2] == 1 && tensor->ne[3] == 1);
-    bool is_supported_weight_shape = is_2d || tensor->type == GGML_TYPE_MXFP4;
+    bool is_supported_weight_shape = is_2d || (tensor->ne[3] == 1 && ggml_is_quantized(tensor->type));
 
     if (is_weight_buffer && is_full_tensor_set && is_supported_weight_shape) {
         try {
@@ -553,8 +553,7 @@ static size_t ggml_backend_openvino_buffer_type_get_alloc_size(ggml_backend_buff
     GGML_UNUSED(buft);
 
     // For quantized weight tensors, we need extra space for extracted data.
-    if (ggml_is_quantized(tensor->type) &&
-        ((tensor->ne[2] == 1 && tensor->ne[3] == 1) || tensor->type == GGML_TYPE_MXFP4)) {
+    if (ggml_is_quantized(tensor->type) && tensor->ne[3] == 1) {
         ggml_openvino_extracted_layout layout = ggml_openvino_get_extracted_layout(tensor);
         if (layout.total_size > 0) {
             // GGML_LOG_DEBUG("%s: tensor %s needs %zu bytes (original %zu, extracted: weights=%zu scales=%zu zp=%zu)\n",
@@ -1193,11 +1192,16 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
         break;
     }
     case GGML_OP_MUL_MAT_ID: {
+        // Single-expert (or empty) MUL_MAT_ID is a degenerate shape that stresses GatherMatmul edge
+        // cases and never occurs in real MoE; let it fall back to CPU.
+        if (op->src[0] != nullptr && op->src[0]->ne[2] <= 1) {
+            return true;
+        }
         if (ggml_openvino_get_device_name() == "GPU" && op->src[0] != nullptr && op->src[0]->type == GGML_TYPE_BF16) {
             return true;
         }
-        if (mul_mat_id_requires_large_tmp(op) &&
-            !(op->src[0] != nullptr && op->src[0]->type == GGML_TYPE_MXFP4)) {
+        // Only MXFP4 materializes a large per-token temporary; all other types use GatherMatmul.
+        if (op->src[0] != nullptr && op->src[0]->type == GGML_TYPE_MXFP4 && mul_mat_id_requires_large_tmp(op)) {
             return true;
         }
         break;
@@ -1394,9 +1398,9 @@ static bool ggml_backend_openvino_device_supports_op(ggml_backend_dev_t dev, con
             // GGML_LOG_WARN("OpenVINO backend does not support tensor type %s\n", ggml_type_name(src->type));
             return false;
         }
-        const bool is_supported_3d_mxfp4_moe = op->op == GGML_OP_MUL_MAT_ID && i == 0 &&
-                                               src->type == GGML_TYPE_MXFP4;
-        if (ggml_is_quantized(src->type) && src->ne[2] != 1 && !is_supported_3d_mxfp4_moe) {
+        const bool is_supported_3d_moe_expert =
+            op->op == GGML_OP_MUL_MAT_ID && i == 0 && (src->type == GGML_TYPE_MXFP4 || src->ne[3] == 1);
+        if (ggml_is_quantized(src->type) && src->ne[2] != 1 && !is_supported_3d_moe_expert) {
             // GGML_LOG_WARN("OpenVINO backend does not support 3D quantized tensors\n");
             return false;
         }
