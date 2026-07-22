@@ -543,13 +543,22 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
 
         ov::CompiledModel compiled_model_prefill;
         ov::CompiledModel compiled_model_decode;
+        ov::AnyMap config_decode = ggml_openvino_get_compile_config_decode();
+        // Arch gating: gemma3/4-style per-layer-embedding models pay heavy NPUW funcall
+        // per-call overhead in the 1-token decode graph (~8x slower). Disable funcall for
+        // decode on those archs only, unless the user explicitly pinned the decode knob.
+        if (ggml_openvino_is_npu() && m_params.has_per_layer_embd &&
+            ggml_openvino_getenv_str("GGML_OPENVINO_DECODE_NPUW_FUNCALL_FOR_ALL") == nullptr &&
+            ggml_openvino_getenv_str("GGML_OPENVINO_NPUW_FUNCALL_FOR_ALL") == nullptr) {
+            config_decode["NPUW_FUNCALL_FOR_ALL"] = "NO";
+        }
         auto remote_context = ggml_openvino_get_remote_context();
         if (remote_context.has_value()) {
             compiled_model_prefill = core.compile_model(model_prefill, remote_context.value(), config);
-            compiled_model_decode = core.compile_model(model_decode, remote_context.value(), config);
+            compiled_model_decode = core.compile_model(model_decode, remote_context.value(), config_decode);
         } else {
             compiled_model_prefill = core.compile_model(model_prefill, device, config);
-            compiled_model_decode = core.compile_model(model_decode, device, config);
+            compiled_model_decode = core.compile_model(model_decode, device, config_decode);
         }
 
         auto infer_request_prefill = std::make_shared<ov::InferRequest>(compiled_model_prefill.create_infer_request());
