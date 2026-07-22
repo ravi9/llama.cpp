@@ -172,22 +172,9 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
 
     static const bool cache_disabled = ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_CACHE");
 
-    // is_model_splitted is O(n_nodes^2) plus a create_weight_nodes scan and takes ~20 ms
-    // on a Llama-1B decode graph. It is called once per graph_compute invocation but the
-    // graph shape is identical across all decode steps, so memoize by graph_key: compute
-    // graph_key first (a few hundred us), and if the same key is already in decoder_cache
-    // we know the graph is not splitted (only not-splitted graphs get inserted there).
-    graph_key key(cgraph);
-    bool key_seen = false;
-    if (!cache_disabled) {
-        std::lock_guard<std::mutex> map_lock(r_ctx->ctx_mutex);
-        key_seen = r_ctx->decoder_cache.find(key) != r_ctx->decoder_cache.end();
-    }
-
-    bool model_is_splitted = key_seen ? false : is_model_splitted(cgraph);
-
     if (is_naive(cgraph)) {
-        if (!model_is_splitted) {
+        // is_naive checks are cheap
+        if (!is_model_splitted(cgraph)) {
             return naive_compute(cgraph, core, device, config);
         }
     }
@@ -199,6 +186,19 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
     ModelParams m_params;
     ComputeParams c_params;
     std::tie(m_params, c_params) = GgmlOvDecoder::compute_llm_params(cgraph, is_static);
+
+    // is_model_splitted is O(n_nodes^2) plus a create_weight_nodes scan and takes ~20 ms
+    // on a Llama-1B decode graph. It is called once per graph_compute invocation but the
+    // graph shape is identical across all decode steps, so memoize by graph_key: compute
+    // graph_key first (a few hundred us), and if the same key is already in decoder_cache
+    // we know the graph is not splitted (only not-splitted graphs get inserted there).
+    bool key_seen = false;
+    graph_key key(cgraph);
+    if (!cache_disabled) {
+        std::lock_guard<std::mutex> map_lock(r_ctx->ctx_mutex);
+        key_seen = r_ctx->decoder_cache.find(key) != r_ctx->decoder_cache.end();
+    }
+    bool model_is_splitted = key_seen ? false : is_model_splitted(cgraph);
 
     const bool cache_enabled = !model_is_splitted && !cache_disabled;
     bool cache_hit = false;
