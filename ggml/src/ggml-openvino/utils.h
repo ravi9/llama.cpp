@@ -1,9 +1,9 @@
 #include "ggml-decoder.h"
 #include "ggml-impl.h"
 
-#include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -11,6 +11,7 @@
 #include <openvino/runtime/infer_request.hpp>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -18,7 +19,7 @@ struct graph_key {
     int n_nodes;
     std::string first_node_name;
     std::string last_node_name;
-    std::vector<std::string> input_src_names;
+    std::vector<std::string> input_src_buffers;
 
     graph_key(const ggml_cgraph * cgraph) : n_nodes(cgraph->n_nodes) {
         if (n_nodes > 0) {
@@ -26,46 +27,33 @@ struct graph_key {
             last_node_name = cgraph->nodes[n_nodes - 1]->name;
         }
 
-        auto get_input_key_name = [](const ggml_cgraph * graph, const ggml_tensor * tensor) {
-            std::string name = tensor->name;
-            const size_t hash_pos = ggml_hash_find(&graph->visited_hash_set, tensor);
-            if (((tensor->flags & GGML_TENSOR_FLAG_COMPUTE) || GgmlOvDecoder::is_kvcache(tensor, nullptr)) &&
-                hash_pos != GGML_HASHSET_FULL && ggml_bitset_get(graph->visited_hash_set.used, hash_pos)) {
-                name += "#" + std::to_string(hash_pos);
-            }
-            return name;
-        };
-
-        std::vector<std::string> node_names;
-        node_names.reserve(cgraph->n_nodes);
-        for (int node_idx = 0; node_idx < cgraph->n_nodes; node_idx++) {
-            node_names.emplace_back(cgraph->nodes[node_idx]->name);
+        std::unordered_set<const ggml_tensor *> node_set;
+        node_set.reserve(cgraph->n_nodes);
+        for (int i = 0; i < cgraph->n_nodes; i++) {
+            node_set.insert(cgraph->nodes[i]);
         }
 
         for (int node_idx = 0; node_idx < cgraph->n_nodes; node_idx++) {
             const ggml_tensor * node = cgraph->nodes[node_idx];
             for (int src_idx = 0; src_idx < GGML_MAX_SRC; src_idx++) {
                 const ggml_tensor * src = node->src[src_idx];
-                if (src == nullptr || src->name[0] == '\0') {
+                if (src == nullptr || src->buffer == nullptr || node_set.count(src) || src->buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS) {
                     continue;
                 }
 
-                const std::string src_name = get_input_key_name(cgraph, src);
-                if (std::find(node_names.begin(), node_names.end(), src_name) != node_names.end()) {
-                    continue;
-                }
-                if (src_name.find("weight") != std::string::npos) {
-                    continue;
-                }
+                const uintptr_t buf_ptr = reinterpret_cast<uintptr_t>(src->buffer);
+                const uintptr_t base = reinterpret_cast<uintptr_t>(ggml_backend_buffer_get_base(src->buffer));
+                const uintptr_t offset = reinterpret_cast<uintptr_t>(src->data) - base;
 
-                input_src_names.push_back(std::to_string(node_idx) + ":" + std::to_string(src_idx) + ":" + src_name);
+                input_src_buffers.push_back(std::to_string(node_idx) + ":" + std::to_string(src_idx) + ":" +
+                    std::to_string(buf_ptr) + "+" + std::to_string(offset));
             }
         }
     }
 
     bool operator==(const graph_key & other) const {
         return n_nodes == other.n_nodes && first_node_name == other.first_node_name &&
-               last_node_name == other.last_node_name && input_src_names == other.input_src_names;
+               last_node_name == other.last_node_name && input_src_buffers == other.input_src_buffers;
     }
 };
 
@@ -76,8 +64,8 @@ struct graph_key_hash {
             hash ^= std::hash<std::string>{}(key.first_node_name) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
             hash ^= std::hash<std::string>{}(key.last_node_name) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
         }
-        for (const auto & input_src_name : key.input_src_names) {
-            hash ^= std::hash<std::string>{}(input_src_name) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        for (const auto & input_src_buffer : key.input_src_buffers) {
+            hash ^= std::hash<std::string>{}(input_src_buffer) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
         }
         return hash;
     }
