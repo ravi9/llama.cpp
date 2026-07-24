@@ -57,7 +57,7 @@ OutputVector translate_permute(const NodeContext & context) {
             perm_values[0] == 0) {
             perm_used = {perm_values[1] - 1, perm_values[2] - 1, perm_values[3] - 1};
         }
-        auto perm = ov::op::v0::Constant::create(ov::element::i64, {(int64_t) perm_used.size()}, perm_used);
+        auto perm = ov::op::v0::Constant::create(ov::element::i64, ov::Shape{perm_used.size()}, perm_used);
         res = std::make_shared<ov::op::v1::Transpose>(src, perm);
     } else if (op_case == 2) {
         auto perm = ov::op::v0::Constant::create(ov::element::i64, {4}, perm_values);
