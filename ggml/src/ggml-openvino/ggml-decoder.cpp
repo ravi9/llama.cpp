@@ -125,6 +125,53 @@ bool is_conv_state_writeback(const ggml_tensor * node) {
            node->src[0]->src[0]->op == GGML_OP_CONCAT && node->src[1] != nullptr && node->src[1]->op == GGML_OP_VIEW &&
            node->src[1]->view_src == node->view_src;
 }
+
+// MoE expert aggregation (build_moe_ffn in llama-graph.cpp): each expert plane is
+// `ggml_view_2d(experts, n_embd, n_tokens, experts->nb[2], i*experts->nb[1])` and the planes
+// are summed with a chain of ADDs: moe_out = ((view_0 + view_1) + view_2) + ... + view_{n-1}.
+// Detected structurally by walking the ADD chain and checking every leaf is a same-shape,
+// same-stride VIEW of one common base tensor, indexed by a distinct expert-plane offset, and
+// that the chain covers every plane of that base (leaf count == base->ne[1]). Only the
+// outermost ADD of the chain satisfies this (inner ADDs see fewer leaves than base->ne[1]).
+bool is_moe_expert_sum_add(const ggml_tensor * node) {
+    std::vector<const ggml_tensor *> leaves;
+    const ggml_tensor * cur = node;
+    while (cur->op == GGML_OP_ADD) {
+        if (cur->src[0] == nullptr || cur->src[1] == nullptr) {
+            return false;
+        }
+        leaves.push_back(cur->src[1]);
+        cur = cur->src[0];
+    }
+    leaves.push_back(cur);
+
+    const ggml_tensor * base = nullptr;
+    std::set<int64_t> plane_indices;
+    for (const ggml_tensor * leaf : leaves) {
+        if (leaf->op != GGML_OP_VIEW || leaf->src[0] == nullptr) {
+            return false;
+        }
+        const ggml_tensor * leaf_base = leaf->src[0];
+        if (base == nullptr) {
+            base = leaf_base;
+        } else if (leaf_base != base) {
+            return false;
+        }
+        if (leaf->ne[0] != base->ne[0] || leaf->ne[1] != base->ne[2] || leaf->ne[2] != 1 || leaf->ne[3] != 1 ||
+            leaf->nb[1] != base->nb[2]) {
+            return false;
+        }
+        if (base->nb[1] == 0 || leaf->view_offs % base->nb[1] != 0) {
+            return false;
+        }
+        int64_t plane = static_cast<int64_t>(leaf->view_offs / base->nb[1]);
+        if (plane < 0 || plane >= base->ne[1] || !plane_indices.insert(plane).second) {
+            return false;
+        }
+    }
+
+    return base != nullptr && base->ne[1] > 1 && plane_indices.size() == static_cast<size_t>(base->ne[1]);
+}
 }  // namespace
 
 static std::string get_tensor_ov_name(const ggml_cgraph * cgraph, const ggml_tensor * tensor) {
@@ -376,6 +423,14 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
                    is_kvcache(node->src[1]->view_src, nullptr)) {
             // s_copy defrag remainder writeback: gathered extra state rows copied back into the cache
             op_case = 3;
+        }
+        break;
+    }
+    case GGML_OP_ADD: {
+        if (is_moe_expert_sum_add(node)) {
+            // Outermost ADD of a MoE expert-plane sum chain: translated as a single
+            // ReduceSum over the base tensor instead of N-1 chained Adds over N Slices.
+            op_case = 1;
         }
         break;
     }
