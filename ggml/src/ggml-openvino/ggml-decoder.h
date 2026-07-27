@@ -62,7 +62,6 @@ struct ComputeParams {
     // 5: [ 18432,     1,     1,     1] SCALE                cache_r_l0 (reshaped) (view) (view)
     //    [ 18432,     1,     1,     1]            0: VIEW        cache_r_l0 (reshaped) (view)
 
-    int s_copy_active_slot_idx = -1;
     int s_copy_active_slot_len = -1;
     // SSM/DeltaNet models otionally reorder slots of state cache, to make the active slots contiguous
     // leaf_5 is the inp->s_copy in llama-graph.cpp, eg if there are 8 slots in total and slot 3 and 7
@@ -82,6 +81,17 @@ struct ComputeParams {
     // 11: [ 18432,     0,     1,     1] CPY                  cache_r_l0 (view) (copy of )
     //      [ 18432,     0,     1,     1]            0: GET_ROWS    node_9
     //      [ 18432,     0,     1,     1]            1: VIEW        cache_r_l0 (view)
+
+    struct RsWriteback {
+        int slot_begin = 0;  // first cache slot written by the CPY
+        int src_begin = 0;   // where the copied data starts in the source tensor (in rows of it)
+    };
+
+    std::map<std::string, RsWriteback> rs_writebacks;
+    // Offsets of the state cache writeback CPY nodes, keyed by node name. They change with the
+    // batch (kv head, active sequence count, token count) and, with rollback enabled
+    // (cparams.n_rs_seq > 0), the conv state is written back once per snapshot slot, each snapshot
+    // taking a different conv_input window. Passed to the cached model as runtime inputs.
 };
 
 class GgmlOvDecoder : public ov::frontend::ggml::GgmlDecoder {
