@@ -115,6 +115,16 @@ bool is_same_shape(const ggml_tensor * a, const ggml_tensor * b) {
 bool is_conv_states_all_tensor(const ggml_tensor * tensor) {
     return tensor != nullptr && strncmp(tensor->name, "conv_states_all", strlen("conv_states_all")) == 0;
 }
+
+// CPY writing the tail of conv_input (the concat of the previous conv state and the new tokens)
+// back into a slot block of the recurrent state cache. Detected structurally because the rollback
+// variant (cparams.n_rs_seq > 0) emits one such CPY per snapshot slot without naming them.
+bool is_conv_state_writeback(const ggml_tensor * node) {
+    return node->op == GGML_OP_CPY && node->view_src != nullptr && GgmlOvDecoder::is_kvcache(node->view_src, nullptr) &&
+           node->src[0] != nullptr && node->src[0]->op == GGML_OP_VIEW && node->src[0]->src[0] != nullptr &&
+           node->src[0]->src[0]->op == GGML_OP_CONCAT && node->src[1] != nullptr && node->src[1]->op == GGML_OP_VIEW &&
+           node->src[1]->view_src == node->view_src;
+}
 }  // namespace
 
 static std::string get_tensor_ov_name(const ggml_cgraph * cgraph, const ggml_tensor * tensor) {
@@ -353,7 +363,7 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         if (node->src[0]->op == GGML_OP_VIEW) {
             if (node->src[0]->src[0]->op == GGML_OP_GATED_DELTA_NET) {
                 op_case = 1;
-            } else if (std::string(node->src[0]->name).find("conv_state_last") == 0) {
+            } else if (is_conv_state_writeback(node)) {
                 op_case = 2;
                 break;
             } else if (is_conv_states_all_tensor(node->view_src) && node->src[1] != nullptr &&
@@ -569,21 +579,34 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
             compute_params.cache_rs_reset_len = ggml_nelements(node) / node->view_src->ne[0];
             compute_params.cache_rs_reset_idx = node->src[0]->view_offs / node->view_src->ne[0];
         }
-        // Capture the active-slot block of the recurrent state reorder (inp->s_copy). The active
-        // sequences occupy a contiguous slot block [idx, idx+len) of the state cache; read both from
-        // the active conv/gdn state writeback destination view (idx = head, len = n_seqs).
+        // Capture the destination slot block of every recurrent state cache writeback, plus the
+        // conv_input window the conv state writeback copies. The active sequences occupy a
+        // contiguous slot block [begin, begin + n_seqs) of the cache; the block and the window move
+        // with the batch, so they are fed to the cached model as runtime inputs.
         if (node->op == GGML_OP_CPY && node->view_src != nullptr && is_kvcache(node->view_src, nullptr) &&
-            node->src[0]->op == GGML_OP_VIEW && node->src[1] != nullptr) {
-            const bool is_conv = std::string(node->src[0]->name).find("conv_state_last") == 0;
-            const bool is_gdn = node->src[0]->src[0] != nullptr && node->src[0]->src[0]->op == GGML_OP_GATED_DELTA_NET;
-            if (is_conv || is_gdn) {
-                const ggml_tensor * dest_view = node->src[1];
-                const ggml_tensor * cache = node->view_src;
-                const size_t row_bytes = cache->ne[0] * ggml_type_size(cache->type);
-                if (row_bytes > 0) {
-                    compute_params.s_copy_active_slot_idx = (int) (dest_view->view_offs / row_bytes);
-                    compute_params.s_copy_active_slot_len = (int) dest_view->ne[1];
+            node->src[1] != nullptr && node->src[1]->op == GGML_OP_VIEW && node->src[1]->view_src == node->view_src) {
+            const bool is_conv = is_conv_state_writeback(node);
+            const bool is_gdn = node->src[0]->op == GGML_OP_VIEW && node->src[0]->src[0] != nullptr &&
+                                node->src[0]->src[0]->op == GGML_OP_GATED_DELTA_NET;
+            const bool is_extra = node->src[0]->op == GGML_OP_GET_ROWS;
+
+            const ggml_tensor * dest_view = node->src[1];
+            const ggml_tensor * cache = node->view_src;
+            const size_t row_bytes = cache->ne[0] * ggml_type_size(cache->type);
+            if (row_bytes > 0 && (is_conv || is_gdn || is_extra)) {
+                ComputeParams::RsWriteback writeback;
+                writeback.slot_begin = (int) (dest_view->view_offs / row_bytes);
+                if (is_conv) {
+                    // conv_input column the copied window starts at
+                    writeback.src_begin = (int) (node->src[0]->view_offs / node->src[0]->view_src->nb[0]);
+                } else if (is_gdn) {
+                    // first row of the state part of the gated-delta-net output
+                    writeback.src_begin = (int) (node->src[0]->view_offs / node->src[0]->view_src->nb[1]);
                 }
+                compute_params.rs_writebacks[get_tensor_ov_name(cgraph, node)] = writeback;
+            }
+            if (is_conv || is_gdn) {
+                compute_params.s_copy_active_slot_len = (int) dest_view->ne[1];
             }
         }
     }
@@ -730,8 +753,12 @@ void GgmlOvDecoder::add_extra_inputs() {
     }
 
     if (m_compute_params.s_copy_active_slot_len != -1) {
-        create_1d_input("s_copy_active_slot_idx", m_compute_params.s_copy_active_slot_idx);
         create_1d_input("s_copy_active_slot_len", m_compute_params.s_copy_active_slot_len);
+    }
+
+    for (const auto & [node_name, writeback] : m_compute_params.rs_writebacks) {
+        create_1d_input("rs_slot_begin_" + node_name, writeback.slot_begin);
+        create_1d_input("rs_src_begin_" + node_name, writeback.src_begin);
     }
 }
 
