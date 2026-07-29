@@ -91,6 +91,13 @@ struct decoder_runtime_ctx {
 };
 
 struct ov_runtime_context {
+    enum class weight_release_state {
+        NOT_COMPILED,
+        RELEASE_DISABLED,
+        RELEASE_READY,
+        RELEASED,
+    };
+
     mutable std::mutex ctx_mutex;
     std::string device;
     bool stateful;
@@ -104,10 +111,33 @@ struct ov_runtime_context {
     size_t stateful_kv_size;
     std::map<std::string, std::string> kv_state_input_name_map;
     std::atomic<int> backend_count;
+    weight_release_state release_state = weight_release_state::NOT_COMPILED;
+    std::string release_skip_reason;
+    bool release_cache_frozen = false;
 
     ov_runtime_context() : device("CPU"), stateful(false), stateful_kv_size(0), backend_count(0) {}
 
     void clear_caches_locked() {
+        if (release_cache_frozen) {
+            GGML_ABORT("OpenVINO compiled weight release froze the graph cache; refusing to clear caches and recompile");
+        }
+        if (release_state == weight_release_state::RELEASED) {
+            GGML_ABORT("OpenVINO compiled weight host storage was invalidated; refusing to clear caches and recompile");
+        }
+        clear_caches_locked_unchecked();
+    }
+
+    void assert_weights_available_for_conversion() const {
+        std::lock_guard<std::mutex> lock(ctx_mutex);
+        if (release_cache_frozen) {
+            GGML_ABORT("OpenVINO compiled weight release froze the graph cache; refusing to convert a new graph");
+        }
+        if (release_state == weight_release_state::RELEASED) {
+            GGML_ABORT("OpenVINO compiled weight host storage was invalidated; refusing to convert a new graph");
+        }
+    }
+
+    void clear_caches_locked_unchecked() {
         decoder_cache.clear();
         infer_request_cache.clear();
         infer_request_cache_prefill.clear();
@@ -115,10 +145,22 @@ struct ov_runtime_context {
         ov_output_names_cache.clear();
         kv_state_input_name_map.clear();
         stateful_kv_size = 0;
+        release_state = weight_release_state::NOT_COMPILED;
+        release_skip_reason.clear();
+        release_cache_frozen = false;
     }
 
     void clear_caches() {
         std::lock_guard<std::mutex> lock(ctx_mutex);
+        clear_caches_locked();
+    }
+
+    void clear_caches_for_shutdown() {
+        std::lock_guard<std::mutex> lock(ctx_mutex);
+        if (release_cache_frozen || release_state == weight_release_state::RELEASED) {
+            clear_caches_locked_unchecked();
+            return;
+        }
         clear_caches_locked();
     }
 };

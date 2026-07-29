@@ -946,6 +946,33 @@ std::map<std::string, std::shared_ptr<ov::Node>> GgmlOvDecoder::create_weight_no
     return model_weights;
 }
 
+std::set<std::string> GgmlOvDecoder::collect_weight_names(ggml_cgraph * cgraph) {
+    std::set<std::string> model_weight_names;
+    auto * nodes = cgraph->nodes;
+    auto n_nodes = cgraph->n_nodes;
+    for (int node_i = 0; node_i < n_nodes; node_i++) {
+        auto * node = nodes[node_i];
+        for (int i = 0; i < GGML_MAX_SRC; i++) {
+            auto * src = node->src[i];
+            if (src == nullptr) {
+                continue;
+            }
+
+            std::string src_name = get_tensor_ov_name(cgraph, src);
+            if (is_rope_freqs_weight(src, node)) {
+                src_name = "rope_freqs.weight";
+            }
+            if (!src->view_src) {
+                ggml_backend_buffer * buffer = src->buffer;
+                if (buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS || ggml_is_quantized(src->type)) {
+                    model_weight_names.insert(src_name);
+                }
+            }
+        }
+    }
+    return model_weight_names;
+}
+
 std::shared_ptr<ov::Node> GgmlOvDecoder::create_weight_node(ggml_tensor * tensor, bool naive) {
     const bool is_ov_buffer = ggml_backend_buffer_is_openvino(tensor->buffer);
 
@@ -971,6 +998,8 @@ std::shared_ptr<ov::Node> GgmlOvDecoder::create_weight_node(ggml_tensor * tensor
                 // GGML_LOG_DEBUG("%s: using pre-extracted quantized weight node for %s\n", __func__, tensor->name);
                 return quant_extra->weight_node;
             }
+        } else if (extra_base->type == ggml_openvino_extra_base::Type::RELEASED_WEIGHT) {
+            GGML_ABORT("OpenVINO weight tensor '%s' was released after compile; refusing to recreate a Constant node", tensor->name);
         }
     }
 

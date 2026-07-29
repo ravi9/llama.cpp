@@ -112,11 +112,16 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
 
 // Base class for OpenVINO tensor extra data
 struct ggml_openvino_extra_base {
-    enum class Type { WEIGHT, QUANTIZED_WEIGHT, TENSOR };
+    enum class Type { WEIGHT, QUANTIZED_WEIGHT, TENSOR, RELEASED_WEIGHT };
     Type type;
     virtual ~ggml_openvino_extra_base() = default;
 protected:
     explicit ggml_openvino_extra_base(Type t) : type(t) {}
+};
+
+struct ggml_openvino_released_weight_extra : public ggml_openvino_extra_base {
+    ggml_openvino_released_weight_extra() :
+        ggml_openvino_extra_base(Type::RELEASED_WEIGHT) {}
 };
 
 // Extra data for F16/F32/BF16 weight tensors - stores the pre-built weight node
@@ -188,6 +193,21 @@ bool ggml_openvino_buffer_is_remote(const ggml_tensor * tensor);
 // Register an extra with the tensor's OpenVINO buffer context for proper lifetime management.
 // This sets tensor->extra and tracks the extra in the buffer context for cleanup.
 void ggml_openvino_buffer_register_extra(ggml_tensor * tensor, ggml_openvino_extra_base * extra);
+
+struct ggml_openvino_weight_release_stats {
+    size_t n_contexts = 0;
+    size_t n_remote_contexts = 0;
+    size_t n_candidate_contexts = 0;
+    size_t n_weight_extras = 0;
+    size_t n_quantized_weight_extras = 0;
+    size_t n_tensor_extras = 0;
+    size_t total_host_bytes = 0;
+    size_t candidate_host_bytes = 0;
+};
+
+ggml_openvino_weight_release_stats ggml_openvino_get_weight_release_stats();
+
+size_t ggml_openvino_release_weight_candidates();
 
 // =====================================================
 // OpenVINO Backend Context and Interface

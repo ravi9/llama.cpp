@@ -23,6 +23,7 @@
 #include <openvino/runtime/tensor.hpp>
 #include <set>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #if defined(_WIN32)
@@ -38,6 +39,11 @@
 // =====================================================
 // OpenVINO Buffer Implementation using ov::Tensor
 // =====================================================
+
+struct ggml_backend_openvino_buffer_context;
+
+static std::mutex g_openvino_buffer_contexts_mutex;
+static std::unordered_set<ggml_backend_openvino_buffer_context *> g_openvino_buffer_contexts;
 //
 // Design: This implementation uses a hybrid approach:
 // 1. For weight tensors: Store a pre-built ov::op::v0::Constant in tensor->extra
@@ -113,9 +119,17 @@ struct ggml_backend_openvino_buffer_context {
                            TENSOR_ALIGNMENT);
             GGML_ABORT("fatal error");
         }
+
+        std::lock_guard<std::mutex> lock(g_openvino_buffer_contexts_mutex);
+        g_openvino_buffer_contexts.insert(this);
     }
 
     ~ggml_backend_openvino_buffer_context() {
+        {
+            std::lock_guard<std::mutex> lock(g_openvino_buffer_contexts_mutex);
+            g_openvino_buffer_contexts.erase(this);
+        }
+
         // Clean up all tensor extras
         // GGML_LOG_DEBUG("Deleting OpenVINO buffer context #%zu for device %d, size %zu MB\n", id, device,
         //                size / 1024 / 1024);
@@ -128,6 +142,115 @@ struct ggml_backend_openvino_buffer_context {
         }
     }
 };
+
+ggml_openvino_weight_release_stats ggml_openvino_get_weight_release_stats() {
+    ggml_openvino_weight_release_stats stats;
+
+    std::lock_guard<std::mutex> lock(g_openvino_buffer_contexts_mutex);
+    for (const auto * ctx : g_openvino_buffer_contexts) {
+        stats.n_contexts++;
+        if (ctx->is_remote) {
+            stats.n_remote_contexts++;
+            continue;
+        }
+
+        stats.total_host_bytes += ctx->size;
+
+        bool has_weight_extra = false;
+        bool has_tensor_extra = false;
+        for (const auto & pair : ctx->tensor_extras) {
+            const auto * extra = pair.second;
+            if (extra == nullptr) {
+                continue;
+            }
+
+            switch (extra->type) {
+                case ggml_openvino_extra_base::Type::WEIGHT:
+                    has_weight_extra = true;
+                    stats.n_weight_extras++;
+                    break;
+                case ggml_openvino_extra_base::Type::QUANTIZED_WEIGHT:
+                    has_weight_extra = true;
+                    stats.n_quantized_weight_extras++;
+                    break;
+                case ggml_openvino_extra_base::Type::TENSOR:
+                    has_tensor_extra = true;
+                    stats.n_tensor_extras++;
+                    break;
+                case ggml_openvino_extra_base::Type::RELEASED_WEIGHT:
+                    has_weight_extra = true;
+                    break;
+            }
+        }
+
+        if (has_weight_extra && !has_tensor_extra) {
+            stats.n_candidate_contexts++;
+            stats.candidate_host_bytes += ctx->size;
+        }
+    }
+
+    return stats;
+}
+
+size_t ggml_openvino_release_weight_candidates() {
+    size_t released_bytes = 0;
+
+    std::lock_guard<std::mutex> lock(g_openvino_buffer_contexts_mutex);
+    for (auto * ctx : g_openvino_buffer_contexts) {
+        if (ctx->is_remote || ctx->data == nullptr || ctx->size == 0) {
+            continue;
+        }
+
+        bool has_weight_extra = false;
+        bool has_tensor_extra = false;
+        for (const auto & pair : ctx->tensor_extras) {
+            const auto * extra = pair.second;
+            if (extra == nullptr) {
+                continue;
+            }
+
+            switch (extra->type) {
+                case ggml_openvino_extra_base::Type::WEIGHT:
+                case ggml_openvino_extra_base::Type::QUANTIZED_WEIGHT:
+                case ggml_openvino_extra_base::Type::RELEASED_WEIGHT:
+                    has_weight_extra = true;
+                    break;
+                case ggml_openvino_extra_base::Type::TENSOR:
+                    has_tensor_extra = true;
+                    break;
+            }
+        }
+
+        if (!has_weight_extra || has_tensor_extra) {
+            continue;
+        }
+
+        for (auto & pair : ctx->tensor_extras) {
+            ggml_tensor * tensor = pair.first;
+            auto * extra = pair.second;
+            if (extra == nullptr || extra->type == ggml_openvino_extra_base::Type::RELEASED_WEIGHT) {
+                continue;
+            }
+
+            GGML_ASSERT(extra->type == ggml_openvino_extra_base::Type::WEIGHT ||
+                        extra->type == ggml_openvino_extra_base::Type::QUANTIZED_WEIGHT);
+            delete extra;
+            auto * released_extra = new ggml_openvino_released_weight_extra();
+            pair.second = released_extra;
+            if (tensor != nullptr) {
+                tensor->extra = released_extra;
+            }
+        }
+
+        released_bytes += ctx->size;
+        ggml_aligned_free(ctx->data, ctx->size);
+        ctx->data = nullptr;
+        ctx->size = 0;
+        ctx->ov_buffer.reset();
+    }
+
+    return released_bytes;
+}
 
 // Buffer type context (per-device)
 struct ggml_backend_openvino_buffer_type_context {
@@ -620,7 +743,7 @@ static void ggml_backend_openvino_free(ggml_backend_t backend) {
     if (ctx->runtime_context) {
         auto r_ctx = std::static_pointer_cast<ov_runtime_context>(ctx->runtime_context);
         if (--r_ctx->backend_count == 0) {
-            r_ctx->clear_caches();
+            r_ctx->clear_caches_for_shutdown();
         }
     }
 
