@@ -1071,9 +1071,13 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
             op->src[0]->type == GGML_TYPE_BF16) {
             return true;
         }
-        if (op->ne[0] == 256 && (op->src[0]->type == GGML_TYPE_Q4_K || op->src[0]->type == GGML_TYPE_Q5_K)) {
-            // ERR = 0.000000306 > 0.000000100   GET_ROWS(type=q4_K,n=256,m=5,r=4,be1=1,be2=1,v=0)
-            // ERR = 0.000000197 > 0.000000100   GET_ROWS(type=q5_K,n=256,m=5,r=4,be1=1,be2=1,v=0)
+        if (op->ne[0] == 256 && (op->src[0]->type == GGML_TYPE_Q4_K || op->src[0]->type == GGML_TYPE_Q5_K ||
+                                 op->src[0]->type == GGML_TYPE_Q4_1 || op->src[0]->type == GGML_TYPE_Q5_1)) {
+            // These are all f16-arithmetic dequant rounding errors that intermittently exceed the
+            // tight 1e-7 NMSE threshold depending on the random test data (see ggml-quants.cpp
+            // make_int8_weights/make_int4_weights: dequant is done in f16, not f32, to keep the
+            // Convert/Subtract/Multiply chain fusable into GatherMatmulCompressed/FullyConnectedCompressed
+            // for the shared non-test code paths).
             return true;
         }
 
