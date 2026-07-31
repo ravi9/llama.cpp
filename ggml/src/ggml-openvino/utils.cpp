@@ -332,7 +332,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
                 r_ctx->infer_request_cache.erase(key);
             }
 
-            // Frontend-level model cache (GGML_OPENVINO_MODEL_CACHE_DIR): if this model
+            // Frontend-level compiled-model cache (GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR): if this model
             // was compiled before, import the saved blob and skip requant + convert +
             // compile. Only the dynamic single-model path is cached (split models compile
             // two graphs and are left to the plugin-level ov::cache_dir). The decoder is

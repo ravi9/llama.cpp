@@ -157,7 +157,7 @@ bool make_dirs(const std::string & path) {
 }  // namespace
 
 std::string ggml_openvino_model_cache_dir() {
-    const char * dir = ggml_openvino_getenv_str("GGML_OPENVINO_MODEL_CACHE_DIR");
+    const char * dir = ggml_openvino_getenv_str("GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR");
     if (!dir || strlen(dir) == 0) {
         return std::string();
     }
