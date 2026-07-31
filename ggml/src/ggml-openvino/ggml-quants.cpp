@@ -853,7 +853,8 @@ std::shared_ptr<ov::Node> requantize_to_buffers(const ggml_tensor * tensor,
 
     bool is_u4 = (requant_type == ExtraQuantType::Q4_0_C || requant_type == ExtraQuantType::Q4_0_128);
 
-    // Streaming dequant (opt-in via GGML_OPENVINO_REDUCE_COMPILE_MEM): instead of
+    // Streaming dequant (opt-in via GGML_OPENVINO_REDUCE_COMPILE_MEM or
+    // GGML_OPENVINO_MEMORY_OPTIMIZE): instead of
     // materializing the full n_elements F32 array (e.g. ~1 GB for token_embd), dequantize
     // a chunk of complete rows into a small scratch and quantize/convert it straight into
     // the output buffers, capping the transient F32 footprint at CHUNK_ROWS*ne0 floats.
@@ -864,7 +865,7 @@ std::shared_ptr<ov::Node> requantize_to_buffers(const ggml_tensor * tensor,
     // weights per byte with running zp ORs that assume a single whole-array call, so it is
     // never streamed. When the flag is off, behavior is identical to the original
     // full-materialization path.
-    const bool stream_requant = ggml_openvino_getenv_int("GGML_OPENVINO_REDUCE_COMPILE_MEM") != 0 && !is_u4 &&
+    const bool stream_requant = ggml_openvino_reduce_compile_mem_enabled() && !is_u4 &&
                                 !(block_size > 0 && ne0 % block_size != 0);
 
     if (!stream_requant) {
