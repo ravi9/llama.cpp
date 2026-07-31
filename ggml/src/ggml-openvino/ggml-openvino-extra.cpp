@@ -45,6 +45,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_DISABLE_CACHE",
         "GGML_OPENVINO_DISABLE_KV_SLICE",
         "GGML_OPENVINO_MANUAL_GQA_ATTN",
+        "GGML_OPENVINO_MEMORY_OPTIMIZE",
         "GGML_OPENVINO_RELEASE_WEIGHTS",
         "GGML_OPENVINO_REDUCE_COMPILE_MEM",
         "GGML_OPENVINO_MODEL_CACHE_DIR",
@@ -169,6 +170,22 @@ const char * ggml_openvino_getenv_str(const char * var, const char * default_val
 int ggml_openvino_getenv_int(const char * var, int default_value) {
     const char * v = ggml_openvino_getenv_str(var, nullptr);
     return v ? std::atoi(v) : default_value;
+}
+
+bool ggml_openvino_reduce_compile_mem_enabled() {
+    const char * reduce_compile_mem = ggml_openvino_getenv_str("GGML_OPENVINO_REDUCE_COMPILE_MEM");
+    if (reduce_compile_mem != nullptr) {
+        return ggml_openvino_getenv_int("GGML_OPENVINO_REDUCE_COMPILE_MEM") != 0;
+    }
+    return ggml_openvino_getenv_int("GGML_OPENVINO_MEMORY_OPTIMIZE") != 0;
+}
+
+bool ggml_openvino_release_weights_enabled(const std::string & device) {
+    const char * release_weights = ggml_openvino_getenv_str("GGML_OPENVINO_RELEASE_WEIGHTS");
+    if (release_weights != nullptr) {
+        return device == "GPU" && ggml_openvino_getenv_int("GGML_OPENVINO_RELEASE_WEIGHTS") != 0;
+    }
+    return device == "GPU" && ggml_openvino_getenv_int("GGML_OPENVINO_MEMORY_OPTIMIZE") != 0;
 }
 
 // Check if running on NPU
