@@ -39,22 +39,6 @@ ov::Output<ov::Node> slice_axis(const ov::Output<ov::Node> & input, int64_t axis
                                               const_i64({axis}));
 }
 
-ov::Output<ov::Node> static_shape_dims_or_shapeof(const ov::Output<ov::Node> & input,
-                                                  const std::vector<int> & dims) {
-    const auto partial_shape = input.get_partial_shape();
-    if (partial_shape.is_static()) {
-        std::vector<int64_t> values;
-        values.reserve(dims.size());
-        for (const int64_t dim : dims) {
-            values.push_back(partial_shape[dim].get_length());
-        }
-        return const_i64(values);
-    }
-
-    auto shape = std::make_shared<ov::op::v3::ShapeOf>(input, ov::element::i64);
-    return get_dimensions(shape, dims);
-}
-
 ov::Output<ov::Node> translate_mul_mat_id_gather_matmul_fallback(const NodeContext & context,
                                                                  ov::Output<ov::Node> expert_weights,
                                                                  ov::Output<ov::Node> activations,
@@ -250,6 +234,12 @@ OutputVector translate_mul_mat_id(const NodeContext & context) {
     const auto output_type = context.get_output_type();
     if (activations.get_element_type() != ov::element::f32) {
         activations = std::make_shared<ov::op::v0::Convert>(activations, ov::element::f32);
+    }
+
+    if (!expert_weights.get_partial_shape().is_static() || !activations.get_partial_shape().is_static() ||
+        !ids.get_partial_shape().is_static()) {
+        return rename_outputs_with_suffix({translate_mul_mat_id_gather_matmul_fallback(context, expert_weights, activations, ids)},
+                                          context.get_name());
     }
 
     // GatherMatmul's A input is [n_used_or_1, n_tokens, k]; activations_3d is
