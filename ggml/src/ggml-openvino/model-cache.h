@@ -1,6 +1,6 @@
 #pragma once
 
-// Frontend-level model cache (GGML_OPENVINO_MODEL_CACHE_DIR).
+// Frontend-level compiled-model cache (GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR).
 //
 // The OpenVINO plugin's own ov::cache_dir caches the compiled blob keyed by the
 // *OV model*, but producing that model still runs the full frontend every time:
@@ -16,8 +16,8 @@
 #include <cstdint>
 #include <string>
 
-// Returns the model-cache directory from GGML_OPENVINO_MODEL_CACHE_DIR, or empty
-// if unset/disabled. When empty, callers must not use the cache.
+// Returns the compiled-model cache directory from GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR,
+// or empty if unset/disabled. When empty, callers must not use the cache.
 std::string ggml_openvino_model_cache_dir();
 
 // Compute a stable 64-bit fingerprint identifying the model+config that a cgraph

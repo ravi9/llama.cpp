@@ -48,7 +48,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_MEMORY_OPTIMIZE",
         "GGML_OPENVINO_RELEASE_WEIGHTS",
         "GGML_OPENVINO_REDUCE_COMPILE_MEM",
-        "GGML_OPENVINO_MODEL_CACHE_DIR",
+        "GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR",
     };
 
     for (const char * const & env_var : env_var_names) {
