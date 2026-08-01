@@ -911,7 +911,31 @@ static bool mul_mat_id_requires_large_tmp(const ggml_tensor * op) {
     return tmp_bytes > mul_mat_id_tmp_limit;
 }
 
+static bool tensor_name_starts_with(const ggml_tensor * tensor, const char * prefix) {
+    return tensor != nullptr && strncmp(tensor->name, prefix, strlen(prefix)) == 0;
+}
+
+static bool is_msa_block_mask_expansion(const ggml_tensor * op) {
+    if (tensor_name_starts_with(op, "msa_")) {
+        return true;
+    }
+
+    const ggml_tensor * src = op->src[0];
+    while (src != nullptr && (src->op == GGML_OP_RESHAPE || src->op == GGML_OP_REPEAT)) {
+        if (tensor_name_starts_with(src, "msa_block_mask")) {
+            return true;
+        }
+        src = src->src[0];
+    }
+
+    return tensor_name_starts_with(src, "msa_block_mask");
+}
+
 static bool is_op_unsupported_case(const ggml_tensor * op) {
+    if (is_msa_block_mask_expansion(op)) {
+        return true;
+    }
+
     switch (op->op) {
     case GGML_OP_CONCAT: {
         if (op->type == GGML_TYPE_I64) {
