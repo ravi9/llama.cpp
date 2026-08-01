@@ -991,7 +991,8 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
         // The GPU plugin can fuse broadcast DIV into the preceding FFN GEMM path
         // and produce infs for per-channel scale vectors. Keep those DIVs on CPU
         // until the fused GPU kernel is reliable. (falied case llama-arch-test mpt)
-        if (op->src[1]->ne[0] == 1 && op->src[1]->ne[1] == 1 && op->src[1]->ne[2] == 1 && op->src[1]->ne[3] == 384) {
+        if (ggml_openvino_get_device_name() == "GPU" && op->src[1]->ne[0] == op->ne[0] &&
+            op->src[1]->ne[1] == 1 && op->src[1]->ne[2] == 1 && op->src[1]->ne[3] == 1) {
             return true;
         }
         break;
