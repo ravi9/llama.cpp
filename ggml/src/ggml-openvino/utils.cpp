@@ -373,7 +373,17 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
         }
 
         for (size_t i = 0; i < ov_output_names.size(); i++) {
-            auto * ggml_tensor = ggml_decoder->get_model_outputs().at(ov_output_names[i]);
+            // Debug-only outputs added via GGML_OPENVINO_DEBUG_NODE (see
+            // translate_session.cpp) have no corresponding ggml tensor; leave
+            // them unbound so OpenVINO allocates its own tensor for them,
+            // rather than aliasing a ggml buffer that may be overwritten by a
+            // later in-place op before we get to read it.
+            const auto & model_outputs = ggml_decoder->get_model_outputs();
+            auto model_output_it = model_outputs.find(ov_output_names[i]);
+            if (model_output_it == model_outputs.end()) {
+                continue;
+            }
+            auto * ggml_tensor = model_output_it->second;
             if (ggml_nbytes(ggml_tensor) == 0) {
                 continue;
             }
@@ -385,7 +395,8 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
         infer_request->infer();
         infer_end_time = ggml_time_us();
 
-        if (ggml_openvino_getenv_int("GGML_OPENVINO_DEBUG_OUTPUT")) {
+        if (ggml_openvino_getenv_int("GGML_OPENVINO_DEBUG_OUTPUT") ||
+            ggml_openvino_getenv_str("GGML_OPENVINO_DEBUG_NODE")) {
             for (size_t i = 0; i < ov_output_names.size(); i++) {
                 const auto output_tensor = infer_request->get_output_tensor(i);
                 print_output_tensor_info(ov_output_names[i], output_tensor, output_tensor.data());
@@ -592,7 +603,12 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
             }
 
             for (size_t i = 0; i < ov_output_names_local.size(); i++) {
-                auto * ggml_tensor = ggml_decoder->get_model_outputs().at(ov_output_names_local[i]);
+                const auto & model_outputs = ggml_decoder->get_model_outputs();
+                auto model_output_it = model_outputs.find(ov_output_names_local[i]);
+                if (model_output_it == model_outputs.end()) {
+                    continue;
+                }
+                auto * ggml_tensor = model_output_it->second;
                 auto output_tensor = create_ov_output_tensor(ggml_decoder, infer_request, i, ggml_tensor);
                 infer_request->set_output_tensor(i, output_tensor);
             }
@@ -601,7 +617,8 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
             infer_request->infer();
             ov_raw_infer_total += ggml_time_us() - ov_raw_infer_start;
 
-            if (ggml_openvino_getenv_int("GGML_OPENVINO_DEBUG_OUTPUT")) {
+            if (ggml_openvino_getenv_int("GGML_OPENVINO_DEBUG_OUTPUT") ||
+                ggml_openvino_getenv_str("GGML_OPENVINO_DEBUG_NODE")) {
                 for (size_t i = 0; i < ov_output_names_local.size(); i++) {
                     const auto output_tensor = infer_request->get_output_tensor(i);
                     print_output_tensor_info(ov_output_names_local[i], output_tensor, output_tensor.data());
@@ -622,7 +639,12 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
         }
 
         for (size_t i = 0; i < ov_output_names_local.size(); i++) {
-            auto * ggml_tensor = ggml_decoder->get_model_outputs().at(ov_output_names_local[i]);
+            const auto & model_outputs = ggml_decoder->get_model_outputs();
+            auto model_output_it = model_outputs.find(ov_output_names_local[i]);
+            if (model_output_it == model_outputs.end()) {
+                continue;
+            }
+            auto * ggml_tensor = model_output_it->second;
             auto output_tensor = create_ov_output_tensor(ggml_decoder, infer_request, i, ggml_tensor);
             infer_request->set_output_tensor(i, output_tensor);
         }
@@ -632,7 +654,8 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
         infer_end_time = ggml_time_us();
         ov_raw_infer_total = infer_end_time - ov_raw_infer_start;
 
-        if (ggml_openvino_getenv_int("GGML_OPENVINO_DEBUG_OUTPUT")) {
+        if (ggml_openvino_getenv_int("GGML_OPENVINO_DEBUG_OUTPUT") ||
+            ggml_openvino_getenv_str("GGML_OPENVINO_DEBUG_NODE")) {
             for (size_t i = 0; i < ov_output_names_local.size(); i++) {
                 const auto output_tensor = infer_request->get_output_tensor(i);
                 print_output_tensor_info(ov_output_names_local[i], output_tensor, output_tensor.data());
@@ -775,7 +798,17 @@ enum ggml_status naive_compute(ggml_cgraph * cgraph,
     auto ov_results = model->get_results();
     for (size_t i = 0; i < ov_results.size(); i++) {
         auto output_tensor = infer_request->get_output_tensor(i);
-        auto * ggml_tensor = decoder->get_model_outputs().at(ov_results[i]->get_friendly_name());
+        const auto & model_outputs = decoder->get_model_outputs();
+        auto model_output_it = model_outputs.find(ov_results[i]->get_friendly_name());
+        if (model_output_it == model_outputs.end()) {
+            // Debug-only output added via GGML_OPENVINO_DEBUG_NODE; nothing to copy into.
+            if (ggml_openvino_getenv_int("GGML_OPENVINO_DEBUG_OUTPUT") ||
+                ggml_openvino_getenv_str("GGML_OPENVINO_DEBUG_NODE")) {
+                print_output_tensor_info(ov_results[i]->get_friendly_name(), output_tensor, output_tensor.data());
+            }
+            continue;
+        }
+        auto * ggml_tensor = model_output_it->second;
         std::memcpy(ggml_tensor->data, output_tensor.data(), output_tensor.get_byte_size());
     }
     return GGML_STATUS_SUCCESS;

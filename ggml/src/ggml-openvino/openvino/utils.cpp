@@ -806,6 +806,41 @@ ov::Output<ov::Node> process_view_input_new(const NodeContext & context, int inp
         return current;
     };
 
+    // Special case: ggml collapses VIEW-of-VIEW chains so that `view_offs` is always an
+    // ABSOLUTE offset from the true root allocation, regardless of how many VIEW levels
+    // are in between (see ggml_new_tensor_impl). `src[0]` is still the immediate op-graph
+    // parent though, which can be a DIFFERENT (already narrowed) VIEW with the SAME ggml
+    // shape as this one but a different absolute offset -- e.g. a per-layer deepstack
+    // slice `view_2d(embd, n_embd, n_tokens, embd->nb[1], layer*n_embd*sizeof(float))`
+    // whose src[0] ("embd") is itself already a zero-offset VIEW of the true root (the
+    // padded embedding). Chaining through "embd" here would try to re-slice an already
+    // 2-narrowed tensor using a root-relative offset, going out of bounds and silently
+    // falling back to a no-op (returning the wrong, already-resolved sibling slice).
+    // Detect this (same shape as the immediate src, but different absolute offset) and
+    // re-slice directly from the untouched root using the innermost view's absolute
+    // offset against the ROOT's own shape/stride instead of chaining through src[0].
+    {
+        auto innermost_offset = context.get_view_input_offset(input_index, 0);
+        auto innermost_src_offset = context.get_view_input_src_offset(input_index, 0);
+        auto innermost_shape = context.get_view_input_ggml_shape(input_index, 0);
+        auto innermost_src_shape = context.get_view_input_src_ggml_shape(input_index, 0);
+        if (innermost_offset != innermost_src_offset && innermost_shape == innermost_src_shape) {
+            size_t root_view_idx = view_input_size - 1;
+            auto root_ggml_shape = context.get_view_input_src_ggml_shape(input_index, root_view_idx);
+            auto root_stride = context.get_view_input_src_stride(input_index, root_view_idx);
+            auto root_offset = context.get_view_input_src_offset(input_index, root_view_idx);
+            auto root_ov_shape = context.get_view_input_src_ov_shape(input_index, root_view_idx);
+            auto root_name = context.get_view_input_src_name(input_index, root_view_idx);
+            auto innermost_stride = context.get_view_input_stride(input_index, 0);
+            auto innermost_ov_shape = context.get_view_input_ov_shape(input_index, 0);
+            auto innermost_name = context.get_view_input_name(input_index, 0);
+
+            return process_single_view(input, innermost_offset, innermost_stride, innermost_shape, innermost_ov_shape,
+                                       innermost_name, root_offset, root_stride, root_ggml_shape, root_ov_shape,
+                                       root_name);
+        }
+    }
+
     // Process views from the base tensor (last) to the current view (first)
     // Start with the base tensor
     ov::Output<ov::Node> current = input;

@@ -1,5 +1,7 @@
 #include "translate_session.h"
 
+#include "ggml-impl.h"
+#include "ggml-openvino/ggml-openvino-extra.h"
 #include "ggml-openvino/openvino/node_context.h"
 #include "ggml-openvino/openvino/utils.h"
 #include "input_model.h"
@@ -8,6 +10,7 @@
 #include "pass/squeeze_matmul.h"
 #include "rt_info/weightless_caching_attributes.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <map>
@@ -37,6 +40,7 @@
 #include <openvino/op/unsqueeze.hpp>
 #include <openvino/pass/constant_folding.hpp>
 #include <openvino/pass/make_stateful.hpp>
+#include <sstream>
 
 namespace ov {
 namespace frontend {
@@ -294,6 +298,46 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
         auto result = std::make_shared<v0::Result>(tensor_map->at(name));
         result->set_friendly_name(name);
         results.push_back(result);
+    }
+
+    // Debug-only hook: GGML_OPENVINO_DEBUG_NODE=<name1>,<name2>,... adds extra
+    // Result nodes for arbitrary intermediate tensors (looked up by name in
+    // tensor_map), on top of the real model outputs above. These debug
+    // Results are deliberately NOT added to ggml_decoder's model outputs, so
+    // the caller (ov_graph_compute_dynamic in utils.cpp) will not bind them
+    // to any ggml tensor buffer -- OpenVINO allocates its own tensor for
+    // them. This avoids the risk of reading a ggml buffer that has since
+    // been overwritten by a later in-place op (ggml aggressively reuses
+    // buffers), which can happen if trying to inspect an intermediate value
+    // via GGML_OPENVINO_DEBUG_OUTPUT by hacking it into a real output.
+    //
+    // tensor_map keys are usually the plain ggml tensor name (e.g. "embd"),
+    // but tensors that are recomputed multiple times in the same cgraph
+    // (GGML_TENSOR_FLAG_COMPUTE) are disambiguated with a "#<hash>" suffix
+    // (e.g. "cache_k_l0#4853", see get_tensor_ov_name()) which is not
+    // predictable ahead of time. To keep the env var usable, a requested
+    // name is matched either exactly, or as the "name" part before "#" of a
+    // suffixed key (first match wins; ambiguous requests should include the
+    // full "name#hash" form seen in a previous run's log/dump).
+    if (const char * debug_nodes = ggml_openvino_getenv_str("GGML_OPENVINO_DEBUG_NODE")) {
+        std::stringstream ss(debug_nodes);
+        std::string name;
+        while (std::getline(ss, name, ',')) {
+            auto it = tensor_map->find(name);
+            if (it == tensor_map->end()) {
+                it = std::find_if(tensor_map->begin(), tensor_map->end(), [&](const auto & entry) {
+                    return entry.first.compare(0, name.size(), name) == 0 && entry.first.size() > name.size() &&
+                           entry.first[name.size()] == '#';
+                });
+            }
+            if (it == tensor_map->end()) {
+                GGML_LOG_WARN("GGML_OPENVINO_DEBUG_NODE: node '%s' not found in tensor map, skipping\n", name.c_str());
+                continue;
+            }
+            auto result = std::make_shared<v0::Result>(it->second);
+            result->set_friendly_name("__debug_" + it->first);
+            results.push_back(result);
+        }
     }
 
     ov::ParameterVector used_params;
