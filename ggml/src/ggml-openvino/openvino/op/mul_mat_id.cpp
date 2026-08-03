@@ -2,6 +2,7 @@
 #include "../op_table.h"
 #include "../utils.h"
 #include "gather_matmul.hpp"
+#include "ggml-openvino/ggml-openvino-extra.h"
 
 #include <cstdint>
 #include <cstring>
@@ -37,6 +38,22 @@ std::shared_ptr<ov::op::v0::Constant> const_i64(const std::vector<int64_t> & val
 ov::Output<ov::Node> slice_axis(const ov::Output<ov::Node> & input, int64_t axis, int64_t begin, int64_t end) {
     return std::make_shared<ov::op::v8::Slice>(input, const_i64({begin}), const_i64({end}), const_i64({1}),
                                               const_i64({axis}));
+}
+
+ov::Output<ov::Node> static_shape_dims_or_shapeof(const ov::Output<ov::Node> & input,
+                                                  const std::vector<int> & dims) {
+    const auto partial_shape = input.get_partial_shape();
+    if (partial_shape.is_static()) {
+        std::vector<int64_t> values;
+        values.reserve(dims.size());
+        for (const int64_t dim : dims) {
+            values.push_back(partial_shape[dim].get_length());
+        }
+        return const_i64(values);
+    }
+
+    auto shape = std::make_shared<ov::op::v3::ShapeOf>(input, ov::element::i64);
+    return get_dimensions(shape, dims);
 }
 
 ov::Output<ov::Node> translate_mul_mat_id_gather_matmul_fallback(const NodeContext & context,
@@ -212,17 +229,14 @@ OutputVector translate_mul_mat_id(const NodeContext & context) {
     auto expert_weights_rank = expert_weights.get_partial_shape().rank();
     FRONT_END_OP_CONVERSION_CHECK(expert_weights_rank.is_static(),
                                   "Expected static rank for MUL_MAT_ID expert weights");
+    const bool use_gpu_fallback = ggml_openvino_get_device_name() == "GPU";
     if (expert_weights_rank.get_length() == 4) {
-        auto expert_weights_shape_4d = std::make_shared<ov::op::v3::ShapeOf>(expert_weights, ov::element::i64);
-        auto expert_weights_shape_3d = get_dimensions(expert_weights_shape_4d, {1, 2, 3});
+        auto expert_weights_shape_3d = static_shape_dims_or_shapeof(expert_weights, {1, 2, 3});
         expert_weights = std::make_shared<ov::op::v1::Reshape>(expert_weights, expert_weights_shape_3d, false);
     }
 
-    auto activations_shape_4d = std::make_shared<ov::op::v3::ShapeOf>(activations, ov::element::i64);
-    auto ids_shape_4d = std::make_shared<ov::op::v3::ShapeOf>(ids, ov::element::i64);
-
-    auto activations_shape_3d = get_dimensions(activations_shape_4d, {1, 2, 3});
-    auto ids_shape_2d = get_dimensions(ids_shape_4d, {2, 3});
+    auto activations_shape_3d = static_shape_dims_or_shapeof(activations, {1, 2, 3});
+    auto ids_shape_2d = static_shape_dims_or_shapeof(ids, {2, 3});
 
     activations = std::make_shared<ov::op::v1::Reshape>(activations, activations_shape_3d, false);
     ids = std::make_shared<ov::op::v1::Reshape>(ids, ids_shape_2d, false);
@@ -236,7 +250,7 @@ OutputVector translate_mul_mat_id(const NodeContext & context) {
         activations = std::make_shared<ov::op::v0::Convert>(activations, ov::element::f32);
     }
 
-    if (!expert_weights.get_partial_shape().is_static() || !activations.get_partial_shape().is_static() ||
+    if (use_gpu_fallback || !expert_weights.get_partial_shape().is_static() || !activations.get_partial_shape().is_static() ||
         !ids.get_partial_shape().is_static()) {
         return rename_outputs_with_suffix({translate_mul_mat_id_gather_matmul_fallback(context, expert_weights, activations, ids)},
                                           context.get_name());
