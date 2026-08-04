@@ -16,6 +16,7 @@
 #include <iomanip>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <openvino/core/dimension.hpp>
 #include <openvino/core/except.hpp>
 #include <openvino/core/node.hpp>
@@ -31,6 +32,7 @@
 #include <stdexcept>
 #include <string>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 
 GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph,
@@ -1012,6 +1014,42 @@ std::map<std::string, std::shared_ptr<ov::Node>> GgmlOvDecoder::create_weight_no
     return model_weights;
 }
 
+// Process-lifetime cache for weight nodes built from NON-OpenVINO buffers (e.g. the
+// token_embd.weight copy that lives in a CPU/mmap buffer and feeds GET_ROWS). Such
+// tensors have no OV buffer context to own a cached extra, so without this they are
+// re-extracted/re-requantized on every (re)compile — for token_embd that is a ~1-2 GB
+// F32 dequant each time. Keyed by tensor->data, which is stable for the process and
+// uniquely identifies the immutable weight bytes. OV-buffer weights keep using the
+// per-tensor extra cache and never reach here.
+static std::mutex g_nonov_weight_cache_mutex;
+static std::unordered_map<const void *, std::shared_ptr<ov::Node>> g_nonov_weight_cache;
+
+std::set<std::string> GgmlOvDecoder::collect_weight_names(ggml_cgraph * cgraph) {
+    // Mirrors the name-selection logic of create_weight_nodes() but builds no nodes,
+    // so topology checks don't trigger weight extraction/requantization.
+    std::set<std::string> names;
+    for (int node_i = 0; node_i < cgraph->n_nodes; node_i++) {
+        auto * node = cgraph->nodes[node_i];
+        for (int i = 0; i < GGML_MAX_SRC; i++) {
+            auto * src = node->src[i];
+            if (src == nullptr) {
+                continue;
+            }
+            std::string src_name(src->name);
+            if (is_rope_freqs_weight(src, node)) {
+                src_name = "rope_freqs.weight";
+            }
+            if (!src->view_src) {
+                ggml_backend_buffer * buffer = src->buffer;
+                if (buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS || ggml_is_quantized(src->type)) {
+                    names.insert(src_name);
+                }
+            }
+        }
+    }
+    return names;
+}
+
 std::shared_ptr<ov::Node> GgmlOvDecoder::create_weight_node(ggml_tensor * tensor, bool naive) {
     const bool is_ov_buffer = ggml_backend_buffer_is_openvino(tensor->buffer);
 
@@ -1051,6 +1089,21 @@ std::shared_ptr<ov::Node> GgmlOvDecoder::create_weight_node(ggml_tensor * tensor
         return weight_node;
     }
 
+    // Non-OV-buffer weights (CPU/mmap, e.g. the GET_ROWS token_embd copy) have no buffer
+    // context to cache an extra in, so memoize them here keyed by their (stable) data
+    // pointer to avoid re-extracting on every recompile. Opt-in via
+    // GGML_OPENVINO_REDUCE_COMPILE_MEM or GGML_OPENVINO_MEMORY_OPTIMIZE. Skip
+    // for `naive` (test/naive path) since use_bias changes the produced node.
+    const bool cacheable_nonov = ggml_openvino_reduce_compile_mem_enabled() && !is_ov_buffer &&
+                                 !naive && tensor->data != nullptr;
+    if (cacheable_nonov) {
+        std::lock_guard<std::mutex> lock(g_nonov_weight_cache_mutex);
+        auto it = g_nonov_weight_cache.find(tensor->data);
+        if (it != g_nonov_weight_cache.end()) {
+            return it->second;
+        }
+    }
+
     // There are three cases where we need to create a new weight node:
     // 1. weights are in openvino_host_buffer. Weight loading to host buffer will not trigger backend_buffer_set_tensor
     // 2. weights are in cpu/cpu_mapped buffer. On token_embd.weight goes to case 1 or 2, depending on whether mmap or direct_io is used
@@ -1088,6 +1141,12 @@ std::shared_ptr<ov::Node> GgmlOvDecoder::create_weight_node(ggml_tensor * tensor
 
     ov_weight.weight_node->set_friendly_name(tensor->name);
     if (!is_ov_buffer) {
+        if (cacheable_nonov) {
+            std::lock_guard<std::mutex> lock(g_nonov_weight_cache_mutex);
+            // Another thread may have inserted concurrently; keep the first.
+            auto [it, inserted] = g_nonov_weight_cache.emplace(tensor->data, ov_weight.weight_node);
+            return it->second;
+        }
         return ov_weight.weight_node;
     }
 

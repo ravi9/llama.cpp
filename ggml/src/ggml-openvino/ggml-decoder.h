@@ -11,6 +11,8 @@
 #include <memory>
 #include <openvino/core/partial_shape.hpp>
 #include <optional>
+#include <set>
+#include <string>
 #include <vector>
 
 struct ModelParams {
@@ -276,6 +278,11 @@ public:
 
     static std::map<std::string, std::shared_ptr<ov::Node>> create_weight_nodes(ggml_cgraph * cgraph,
                                                                                 bool naive = false);
+
+    // Collect just the set of weight-tensor names referenced by the graph, without
+    // building (or requantizing) any OV weight nodes. Used by topology checks like
+    // is_model_splitted that only need name membership.
+    static std::set<std::string> collect_weight_names(ggml_cgraph * cgraph);
 
     const ggml_tensor * get_tensor_used_op(const ggml_tensor * tensor) const;
 
