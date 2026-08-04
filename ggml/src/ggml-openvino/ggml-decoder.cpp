@@ -693,6 +693,10 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
     if (is_inp_tok(input, op) || is_inp_pos(input, op)) {
         // tokens or positions
         int len = m_is_static ? (m_is_prefill ? m_prefill_chunk_size : 1) : -1;
+        if (m_is_static && is_inp_pos(input, op)) {
+            // IMROPE stacks n_planes (t/h/w/e) position planes back to back
+            len *= get_inp_pos_n_planes(op);
+        }
         input_shape = ov::PartialShape{1, 1, 1, len};
 
     } else if (is_output_idx(input, op)) {
@@ -1774,14 +1778,6 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
         // (which then triggers the GPU in-place-concat KV-cache corruption).
         case GGML_OP_DIV:
         case GGML_OP_CLAMP:
-        // PAD (used by deepstack models, e.g. Qwen3VL, to widen the token embedding
-        // from n_embd to n_embd_inp) only changes the sizes of the padded dims via
-        // fixed per-dim amounts in op_params; it never reorders or merges dims, so
-        // the dynamic dim keeps the same dim *index* as in src[0], even though that
-        // dim's size is unchanged (PAD is applied to a different, static dim here).
-        // Leaving this unhandled defaults the map lookup to dim 0 for any consumer,
-        // which mismatches the real (token) dynamic dim and forces it to become
-        // static downstream, baking the prefill token count into later reshapes.
         case GGML_OP_PAD:
             m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[0]];
             break;

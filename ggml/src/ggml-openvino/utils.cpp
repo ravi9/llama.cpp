@@ -911,16 +911,13 @@ ov::Tensor get_ov_input_tensor_static_decode(std::shared_ptr<GgmlOvDecoder> ggml
 
     if (GgmlOvDecoder::is_inp_tok(ggml_tensor, op) || GgmlOvDecoder::is_inp_pos(ggml_tensor, op) ||
         GgmlOvDecoder::is_kv_idx(ggml_tensor, op)) {
-        assert(ggml_tensor->ne[0] == 1);
-        ov::Shape input_shape = {1, 1, 1, 1};
+        // IMROPE's inp_pos holds one value per t/h/w/e plane instead of a single position;
+        // with a single decode token the planes are still contiguous, so a flat copy works.
+        const int n_planes = GgmlOvDecoder::is_inp_pos(ggml_tensor, op) ? GgmlOvDecoder::get_inp_pos_n_planes(op) : 1;
+        assert(ggml_tensor->ne[0] == n_planes);
+        ov::Shape input_shape = {1, 1, 1, (size_t) n_planes};
         ov::Tensor input_tensor(ggml_decoder->get_ov_type(ggml_tensor), input_shape);
-        if (ggml_tensor->type == GGML_TYPE_I32) {
-            *input_tensor.data<int32_t>() = *((int32_t *) ggml_tensor->data);
-        } else if (ggml_tensor->type == GGML_TYPE_I64) {
-            *input_tensor.data<int64_t>() = *((int64_t *) ggml_tensor->data);
-        } else {
-            throw std::runtime_error("Unexpected tensor type for " + param_name);
-        }
+        std::memcpy(input_tensor.data(), ggml_tensor->data, n_planes * ggml_type_size(ggml_tensor->type));
         return input_tensor;
     }
 
@@ -965,6 +962,35 @@ ov::Tensor get_ov_input_tensor_static_prefill(std::shared_ptr<GgmlOvDecoder> ggm
     const size_t chunk_size = ggml_decoder->m_prefill_chunk_size;
     const size_t chunk_valid_size = std::min(chunk_size, input_len - chunk_index * chunk_size);
     const size_t chunk_pad_size = chunk_size - chunk_valid_size;
+
+    if (GgmlOvDecoder::is_inp_pos(ggml_tensor, op) && GgmlOvDecoder::get_inp_pos_n_planes(op) > 1) {
+        // IMROPE: inp_pos stacks n_planes (t/h/w/e) position planes, each of length
+        // input_len; pad every plane independently so they stay aligned to chunk_size.
+        const int n_planes = GgmlOvDecoder::get_inp_pos_n_planes(op);
+        const size_t element_size = ggml_type_size(ggml_tensor->type);
+        ov::Shape input_shape = {1, 1, 1, (size_t) n_planes * chunk_size};
+        ov::Tensor input_tensor(ggml_decoder->get_ov_type(ggml_tensor), input_shape);
+        for (int p = 0; p < n_planes; p++) {
+            const char * src =
+                (const char *) ggml_tensor->data + (p * input_len + chunk_index * chunk_size) * element_size;
+            char * dst = (char *) input_tensor.data() + p * chunk_size * element_size;
+            std::memcpy(dst, src, chunk_valid_size * element_size);
+            if (chunk_pad_size > 0) {
+                if (ggml_tensor->type == GGML_TYPE_I32) {
+                    int32_t last_value = *((const int32_t *) src + chunk_valid_size - 1);
+                    int32_t * out = (int32_t *) dst;
+                    std::fill(out + chunk_valid_size, out + chunk_size, last_value + 1);
+                } else if (ggml_tensor->type == GGML_TYPE_I64) {
+                    int64_t last_value = *((const int64_t *) src + chunk_valid_size - 1);
+                    int64_t * out = (int64_t *) dst;
+                    std::fill(out + chunk_valid_size, out + chunk_size, last_value + 1);
+                } else {
+                    throw std::runtime_error("Unexpected tensor type for " + param_name);
+                }
+            }
+        }
+        return input_tensor;
+    }
 
     if (GgmlOvDecoder::is_inp_tok(ggml_tensor, op) || GgmlOvDecoder::is_inp_pos(ggml_tensor, op) ||
         GgmlOvDecoder::is_kv_idx(ggml_tensor, op)) {
