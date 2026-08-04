@@ -1837,14 +1837,6 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
         // (which then triggers the GPU in-place-concat KV-cache corruption).
         case GGML_OP_DIV:
         case GGML_OP_CLAMP:
-        // PAD (used by deepstack models, e.g. Qwen3VL, to widen the token embedding
-        // from n_embd to n_embd_inp) only changes the sizes of the padded dims via
-        // fixed per-dim amounts in op_params; it never reorders or merges dims, so
-        // the dynamic dim keeps the same dim *index* as in src[0], even though that
-        // dim's size is unchanged (PAD is applied to a different, static dim here).
-        // Leaving this unhandled defaults the map lookup to dim 0 for any consumer,
-        // which mismatches the real (token) dynamic dim and forces it to become
-        // static downstream, baking the prefill token count into later reshapes.
         case GGML_OP_PAD:
             m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[0]];
             break;
