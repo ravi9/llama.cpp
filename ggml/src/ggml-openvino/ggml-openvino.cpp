@@ -3,6 +3,7 @@
 #include "ggml-backend-impl.h"
 #include "ggml-backend.h"
 #include "ggml-impl.h"
+#include "ggml-openvino-buffer-storage.h"
 #include "ggml-openvino-extra.h"
 #include "ggml-openvino-op-support.h"
 #include "ggml-openvino/utils.h"
@@ -16,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <openvino/core/type/element_type.hpp>
@@ -74,9 +76,10 @@ struct ggml_backend_openvino_buffer_context {
 
     // Wrapping of the buffer
     std::shared_ptr<ov::Tensor> ov_buffer;
+    std::unique_ptr<ggml_openvino_buffer_storage> storage;
 
     // Track all extras for cleanup
-    std::map<ggml_tensor *, ggml_openvino_extra_base *> tensor_extras;
+    std::map<ggml_tensor *, std::unique_ptr<ggml_openvino_extra_base>> tensor_extras;
 
     // Used for re-allocation on device for kvcache
     void * data_prev;
@@ -97,66 +100,9 @@ struct ggml_backend_openvino_buffer_context {
 
         const auto & device_name = ggml_openvino_get_device_name();
 
-        if (is_remote) {
-            GGML_ASSERT(device_name == "GPU");
-            auto remote_context = ggml_openvino_get_remote_context();
-            auto gpu_context = remote_context->as<ov::intel_gpu::ocl::ClContext>();
-            ov::intel_gpu::ocl::USMTensor usm_tensor =
-                gpu_context.create_usm_device_tensor(ov::element::u8, ov::Shape{size});
-            data = usm_tensor.get();
-            ov_buffer = std::make_shared<ov::intel_gpu::ocl::USMTensor>(std::move(usm_tensor));
-        } else {
-#ifndef _WIN32
-            if (const char * spill_dir = ggml_openvino_getenv_str("GGML_OPENVINO_SPILL_DIR")) {
-                // Disk-backed weight buffer: back the repacked weights with a temp file via MAP_SHARED
-                // instead of anonymous memory. Anonymous pages can only be evicted to swap, so the
-                // repacked buffer stays pinned alongside the mmap'd source and both are resident at once
-                // -- that double residency is the load-time peak. File-backed pages are reclaimable: the
-                // kernel can write them back and drop them under pressure, then re-read on demand, so RSS
-                // becomes a working set rather than the whole buffer. The file is unlinked immediately,
-                // so it disappears when the process exits.
-                //
-                // The directory must be real storage. Pointing this at a tmpfs mount (/tmp on many
-                // systems) backs the "spill" with RAM and makes matters worse.
-                char path[PATH_MAX];
-                snprintf(path, sizeof(path), "%s/ggml-ov-weights-%d-XXXXXX", spill_dir, (int) getpid());
-                int fd = mkstemp(path);
-                if (fd < 0) {
-                    GGML_LOG_ERROR("%s: mkstemp(%s) failed: %s\n", __func__, path, strerror(errno));
-                    return;
-                }
-                unlink(path);  // anonymous-but-file-backed: freed on process exit
-                if (ftruncate(fd, (off_t) size) != 0) {
-                    GGML_LOG_ERROR("%s: ftruncate(%zu) failed: %s\n", __func__, size, strerror(errno));
-                    close(fd);
-                    return;
-                }
-                void * m = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-                close(fd);  // the mapping keeps the file alive
-                if (m == MAP_FAILED) {
-                    GGML_LOG_ERROR("%s: mmap(%zu) failed: %s\n", __func__, size, strerror(errno));
-                    return;
-                }
-                data = m;
-                spill_mapping = m;
-                spill_size = size;
-                GGML_LOG_INFO("%s: weight buffer spilled to %s (%zu MB, file-backed)\n", __func__, spill_dir,
-                              size / 1024 / 1024);
-                ov_buffer = std::make_shared<ov::Tensor>(ov::element::u8, ov::Shape{size}, data);
-            } else
-#endif
-            {
-#ifdef _WIN32
-                if (ggml_openvino_getenv_str("GGML_OPENVINO_SPILL_DIR")) {
-                    GGML_LOG_WARN("%s: GGML_OPENVINO_SPILL_DIR is not supported on Windows, ignoring\n", __func__);
-                }
-#endif
-                data = ggml_aligned_malloc(size);
-                GGML_ASSERT(data);
-                memset(data, 0, size);
-                ov_buffer = std::make_shared<ov::Tensor>(ov::element::u8, ov::Shape{size}, data);
-            }
-        }
+        storage = ggml_openvino_create_buffer_storage(size, is_remote);
+        data = storage->data();
+        ov_buffer = storage->ov_buffer();
 
         if (data == nullptr) {
             GGML_LOG_ERROR("%s: failed to allocate %zu bytes\n", __func__, size);
@@ -174,10 +120,8 @@ struct ggml_backend_openvino_buffer_context {
         // Clean up all tensor extras
         // GGML_LOG_DEBUG("Deleting OpenVINO buffer context #%zu for device %d, size %zu MB\n", id, device,
         //                size / 1024 / 1024);
-        for (auto & pair : tensor_extras) {
-            delete pair.second;
-        }
         tensor_extras.clear();
+<<<<<<< HEAD
 #ifndef _WIN32
         if (spill_mapping != nullptr) {
             munmap(spill_mapping, spill_size);
@@ -186,6 +130,8 @@ struct ggml_backend_openvino_buffer_context {
         if (!is_remote && data != nullptr) {
             ggml_aligned_free(data, size);
         }
+=======
+>>>>>>> ggml-openvino: manage buffer extras with RAII
     }
 };
 
@@ -317,14 +263,10 @@ static enum ggml_status ggml_backend_openvino_buffer_init_tensor(ggml_backend_bu
     ctx = (ggml_backend_openvino_buffer_context *) buffer->context;
 
     if (tensor->data != nullptr && !ggml_is_quantized(tensor->type)) {
-        ggml_openvino_tensor_extra * extra = ggml_openvino_create_tensor_extra(tensor, ctx->is_remote);
+        auto extra = ggml_openvino_create_tensor_extra_unique(tensor, ctx->is_remote);
         if (extra != nullptr) {
-            auto it = ctx->tensor_extras.find(tensor);
-            if (it != ctx->tensor_extras.end()) {
-                delete it->second;
-            }
-            ctx->tensor_extras[tensor] = extra;
-            tensor->extra = extra;
+            tensor->extra = extra.get();
+            ctx->tensor_extras[tensor] = std::move(extra);
         }
     }
 
@@ -384,12 +326,12 @@ static void ggml_backend_openvino_buffer_set_tensor(ggml_backend_buffer_t buffer
             result.weight_node->set_friendly_name(tensor->name);
 
             // const auto & layout = result.layout;
-            ggml_openvino_extra_base * extra;
+            std::unique_ptr<ggml_openvino_extra_base> extra;
 
             // Quantized path with extracted weight/scale/zp tensors
             if (result.is_quantized()) {
-                extra = new ggml_openvino_quantized_weight_extra(std::move(result.weights), std::move(result.scales),
-                                                                 std::move(result.zp), result.weight_node);
+                extra = std::make_unique<ggml_openvino_quantized_weight_extra>(
+                    std::move(result.weights), std::move(result.scales), std::move(result.zp), result.weight_node);
 
                 // if (layout.is_requant) {
                 //     GGML_LOG_DEBUG("%s: requantized %s to %s (u%d, block_size=%ld)\n", __func__, tensor->name,
@@ -402,7 +344,7 @@ static void ggml_backend_openvino_buffer_set_tensor(ggml_backend_buffer_t buffer
                 // }
             } else {
                 // F16/F32/BF16 weight or F16-requant
-                extra = new ggml_openvino_weight_extra(std::move(result.weights), result.weight_node);
+                extra = std::make_unique<ggml_openvino_weight_extra>(std::move(result.weights), result.weight_node);
 
                 // if (layout.total_size > 0) {
                 //     GGML_LOG_DEBUG("%s: requantized %s to F16\n", __func__, tensor->name);
@@ -411,8 +353,8 @@ static void ggml_backend_openvino_buffer_set_tensor(ggml_backend_buffer_t buffer
                 // }
             }
 
-            ctx->tensor_extras[tensor] = extra;
-            tensor->extra = extra;
+            tensor->extra = extra.get();
+            ctx->tensor_extras[tensor] = std::move(extra);
 
             // Register the host buffer so its pages can be dropped after the GPU
             // plugin has its own device copy (GGML_OPENVINO_RELEASE_WEIGHTS).
@@ -452,18 +394,14 @@ static void ggml_backend_openvino_buffer_set_tensor(ggml_backend_buffer_t buffer
             memcpy((char *) tensor->data + offset, data, size);
         }
 
-        ggml_openvino_tensor_extra * extra = ggml_openvino_create_tensor_extra(tensor, ctx->is_remote);
+        auto extra = ggml_openvino_create_tensor_extra_unique(tensor, ctx->is_remote);
         if (extra == nullptr) {
             // GGML_LOG_ERROR("%s: failed to create tensor extra for %s\n", __func__, tensor->name);
             return;
         }
 
-        auto it = ctx->tensor_extras.find(tensor);
-        if (it != ctx->tensor_extras.end()) {
-            delete it->second;
-        }
-        ctx->tensor_extras[tensor] = extra;
-        tensor->extra = extra;
+        tensor->extra = extra.get();
+        ctx->tensor_extras[tensor] = std::move(extra);
     }
 }
 
@@ -749,12 +687,7 @@ void ggml_openvino_buffer_register_extra(ggml_tensor * tensor, ggml_openvino_ext
 
     auto * ctx = static_cast<ggml_backend_openvino_buffer_context *>(tensor->buffer->context);
 
-    auto it = ctx->tensor_extras.find(tensor);
-    if (it != ctx->tensor_extras.end()) {
-        delete it->second;
-    }
-
-    ctx->tensor_extras[tensor] = extra;
+    ctx->tensor_extras[tensor].reset(extra);
     tensor->extra = extra;
 }
 
