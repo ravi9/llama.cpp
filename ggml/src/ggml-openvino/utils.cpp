@@ -2,6 +2,7 @@
 
 #include "ggml-impl.h"
 #include "ggml-openvino-extra.h"
+#include "ggml-openvino-weight-buffer-release.h"
 #include "ggml-openvino/ggml-decoder.h"
 #include "ggml.h"
 #include "model-cache.h"

@@ -6,6 +6,7 @@
 #include "ggml-openvino-buffer-storage.h"
 #include "ggml-openvino-extra.h"
 #include "ggml-openvino-op-support.h"
+#include "ggml-openvino-weight-buffer-release.h"
 #include "ggml-openvino/utils.h"
 #include "ggml-quants.h"
 #include "ggml.h"
@@ -33,7 +34,6 @@
 #    endif
 #    include <windows.h>
 #else
-#    include <sys/mman.h>
 #    include <unistd.h>
 #endif
 
@@ -120,81 +120,6 @@ struct ggml_backend_openvino_buffer_type_context {
     int device;
     std::string name;
 };
-
-// =====================================================
-// Host weight-buffer release (GGML_OPENVINO_RELEASE_WEIGHTS)
-// =====================================================
-// The OpenVINO weight Constants are zero-copy views into the host buffers
-// allocated here (ggml_aligned_malloc, anonymous memory). On GPU the plugin
-// holds its own device copy after compile_model, so the host pages are dead
-// weight for inference and can be dropped to reclaim RSS (~weights size).
-//
-// We do NOT free the buffer (ggml owns its lifetime and tensors still point
-// into it); instead madvise(MADV_DONTNEED) drops the resident pages while
-// keeping the mapping valid. A later recompile would re-read these Constants
-// from now-zeroed memory and produce garbage, so once released we fail fast
-// if the cache-miss compile branch is reached again (see utils.cpp).
-namespace {
-struct ov_weight_buffer_registry {
-    std::mutex mutex;
-    // (data, size) of every non-remote weight buffer, for madvise.
-    std::vector<std::pair<void *, size_t>> buffers;
-    bool released = false;
-};
-
-ov_weight_buffer_registry & ov_weight_registry() {
-    static ov_weight_buffer_registry reg;
-    return reg;
-}
-}  // namespace
-
-void ggml_openvino_register_weight_buffer(void * data, size_t size) {
-    if (data == nullptr || size == 0) {
-        return;
-    }
-    auto & reg = ov_weight_registry();
-    std::lock_guard<std::mutex> lock(reg.mutex);
-    for (const auto & b : reg.buffers) {
-        if (b.first == data) {
-            return;  // already registered
-        }
-    }
-    reg.buffers.emplace_back(data, size);
-}
-
-bool ggml_openvino_weight_buffers_released() {
-    auto & reg = ov_weight_registry();
-    std::lock_guard<std::mutex> lock(reg.mutex);
-    return reg.released;
-}
-
-void ggml_openvino_release_weight_buffers() {
-    auto & reg = ov_weight_registry();
-    std::lock_guard<std::mutex> lock(reg.mutex);
-    if (reg.released) {
-        return;
-    }
-    size_t total = 0;
-#if !defined(_WIN32)
-    for (const auto & b : reg.buffers) {
-        // Align down/up to page boundaries so madvise only drops whole pages
-        // fully owned by this buffer.
-        const long page = sysconf(_SC_PAGESIZE);
-        uintptr_t start = reinterpret_cast<uintptr_t>(b.first);
-        uintptr_t end = start + b.second;
-        uintptr_t astart = (start + page - 1) & ~(uintptr_t) (page - 1);
-        uintptr_t aend = end & ~(uintptr_t) (page - 1);
-        if (aend > astart) {
-            if (madvise(reinterpret_cast<void *>(astart), aend - astart, MADV_DONTNEED) == 0) {
-                total += aend - astart;
-            }
-        }
-    }
-#endif
-    reg.released = true;
-    GGML_LOG_INFO("%s: released %zu MB of host weight buffers (%zu buffers)\n", __func__, total / 1024 / 1024,
-                  reg.buffers.size());
-}
 
 // Buffer interface functions
 static void ggml_backend_openvino_buffer_free_buffer(ggml_backend_buffer_t buffer) {
