@@ -60,20 +60,12 @@ struct ggml_backend_openvino_buffer_context {
     std::string name;
     size_t id;
 
-    // For non-weight buffers (KV cache, compute), we still use contiguous allocation
-    void * data;
-    size_t size;
     bool is_remote;
 
-    // Wrapping of the buffer
-    std::shared_ptr<ov::Tensor> ov_buffer;
     std::unique_ptr<ggml_openvino_buffer_storage> storage;
 
     // Track all extras for cleanup
     std::map<ggml_tensor *, std::unique_ptr<ggml_openvino_extra_base>> tensor_extras;
-
-    // Used for re-allocation on device for kvcache
-    void * data_prev;
 
     ggml_backend_openvino_buffer_context(int device, size_t size, bool is_remote = false) :
         device(device),
@@ -82,8 +74,6 @@ struct ggml_backend_openvino_buffer_context {
             static std::atomic<size_t> next_id{1};
             return next_id.fetch_add(1);
         }()),
-        data(nullptr),
-        size(size),
         is_remote(is_remote) {
         if (size == 0) {
             return;
@@ -92,19 +82,25 @@ struct ggml_backend_openvino_buffer_context {
         const auto & device_name = ggml_openvino_get_device_name();
 
         storage = ggml_openvino_create_buffer_storage(size, is_remote);
-        data = storage->data();
-        ov_buffer = storage->ov_buffer();
 
-        if (data == nullptr) {
+        if (data() == nullptr) {
             GGML_LOG_ERROR("%s: failed to allocate %zu bytes\n", __func__, size);
             return;
         }
 
-        if (reinterpret_cast<uintptr_t>(data) % TENSOR_ALIGNMENT != 0) {
+        if (reinterpret_cast<uintptr_t>(data()) % TENSOR_ALIGNMENT != 0) {
             GGML_LOG_ERROR("%s: %s buffer is not aligned to %d bytes\n", __func__, device_name.c_str(),
                            TENSOR_ALIGNMENT);
             GGML_ABORT("fatal error");
         }
+    }
+
+    void * data() const noexcept {
+        return storage != nullptr ? storage->data() : nullptr;
+    }
+
+    size_t size() const noexcept {
+        return storage != nullptr ? storage->size() : 0;
     }
 
     ~ggml_backend_openvino_buffer_context() {
@@ -129,7 +125,7 @@ static void ggml_backend_openvino_buffer_free_buffer(ggml_backend_buffer_t buffe
 
 static void * ggml_backend_openvino_buffer_get_base(ggml_backend_buffer_t buffer) {
     ggml_backend_openvino_buffer_context * ctx = (ggml_backend_openvino_buffer_context *) buffer->context;
-    return ctx->data;
+    return ctx->data();
 }
 
 static bool is_stateful_enabled() {
@@ -145,12 +141,12 @@ static enum ggml_status ggml_backend_openvino_buffer_init_tensor(ggml_backend_bu
         !is_stateful_enabled()) {
         GGML_ASSERT(ctx->tensor_extras.empty());
         auto device = ctx->device;
-        auto size = ctx->size;
-        auto * data_prev = ctx->data;
+        auto size = ctx->size();
+        auto data_offset = (char *) tensor->data - (char *) ctx->data();
         delete ctx;
         ctx = new ggml_backend_openvino_buffer_context(device, size, true);
         buffer->context = ctx;
-        tensor->data = (char *) ctx->data + ((char *) tensor->data - (char *) data_prev);
+        tensor->data = (char *) ctx->data() + data_offset;
     }
 
     // Views share the extra from view_src
@@ -271,7 +267,7 @@ static void ggml_backend_openvino_buffer_set_tensor(ggml_backend_buffer_t buffer
                         "model's compiled graph. This mode supports a single model per process; unset it for "
                         "multi-model runs.");
                 }
-                ggml_openvino_register_weight_buffer(ctx->data, ctx->size);
+                ggml_openvino_register_weight_buffer(ctx->data(), ctx->size());
             }
 
         } catch (const std::exception & e) {
@@ -384,13 +380,13 @@ static bool ggml_backend_openvino_buffer_cpy_tensor(ggml_backend_buffer_t buffer
 
 static void ggml_backend_openvino_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
     ggml_backend_openvino_buffer_context * ctx = (ggml_backend_openvino_buffer_context *) buffer->context;
-    GGML_ASSERT(ctx->data != nullptr);
+    GGML_ASSERT(ctx->data() != nullptr);
     if (ctx->is_remote) {
         cl_command_queue queue = ggml_openvino_get_cl_queue();
         auto mem_fill_fn = ggml_openvino_get_clEnqueueMemFillINTEL();
         if (queue != nullptr && mem_fill_fn != nullptr) {
             uint8_t pattern = value;
-            cl_int err = mem_fill_fn(queue, ctx->data, &pattern, sizeof(pattern), ctx->size, 0, nullptr, nullptr);
+            cl_int err = mem_fill_fn(queue, ctx->data(), &pattern, sizeof(pattern), ctx->size(), 0, nullptr, nullptr);
             if (err != CL_SUCCESS) {
                 GGML_LOG_WARN("%s: clEnqueueMemFillINTEL failed with error %d\n", __func__, err);
             }
@@ -400,7 +396,7 @@ static void ggml_backend_openvino_buffer_clear(ggml_backend_buffer_t buffer, uin
                           __func__);
         }
     } else {
-        memset(ctx->data, value, ctx->size);
+        memset(ctx->data(), value, ctx->size());
     }
 }
 
@@ -431,7 +427,7 @@ static ggml_backend_buffer_t ggml_backend_openvino_buffer_type_alloc_buffer(ggml
     // Create buffer context with contiguous memory allocation
     ggml_backend_openvino_buffer_context * ctx = new ggml_backend_openvino_buffer_context(buft_ctx->device, size);
 
-    if (ctx->data == nullptr && size > 0) {
+    if (ctx->data() == nullptr && size > 0) {
         GGML_LOG_ERROR("%s: failed to allocate buffer of size %zu\n", __func__, size);
         delete ctx;
         return nullptr;
