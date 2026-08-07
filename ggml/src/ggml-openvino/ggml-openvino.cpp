@@ -57,7 +57,6 @@
 // Buffer context that manages per-tensor allocations (no contiguous buffer for weights)
 struct ggml_backend_openvino_buffer_context {
     int device;
-    std::string name;
     size_t id;
 
     bool is_remote;
@@ -69,7 +68,6 @@ struct ggml_backend_openvino_buffer_context {
 
     ggml_backend_openvino_buffer_context(int device, size_t size, bool is_remote = false) :
         device(device),
-        name(std::string(GGML_OPENVINO_NAME) + std::to_string(device)),
         id([]() {
             static std::atomic<size_t> next_id{1};
             return next_id.fetch_add(1);
