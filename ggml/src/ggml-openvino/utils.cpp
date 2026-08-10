@@ -38,6 +38,10 @@
 #include <unordered_map>
 #include <vector>
 
+bool ggml_openvino_is_stateful_enabled() {
+    return ggml_openvino_getenv_int("GGML_OPENVINO_STATEFUL_EXECUTION") != 0;
+}
+
 namespace {
 // For a KV cache input, return an ov::Tensor sized to n_kv (== attention_size
 // for that layer) instead of the fully-allocated ctx_per_seq. Pre-conditions:
