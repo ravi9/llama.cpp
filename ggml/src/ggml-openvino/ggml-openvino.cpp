@@ -213,13 +213,13 @@ static void ggml_backend_openvino_free(ggml_backend_t backend) {
 }
 
 static const char * ggml_backend_openvino_get_name(ggml_backend_t backend) {
-    return GGML_OPENVINO_NAME;
     GGML_UNUSED(backend);
+    return GGML_OPENVINO_NAME;
 }
 
 static enum ggml_status ggml_backend_openvino_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
-    return ov_graph_compute(cgraph, backend);
     GGML_UNUSED(backend);
+    return ov_graph_compute(cgraph, backend);
 }
 
 static const ggml_backend_i ggml_backend_openvino_interface = {
@@ -373,8 +373,8 @@ static bool ggml_backend_openvino_device_supports_op(ggml_backend_dev_t dev, con
 }
 
 static bool ggml_backend_openvino_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
-    return ggml_backend_buft_is_openvino(buft) || ggml_backend_buft_is_host(buft);
     GGML_UNUSED(dev);
+    return ggml_backend_buft_is_openvino(buft) || ggml_backend_buft_is_host(buft);
 }
 
 static const struct ggml_backend_device_i ggml_backend_openvino_device_interface = {
@@ -400,8 +400,8 @@ struct ggml_backend_openvino_reg_context {
 };
 
 static const char * ggml_backend_openvino_reg_get_name(ggml_backend_reg_t reg) {
-    return GGML_OPENVINO_NAME;
     GGML_UNUSED(reg);
+    return GGML_OPENVINO_NAME;
 }
 
 static size_t ggml_backend_openvino_reg_get_device_count(ggml_backend_reg_t reg) {
