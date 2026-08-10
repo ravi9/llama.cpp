@@ -508,6 +508,32 @@ void extract_q5_k_data(const ggml_tensor * tensor,
 
 enum class ZeroPointMode { None, Integer, ExactBiasAsF16ZeroPoint };
 
+static ov::Shape make_weight_shape(const ggml_tensor * tensor) {
+    return (tensor->ne[2] > 1) ? ov::Shape{static_cast<size_t>(tensor->ne[2]), static_cast<size_t>(tensor->ne[1]),
+                                           static_cast<size_t>(tensor->ne[0])} :
+                                  ov::Shape{static_cast<size_t>(tensor->ne[1]), static_cast<size_t>(tensor->ne[0])};
+}
+
+static ov::Shape make_mxfp4_weight_shape(const ggml_tensor * tensor) {
+    if (tensor->ne[2] == 1 && tensor->ne[3] == 1) {
+        return {static_cast<size_t>(tensor->ne[1]), static_cast<size_t>(tensor->ne[0])};
+    }
+
+    ov::Shape shape;
+    for (int i = GGML_MAX_DIMS - 1; i >= 0; --i) {
+        shape.push_back(static_cast<size_t>(tensor->ne[i]));
+    }
+    return shape;
+}
+
+static ov::Shape make_packed_mxfp4_moe_shape(const ggml_tensor * tensor) {
+    return {static_cast<size_t>(tensor->ne[3]),
+            static_cast<size_t>(tensor->ne[2]),
+            static_cast<size_t>(tensor->ne[1]),
+            static_cast<size_t>(tensor->ne[0] / MXFP4_BLOCK_SIZE),
+            MXFP4_BLOCK_BYTES};
+}
+
 // If for_gather_matmul is true, weight may be N-D (e.g. 3D MoE expert weights [n_expert, rows, cols]).
 // The dequantization chain below is built as usual but left in f16 (no final Convert to f32) --
 // ov::pass::MarkDequantization (registered in translate_session.cpp) marks the chain so it survives
@@ -869,10 +895,7 @@ OvWeight process_weight_tensor(const ggml_tensor * tensor, const void * data, vo
     OvWeight result;
 
     // Get shape for weights: [rows, cols], or [n_expert, rows, cols] for 3D MoE expert weights.
-    ov::Shape node_shape = (tensor->ne[2] > 1) ?
-                               ov::Shape{static_cast<size_t>(tensor->ne[2]), static_cast<size_t>(tensor->ne[1]),
-                                         static_cast<size_t>(tensor->ne[0])} :
-                               ov::Shape{static_cast<size_t>(tensor->ne[1]), static_cast<size_t>(tensor->ne[0])};
+    ov::Shape node_shape = make_weight_shape(tensor);
 
     // Handle F16/F32/BF16 weights
     if (tensor->type == GGML_TYPE_F32 || tensor->type == GGML_TYPE_F16 || tensor->type == GGML_TYPE_BF16) {
@@ -924,11 +947,7 @@ OvWeight process_weight_tensor(const ggml_tensor * tensor, const void * data, vo
 
     const bool is_3d_mxfp4_moe = tensor->type == GGML_TYPE_MXFP4 && (tensor->ne[2] > 1 || tensor->ne[3] > 1);
     if (is_3d_mxfp4_moe) {
-        ov::Shape packed_shape = {static_cast<size_t>(tensor->ne[3]),
-                                  static_cast<size_t>(tensor->ne[2]),
-                                  static_cast<size_t>(tensor->ne[1]),
-                                  static_cast<size_t>(tensor->ne[0] / MXFP4_BLOCK_SIZE),
-                                  MXFP4_BLOCK_BYTES};
+        ov::Shape packed_shape = make_packed_mxfp4_moe_shape(tensor);
         const size_t tensor_bytes = ggml_nbytes(tensor);
         if (output_base_ptr) {
             auto * buf_base = static_cast<uint8_t *>(output_base_ptr);
@@ -975,15 +994,7 @@ OvWeight process_weight_tensor(const ggml_tensor * tensor, const void * data, vo
     scale_shape.back() /= layout.weights_per_block;
 
     if (tensor->type == GGML_TYPE_MXFP4) {
-        if (tensor->ne[2] == 1 && tensor->ne[3] == 1) {
-            node_shape = {static_cast<size_t>(tensor->ne[1]), static_cast<size_t>(tensor->ne[0])};
-        } else {
-            node_shape.clear();
-            for (int i = GGML_MAX_DIMS - 1; i >= 0; --i) {
-                node_shape.push_back(static_cast<size_t>(tensor->ne[i]));
-            }
-        }
-
+        node_shape = make_mxfp4_weight_shape(tensor);
         scale_shape = node_shape;
         scale_shape.back() /= layout.weights_per_block;
     }
