@@ -220,6 +220,7 @@ static const ggml_backend_i ggml_backend_openvino_interface = {
 };
 
 int ggml_backend_openvino_get_device_count() {
+    // The backend exposes one logical ggml device; the OpenVINO plugin/device is selected by configuration.
     return 1;
 }
 
