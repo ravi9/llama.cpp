@@ -8,21 +8,12 @@
 #include "ggml-openvino-op-support.h"
 #include "ggml-openvino-weight-buffer-release.h"
 #include "ggml-openvino/utils.h"
-#include "ggml-quants.h"
 #include "ggml.h"
 
 #include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <map>
 #include <memory>
 #include <mutex>
-#include <openvino/core/type/element_type.hpp>
 #include <openvino/openvino.hpp>
-#include <openvino/runtime/allocator.hpp>
-#include <openvino/runtime/intel_gpu/ocl/ocl.hpp>
-#include <openvino/runtime/intel_npu/level_zero/level_zero.hpp>
-#include <openvino/runtime/tensor.hpp>
 #include <string>
 #include <vector>
 
