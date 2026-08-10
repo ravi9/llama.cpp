@@ -1,10 +1,10 @@
 #pragma once
-#include "ggml-openvino-extra.h"  // For ExtraQuantType
 #include "ggml.h"
+#include "ggml-openvino-quantization.h"
 
 #include <cstdint>
-#include <openvino/op/constant.hpp>
 #include <openvino/core/node_output.hpp>
+#include <openvino/op/constant.hpp>
 #include <openvino/runtime/tensor.hpp>
 
 void unpack_32_4(const uint8_t * data, uint8_t * dst);
@@ -107,25 +107,6 @@ std::shared_ptr<ov::Node> requantize_to_buffers(const ggml_tensor * tensor,
                                                 ov::Tensor & weights,
                                                 ov::Tensor & scales,
                                                 ov::Tensor & zp);
-
-inline const char * extra_quant_type_name(ExtraQuantType t) {
-    switch (t) {
-    case ExtraQuantType::F16:
-        return "F16";
-    case ExtraQuantType::Q4_0_C:
-        return "Q4_0_C";
-    case ExtraQuantType::Q4_0_128:
-        return "Q4_0_128";
-    case ExtraQuantType::Q8_0_C:
-        return "Q8_0_C";
-    case ExtraQuantType::Q8_0_32:
-        return "Q8_0_32";
-    case ExtraQuantType::Q8_1_C:
-        return "Q8_1_C";
-    default:
-        return "unknown";
-    }
-}
 
 // Result from process_weight_tensor containing the weight node and tensors.
 // For quantized weights, also contains the extracted layout and scale/zp tensors.
