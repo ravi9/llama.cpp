@@ -5,7 +5,7 @@
 #include "ggml-openvino-op-support.h"
 #include "ggml-openvino-weight-buffer-release.h"
 #include "ggml-openvino/utils.h"
-#include "ggml-quants.h"
+#include "ggml-openvino-quant-weights.h"
 #include "ggml.h"
 
 #include <atomic>
