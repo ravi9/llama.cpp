@@ -43,10 +43,6 @@ struct ggml_backend_openvino_buffer_type_context {
     bool is_host;
 };
 
-static bool is_stateful_enabled() {
-    return ggml_openvino_getenv_int("GGML_OPENVINO_STATEFUL_EXECUTION") != 0;
-}
-
 // Buffer type interface functions
 static const char * ggml_backend_openvino_buffer_type_get_name(ggml_backend_buffer_type_t buft) {
     ggml_backend_openvino_buffer_type_context * ctx = (ggml_backend_openvino_buffer_type_context *) buft->context;
@@ -259,7 +255,7 @@ static std::shared_ptr<ov_runtime_context> get_ov_runtime_context_ptr() {
     static std::shared_ptr<ov_runtime_context> r_ctx = [] {
         auto ctx = std::make_shared<ov_runtime_context>();
         ctx->device = ggml_openvino_get_device_name();
-        ctx->stateful = is_stateful_enabled() && !ggml_openvino_is_npu();
+        ctx->stateful = ggml_openvino_is_stateful_enabled() && !ggml_openvino_is_npu();
         return ctx;
     }();
     return r_ctx;
