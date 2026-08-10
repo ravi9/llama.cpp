@@ -417,6 +417,7 @@ GGML_BACKEND_API ggml_backend_reg_t ggml_backend_openvino_reg(void) {
         if (!initialized) {
             ggml_openvino_init();
 
+            // Registry and device contexts are owned by the process-lifetime backend registry singleton.
             ggml_backend_openvino_reg_context * ctx = new ggml_backend_openvino_reg_context;
 
             for (int i = 0; i < ggml_backend_openvino_get_device_count(); i++) {
