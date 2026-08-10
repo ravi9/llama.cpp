@@ -131,9 +131,7 @@ GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_openvino_buffer_type(in
 
 static const char * ggml_backend_openvino_host_buffer_type_get_name(ggml_backend_buffer_type_t buft) {
     ggml_backend_openvino_buffer_type_context * ctx = (ggml_backend_openvino_buffer_type_context *) buft->context;
-    static std::string name;
-    name = ctx->name + "_HOST";
-    return name.c_str();
+    return ctx->name.c_str();
 }
 
 static bool ggml_backend_openvino_host_buffer_type_is_host(ggml_backend_buffer_type_t buft) {
@@ -166,7 +164,7 @@ GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_openvino_host_buffer_ty
 
         for (int i = 0; i < device_count; i++) {
             buffer_type_contexts[i].device = i;
-            buffer_type_contexts[i].name = std::string(GGML_OPENVINO_NAME) + std::to_string(i);
+            buffer_type_contexts[i].name = std::string(GGML_OPENVINO_NAME) + std::to_string(i) + "_HOST";
 
             buffer_types[i] = ggml_backend_buffer_type{
                 /* .iface   = */ ggml_backend_openvino_host_buffer_type_interface,
