@@ -5,34 +5,21 @@
 #include "ggml-openvino-extra.h"
 #include "ggml.h"
 
-#include <algorithm>
-#include <cassert>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
+#include <cstring>
 #include <memory>
 #include <openvino/core/except.hpp>
 #include <openvino/core/node.hpp>
 #include <openvino/core/node_output.hpp>
-#include <openvino/core/parallel.hpp>
 #include <openvino/core/shape.hpp>
 #include <openvino/core/type/element_type.hpp>
-#include <openvino/core/type/element_type_traits.hpp>
 #include <openvino/core/type/float16.hpp>
-#include <openvino/core/type/float4_e2m1.hpp>
 #include <openvino/core/type/float8_e8m0.hpp>
-#include <openvino/op/add.hpp>
 #include <openvino/op/constant.hpp>
-#include <openvino/op/convert.hpp>
-#include <openvino/op/multiply.hpp>
-#include <openvino/op/reshape.hpp>
-#include <openvino/op/subtract.hpp>
-#include <openvino/op/util/attr_types.hpp>
-#include <openvino/pass/constant_folding.hpp>
 #include <openvino/runtime/tensor.hpp>
+#include <stdexcept>
 #include <string>
-#include <vector>
 
 static ov::Shape make_weight_shape(const ggml_tensor * tensor) {
     return (tensor->ne[2] > 1) ? ov::Shape{static_cast<size_t>(tensor->ne[2]), static_cast<size_t>(tensor->ne[1]),
@@ -60,7 +47,6 @@ static ov::Shape make_packed_mxfp4_moe_shape(const ggml_tensor * tensor) {
             MXFP4_BLOCK_BYTES};
 }
 
-// Extract quantized weights from tensor and create weight subgraph
 std::shared_ptr<ov::Node> extract_quantized_weights(const ggml_tensor * tensor,
                                                     const void * data,
                                                     ov::Tensor & weights,
@@ -298,4 +284,3 @@ OvWeight process_weight_tensor(const ggml_tensor * tensor, const void * data, vo
 
     return result;
 }
-
