@@ -92,37 +92,6 @@ static const ggml_backend_buffer_type_i ggml_backend_openvino_buffer_type_interf
     /* .is_host          = */ nullptr,
 };
 
-// Get buffer type for a specific device
-GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_openvino_buffer_type(int device) {
-    GGML_ASSERT(device >= 0 && device < ggml_backend_openvino_get_device_count());
-
-    static std::mutex mutex;
-    std::lock_guard<std::mutex> lock(mutex);
-
-    static std::vector<ggml_backend_buffer_type> buffer_types;
-    static std::vector<ggml_backend_openvino_buffer_type_context> buffer_type_contexts;
-
-    if (buffer_types.empty()) {
-        int device_count = ggml_backend_openvino_get_device_count();
-        buffer_types.resize(device_count);
-        buffer_type_contexts.resize(device_count);
-
-        for (int i = 0; i < device_count; i++) {
-            buffer_type_contexts[i].device = i;
-            buffer_type_contexts[i].name = std::string(GGML_OPENVINO_NAME) + std::to_string(i);
-            buffer_type_contexts[i].is_host = false;
-
-            buffer_types[i] = ggml_backend_buffer_type{
-                /* .iface   = */ ggml_backend_openvino_buffer_type_interface,
-                /* .device  = */ ggml_backend_reg_dev_get(ggml_backend_openvino_reg(), i),
-                /* .context = */ &buffer_type_contexts[i],
-            };
-        }
-    }
-
-    return &buffer_types[device];
-}
-
 // =====================================================
 // OpenVINO Host Buffer Implementation
 // =====================================================
@@ -146,34 +115,52 @@ static const ggml_backend_buffer_type_i ggml_backend_openvino_host_buffer_type_i
     /* .is_host          = */ ggml_backend_openvino_host_buffer_type_is_host,
 };
 
-GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_openvino_host_buffer_type(int device) {
+struct ggml_backend_openvino_buffer_type_state {
+    std::mutex mutex;
+    std::vector<ggml_backend_buffer_type> buffer_types;
+    std::vector<ggml_backend_openvino_buffer_type_context> buffer_type_contexts;
+};
+
+static ggml_backend_buffer_type_t ggml_backend_openvino_get_buffer_type(
+    ggml_backend_openvino_buffer_type_state & state,
+    const ggml_backend_buffer_type_i & iface,
+    int device,
+    bool is_host) {
     GGML_ASSERT(device >= 0 && device < ggml_backend_openvino_get_device_count());
 
-    static std::mutex mutex;
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<std::mutex> lock(state.mutex);
 
-    static std::vector<ggml_backend_buffer_type> buffer_types;
-    static std::vector<ggml_backend_openvino_buffer_type_context> buffer_type_contexts;
-
-    if (buffer_types.empty()) {
+    if (state.buffer_types.empty()) {
         int device_count = ggml_backend_openvino_get_device_count();
-        buffer_types.resize(device_count);
-        buffer_type_contexts.resize(device_count);
+        state.buffer_types.resize(device_count);
+        state.buffer_type_contexts.resize(device_count);
 
         for (int i = 0; i < device_count; i++) {
-            buffer_type_contexts[i].device = i;
-            buffer_type_contexts[i].name = std::string(GGML_OPENVINO_NAME) + std::to_string(i) + "_HOST";
-            buffer_type_contexts[i].is_host = true;
+            state.buffer_type_contexts[i].device = i;
+            state.buffer_type_contexts[i].name =
+                std::string(GGML_OPENVINO_NAME) + std::to_string(i) + (is_host ? "_HOST" : "");
+            state.buffer_type_contexts[i].is_host = is_host;
 
-            buffer_types[i] = ggml_backend_buffer_type{
-                /* .iface   = */ ggml_backend_openvino_host_buffer_type_interface,
+            state.buffer_types[i] = ggml_backend_buffer_type{
+                /* .iface   = */ iface,
                 /* .device  = */ ggml_backend_reg_dev_get(ggml_backend_openvino_reg(), i),
-                /* .context = */ &buffer_type_contexts[i],
+                /* .context = */ &state.buffer_type_contexts[i],
             };
         }
     }
 
-    return &buffer_types[device];
+    return &state.buffer_types[device];
+}
+
+// Get buffer type for a specific device
+GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_openvino_buffer_type(int device) {
+    static ggml_backend_openvino_buffer_type_state state;
+    return ggml_backend_openvino_get_buffer_type(state, ggml_backend_openvino_buffer_type_interface, device, false);
+}
+
+GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_openvino_host_buffer_type(int device) {
+    static ggml_backend_openvino_buffer_type_state state;
+    return ggml_backend_openvino_get_buffer_type(state, ggml_backend_openvino_host_buffer_type_interface, device, true);
 }
 
 bool ggml_backend_buft_is_openvino(ggml_backend_buffer_type_t buft) {
