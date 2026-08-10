@@ -1,4 +1,4 @@
-#include "ggml-quants.h"
+#include "ggml-openvino-quant-weights.h"
 
 #include "ggml-common.h"
 #include "ggml-impl.h"

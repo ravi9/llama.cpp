@@ -1,4 +1,4 @@
-#include "ggml-quants.h"
+#include "ggml-openvino-quant-weights.h"
 
 #include <memory>
 #include <openvino/core/except.hpp>
