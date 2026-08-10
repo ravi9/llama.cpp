@@ -511,14 +511,16 @@ void extract_q5_k_data(const ggml_tensor * tensor,
 // ov::pass::MarkDequantization (registered in translate_session.cpp) marks the chain so it survives
 // model-build-time ConstantFolding. mul_mat_id.cpp constructs ov::op::internal::GatherMatmul directly
 // on top of the resulting f16 chain.
-ov::Output<ov::Node> make_int8_weights(ov::Tensor & weight,
-                                       ov::Tensor & scales,
-                                       ov::Tensor & zp,
-                                       size_t group_size,
-                                       bool use_bias,
-                                       bool for_gather_matmul) {
+static ov::Output<ov::Node> make_integer_weights(ov::Tensor & weight,
+                                                 ov::Tensor & scales,
+                                                 ov::Tensor & zp,
+                                                 size_t group_size,
+                                                 bool use_bias,
+                                                 bool for_gather_matmul,
+                                                 ov::element::Type signed_type,
+                                                 ov::element::Type unsigned_type) {
     ov::Shape orig_shape = weight.get_shape();
-    bool is_signed = (weight.get_element_type() == ov::element::i8);  // Symmetric: signed weights, no ZP
+    bool is_signed = (weight.get_element_type() == signed_type);  // Symmetric: signed weights, no ZP
 
     // Expand dimensions for scales and zp/bias
     auto scale_shape = scales.get_shape();
@@ -549,7 +551,7 @@ ov::Output<ov::Node> make_int8_weights(ov::Tensor & weight,
     ov::Output<ov::Node> result;
     if (is_signed) {
         // Signed path: q * s (no zero point subtraction needed)
-        auto weights_node = std::make_shared<ov::op::v0::Constant>(ov::element::i8, packed_shape,
+        auto weights_node = std::make_shared<ov::op::v0::Constant>(signed_type, packed_shape,
                                                                    static_cast<uint8_t *>(weight.data()), nullptr);
         weights_node->get_rt_info()["__gguf_tensor_holder"] = weight;
         auto weights_f16 = std::make_shared<ov::op::v0::Convert>(weights_node, ov::element::f16);
@@ -557,7 +559,7 @@ ov::Output<ov::Node> make_int8_weights(ov::Tensor & weight,
         result = mul;
     } else {
         // Unsigned path
-        auto weights_node = std::make_shared<ov::op::v0::Constant>(ov::element::u8, packed_shape,
+        auto weights_node = std::make_shared<ov::op::v0::Constant>(unsigned_type, packed_shape,
                                                                    static_cast<uint8_t *>(weight.data()), nullptr);
         weights_node->get_rt_info()["__gguf_tensor_holder"] = weight;
         auto weights_f16 = std::make_shared<ov::op::v0::Convert>(weights_node, ov::element::f16);
@@ -611,6 +613,16 @@ ov::Output<ov::Node> make_int8_weights(ov::Tensor & weight,
     return std::make_shared<ov::op::v0::Convert>(result, ov::element::f32);
 }
 
+ov::Output<ov::Node> make_int8_weights(ov::Tensor & weight,
+                                       ov::Tensor & scales,
+                                       ov::Tensor & zp,
+                                       size_t group_size,
+                                       bool use_bias,
+                                       bool for_gather_matmul) {
+    return make_integer_weights(weight, scales, zp, group_size, use_bias, for_gather_matmul, ov::element::i8,
+                                ov::element::u8);
+}
+
 // See make_int8_weights for the meaning of for_gather_matmul.
 ov::Output<ov::Node> make_int4_weights(ov::Tensor & weight,
                                        ov::Tensor & scales,
@@ -618,96 +630,8 @@ ov::Output<ov::Node> make_int4_weights(ov::Tensor & weight,
                                        size_t group_size,
                                        bool use_bias,
                                        bool for_gather_matmul) {
-    ov::Shape orig_weight_shape = weight.get_shape();
-    bool is_signed = (weight.get_element_type() == ov::element::i4);  // Symmetric: signed weights, no ZP
-
-    // Expand dimensions for scales and zp/bias
-    ov::Shape scale_shape = scales.get_shape();
-
-    // Create INT4 weight tensor. Group the innermost (last) dimension: for 2D weights
-    // [rows, cols] this yields [rows, cols/group_size, group_size]; for 3D MoE experts
-    // [n_expert, rows, cols] this yields [n_expert, rows, cols/group_size, group_size].
-    ov::Shape packed_shape = orig_weight_shape;
-    packed_shape.back() /= group_size;
-    packed_shape.push_back(group_size);
-    const size_t group_dim = packed_shape.size() - 2;
-
-    if (packed_shape[group_dim] == 1) {
-        // Requantized channel-wise case
-        packed_shape.erase(packed_shape.begin() + group_dim);
-    } else {
-        scale_shape.push_back(1);
-        scales.set_shape(scale_shape);
-        if (!is_signed && zp.get_size() > 0) {
-            auto zp_shape = zp.get_shape();
-            zp_shape.push_back(1);
-            zp.set_shape(zp_shape);
-        }
-    }
-
-    auto scales_f16 = std::make_shared<ov::op::v0::Constant>(scales);
-
-    ov::Output<ov::Node> result;
-    if (is_signed) {
-        // Signed path: q * s (no zero point subtraction needed)
-        auto weights_node = std::make_shared<ov::op::v0::Constant>(ov::element::i4, packed_shape,
-                                                                   static_cast<uint8_t *>(weight.data()), nullptr);
-        weights_node->get_rt_info()["__gguf_tensor_holder"] = weight;
-        auto weights_f16 = std::make_shared<ov::op::v0::Convert>(weights_node, ov::element::f16);
-        auto mul = std::make_shared<ov::op::v1::Multiply>(weights_f16, scales_f16, ov::op::AutoBroadcastType::NUMPY);
-        result = mul;
-    } else {
-        // Unsigned path
-        auto weights_node = std::make_shared<ov::op::v0::Constant>(ov::element::u4, packed_shape,
-                                                                   static_cast<uint8_t *>(weight.data()), nullptr);
-        weights_node->get_rt_info()["__gguf_tensor_holder"] = weight;
-        auto weights_f16 = std::make_shared<ov::op::v0::Convert>(weights_node, ov::element::f16);
-
-        if (use_bias && zp.get_size() > 0) {
-            // Accurate dequant in the FUSABLE zero-point form: (w - zp) * s with an exact f16
-            // zp = -bias/scale. Equivalent to w*s + bias but matches CompressedWeightsBlock's
-            // pattern so for_gather_matmul weights still fuse into GatherMatmulCompressed, and
-            // avoids the round(min/scale) error of an integer zp. Convert bias -> zero-point IN
-            // PLACE in the (possibly buffer-backed) zp tensor to avoid a duplicate allocation.
-            auto * bias_zp_data = zp.data<ov::float16>();
-            const auto * scale_data = scales.data<ov::float16>();
-            const size_t n = zp.get_size();
-            for (size_t i = 0; i < n; i++) {
-                float s = static_cast<float>(scale_data[i]);
-                float b = static_cast<float>(bias_zp_data[i]);
-                bias_zp_data[i] = ov::float16(s != 0.0f ? -b / s : 0.0f);
-            }
-            auto zero_points_f16 = std::make_shared<ov::op::v0::Constant>(zp);
-            auto w_zp =
-                std::make_shared<ov::op::v1::Subtract>(weights_f16, zero_points_f16, ov::op::AutoBroadcastType::NUMPY);
-            result = std::make_shared<ov::op::v1::Multiply>(w_zp, scales_f16, ov::op::AutoBroadcastType::NUMPY);
-        } else {
-            // Zero point path: (w - zp) * s
-            auto zero_points_node = std::make_shared<ov::op::v0::Constant>(zp);
-            float zp_value;
-            if (ov::op::util::get_single_value(zero_points_node, zp_value)) {
-                zero_points_node = ov::op::v0::Constant::create(zero_points_node->get_element_type(), {}, {zp_value});
-            }
-            auto zero_points_f16 = std::make_shared<ov::op::v0::Convert>(zero_points_node, ov::element::f16);
-            auto w_zp =
-                std::make_shared<ov::op::v1::Subtract>(weights_f16, zero_points_f16, ov::op::AutoBroadcastType::NUMPY);
-            auto mul = std::make_shared<ov::op::v1::Multiply>(w_zp, scales_f16, ov::op::AutoBroadcastType::NUMPY);
-            result = mul;
-        }
-    }
-
-    if (packed_shape.size() != orig_weight_shape.size()) {
-        // If not requantized channel-wise case, reshape back to original shape
-        auto final_shape = std::make_shared<ov::op::v0::Constant>(ov::element::i64, ov::Shape{orig_weight_shape.size()},
-                                                                  orig_weight_shape);
-        auto reshaped = std::make_shared<ov::op::v1::Reshape>(result, final_shape, false);
-        result = reshaped;
-    }
-
-    if (for_gather_matmul) {
-        return result;
-    }
-    return std::make_shared<ov::op::v0::Convert>(result, ov::element::f32);
+    return make_integer_weights(weight, scales, zp, group_size, use_bias, for_gather_matmul, ov::element::i4,
+                                ov::element::u4);
 }
 
 ov::Output<ov::Node> make_mxfp4_weights(ov::Tensor & weight, ov::Tensor & scales) {
