@@ -506,6 +506,8 @@ void extract_q5_k_data(const ggml_tensor * tensor,
 
 // TODO Reorder for make_intX_weights
 
+enum class ZeroPointMode { None, Integer, ExactBiasAsF16ZeroPoint };
+
 // If for_gather_matmul is true, weight may be N-D (e.g. 3D MoE expert weights [n_expert, rows, cols]).
 // The dequantization chain below is built as usual but left in f16 (no final Convert to f32) --
 // ov::pass::MarkDequantization (registered in translate_session.cpp) marks the chain so it survives
@@ -521,6 +523,9 @@ static ov::Output<ov::Node> make_integer_weights(ov::Tensor & weight,
                                                  ov::element::Type unsigned_type) {
     ov::Shape orig_shape = weight.get_shape();
     bool is_signed = (weight.get_element_type() == signed_type);  // Symmetric: signed weights, no ZP
+    const ZeroPointMode zp_mode = is_signed ? ZeroPointMode::None :
+                                  (use_bias && zp.get_size() > 0) ? ZeroPointMode::ExactBiasAsF16ZeroPoint :
+                                                                    ZeroPointMode::Integer;
 
     // Expand dimensions for scales and zp/bias
     auto scale_shape = scales.get_shape();
@@ -564,7 +569,7 @@ static ov::Output<ov::Node> make_integer_weights(ov::Tensor & weight,
         weights_node->get_rt_info()["__gguf_tensor_holder"] = weight;
         auto weights_f16 = std::make_shared<ov::op::v0::Convert>(weights_node, ov::element::f16);
 
-        if (use_bias && zp.get_size() > 0) {
+        if (zp_mode == ZeroPointMode::ExactBiasAsF16ZeroPoint) {
             // Accurate dequant in the FUSABLE zero-point form: (w - zp) * s, where the zero
             // point is an exact f16 value zp = -bias/scale (the zp tensor holds bias values
             // coming in). Algebraically equal to w*s + bias, but unlike an Add(bias) graph this
@@ -584,7 +589,7 @@ static ov::Output<ov::Node> make_integer_weights(ov::Tensor & weight,
             auto w_zp =
                 std::make_shared<ov::op::v1::Subtract>(weights_f16, zero_point_f16, ov::op::AutoBroadcastType::NUMPY);
             result = std::make_shared<ov::op::v1::Multiply>(w_zp, scales_f16, ov::op::AutoBroadcastType::NUMPY);
-        } else {
+        } else if (zp_mode == ZeroPointMode::Integer) {
             // Zero point path: (w - zp) * s
             auto zero_point = std::make_shared<ov::op::v0::Constant>(zp);
             float zp_value;
@@ -596,6 +601,8 @@ static ov::Output<ov::Node> make_integer_weights(ov::Tensor & weight,
                 std::make_shared<ov::op::v1::Subtract>(weights_f16, zero_point_f16, ov::op::AutoBroadcastType::NUMPY);
             auto mul = std::make_shared<ov::op::v1::Multiply>(w_zp, scales_f16, ov::op::AutoBroadcastType::NUMPY);
             result = mul;
+        } else {
+            OPENVINO_THROW("Unexpected zero-point mode for unsigned integer weights");
         }
     }
 
