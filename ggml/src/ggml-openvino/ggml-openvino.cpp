@@ -40,6 +40,7 @@
 struct ggml_backend_openvino_buffer_type_context {
     int device;
     std::string name;
+    bool is_host;
 };
 
 static bool is_stateful_enabled() {
@@ -113,6 +114,7 @@ GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_openvino_buffer_type(in
         for (int i = 0; i < device_count; i++) {
             buffer_type_contexts[i].device = i;
             buffer_type_contexts[i].name = std::string(GGML_OPENVINO_NAME) + std::to_string(i);
+            buffer_type_contexts[i].is_host = false;
 
             buffer_types[i] = ggml_backend_buffer_type{
                 /* .iface   = */ ggml_backend_openvino_buffer_type_interface,
@@ -165,6 +167,7 @@ GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_openvino_host_buffer_ty
         for (int i = 0; i < device_count; i++) {
             buffer_type_contexts[i].device = i;
             buffer_type_contexts[i].name = std::string(GGML_OPENVINO_NAME) + std::to_string(i) + "_HOST";
+            buffer_type_contexts[i].is_host = true;
 
             buffer_types[i] = ggml_backend_buffer_type{
                 /* .iface   = */ ggml_backend_openvino_host_buffer_type_interface,
@@ -178,11 +181,19 @@ GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_openvino_host_buffer_ty
 }
 
 bool ggml_backend_buft_is_openvino(ggml_backend_buffer_type_t buft) {
-    return buft->iface.get_name == ggml_backend_openvino_buffer_type_get_name;
+    if (buft == nullptr || buft->device == nullptr || buft->device->reg != ggml_backend_openvino_reg()) {
+        return false;
+    }
+    auto * ctx = static_cast<ggml_backend_openvino_buffer_type_context *>(buft->context);
+    return !ctx->is_host;
 }
 
 bool ggml_backend_buft_is_openvino_host(ggml_backend_buffer_type_t buft) {
-    return buft->iface.get_name == ggml_backend_openvino_host_buffer_type_get_name;
+    if (buft == nullptr || buft->device == nullptr || buft->device->reg != ggml_backend_openvino_reg()) {
+        return false;
+    }
+    auto * ctx = static_cast<ggml_backend_openvino_buffer_type_context *>(buft->context);
+    return ctx->is_host;
 }
 
 static void ggml_backend_openvino_free(ggml_backend_t backend) {
