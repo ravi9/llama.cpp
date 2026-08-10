@@ -8,6 +8,9 @@
 #include <openvino/runtime/tensor.hpp>
 
 static constexpr size_t GGML_QUANTIZATION_GROUP_SIZE = 32;
+static constexpr size_t MXFP4_BLOCK_SIZE = 32;
+static constexpr size_t MXFP4_BLOCK_QS_SIZE = MXFP4_BLOCK_SIZE / 2;
+static constexpr size_t MXFP4_BLOCK_BYTES = sizeof(uint8_t) + MXFP4_BLOCK_QS_SIZE;
 
 // If for_gather_matmul is true, the weight tensor may be N-D (e.g. 3D MoE expert weights
 // [n_expert, rows, cols]). The dequantization chain (Convert->[Subtract]->Multiply) is built as
