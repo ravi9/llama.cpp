@@ -8,10 +8,10 @@
 #include <cstdint>
 #include <cstring>
 #include <map>
+#include <set>
 #include <memory>
 #include <openvino/core/partial_shape.hpp>
 #include <optional>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -250,7 +250,9 @@ public:
         return m_model_weights;
     }
 
-    virtual std::set<std::string> get_model_output_names() const override { return m_model_output_names; }
+    virtual std::set<std::string> get_model_output_names() const override {
+        return std::set<std::string>(m_model_output_names.begin(), m_model_output_names.end());
+    }
 
     const std::map<std::string, ggml_tensor *> & get_model_outputs() const { return m_model_outputs; }
 
@@ -353,6 +355,11 @@ public:
     // cgraph instance with the same graph_key, and every cached ggml_tensor* (and m_cgraph itself)
     // then dangles, so callers must compare and refresh.
     const ggml_cgraph * get_cgraph() const { return m_cgraph; }
+
+    // Was this decoder built for a graph with the same OUTPUT set as `cgraph`? The cache key is
+    // only (n_nodes, first/last node name), which cannot see a change in which tensors are marked
+    // as outputs, and the compiled model's Results are fixed at compile time.
+    bool has_same_graph_io(const ggml_cgraph * cgraph) const;
 
     inline static bool is_inp_tok(const ggml_tensor * tensor, const ggml_tensor * op) {
         return op->op == GGML_OP_GET_ROWS && tensor == op->src[1] && op->src[0]->op == GGML_OP_NONE;
@@ -469,7 +476,9 @@ private:
     std::map<std::string, ov::frontend::ggml::ModelExtraInputInfo> m_model_extra_inputs;
     std::map<std::string, std::shared_ptr<ov::Node>> m_model_weights;
     std::map<std::string, ggml_tensor *> m_model_outputs;
-    std::set<std::string> m_model_output_names;
+    std::vector<std::string> m_model_output_names;
+    // The output set the compiled model was built from, for has_same_graph_io().
+    std::set<std::string> m_built_output_names;
     std::vector<NodeInfo> m_node_info_list;
     std::map<ggml_tensor *, int> m_node_dynamic_dims;
 
