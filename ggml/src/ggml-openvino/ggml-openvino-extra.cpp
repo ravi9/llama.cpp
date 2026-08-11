@@ -56,6 +56,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_RELEASE_WEIGHTS",
         "GGML_OPENVINO_REDUCE_COMPILE_MEM",
         "GGML_OPENVINO_LOG_UNSUPPORTED_OPS",
+        "GGML_OPENVINO_LOG_SWA_LAYERS",
     };
 
     for (const char * const & env_var : env_var_names) {
