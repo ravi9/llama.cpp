@@ -834,6 +834,11 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
 // Step 1 compares each node's recorded use_count with actual fan-out references in node->src.
 // Step 2 verifies that node inputs come from model nodes/weights/leafs; external sources imply split.
 bool is_model_splitted(ggml_cgraph * cgraph) {
+    static const bool fallback_enabled = ggml_openvino_getenv_int("GGML_OPENVINO_ENABLE_FALLBACK") != 0;
+    if (!fallback_enabled) {
+        return false;
+    }
+
     // Backend op tests execute each node through ggml_graph_view(), which preserves the original
     // graph use_counts while exposing only one node. Treat those single-node views as regular
     // naive graphs so intermediate ops do not look like split-model fragments.
