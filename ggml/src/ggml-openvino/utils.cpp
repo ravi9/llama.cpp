@@ -15,6 +15,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <unistd.h>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -657,6 +659,14 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
         conversion_end_time = decoder_end_time;
         compile_end_time = decoder_end_time;
     } else {
+        // Same fail-fast as the dynamic path: once the host weight pages have been dropped
+        // they read as zeros, so a recompile here would bake garbage into the new model.
+        if (ggml_openvino_weight_buffers_released()) {
+            GGML_ABORT(
+                "ggml-openvino: a new graph needs to be compiled but host weight buffers were already "
+                "released via GGML_OPENVINO_RELEASE_WEIGHTS/GGML_OPENVINO_COMPILE_FROM_IR. This mode requires "
+                "stable graph shapes; disable host weight release for dynamic workloads.");
+        }
         if (cache_enabled) {
             std::lock_guard<std::mutex> map_lock(r_ctx->ctx_mutex);
             r_ctx->infer_request_cache.erase(key);
@@ -694,6 +704,33 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
             ov::serialize(model_decode, timestamped_filename);
         }
 
+        // GGML_OPENVINO_COMPILE_FROM_IR: the weight Constants are zero-copy views into
+        // anonymous host buffers, which the compiler keeps resident for the whole compile.
+        // Round-tripping through an on-disk IR makes them file-backed (read_model mmaps the
+        // .bin), so the kernel can evict them under pressure instead of counting them as
+        // unreclaimable anon. Costs a serialize + the disk space; saves ~the weight size at
+        // peak. Both models are serialized before the host buffers are dropped, since the
+        // release zeroes the pages every Constant still points at.
+        std::filesystem::path ir_scratch;
+        if (ggml_openvino_getenv_int("GGML_OPENVINO_COMPILE_FROM_IR")) {
+            ir_scratch = std::filesystem::temp_directory_path() /
+                         ("ggml_ov_ir_" + std::to_string(static_cast<long long>(getpid())));
+            std::filesystem::create_directories(ir_scratch);
+            const auto prefill_xml = (ir_scratch / "prefill.xml").string();
+            const auto decode_xml = (ir_scratch / "decode.xml").string();
+            ov::serialize(model_prefill, prefill_xml);
+            ov::serialize(model_decode, decode_xml);
+
+            model_prefill.reset();
+            model_decode.reset();
+            if (!ggml_openvino_weight_buffers_released()) {
+                ggml_openvino_release_weight_buffers();
+            }
+
+            model_prefill = core.read_model(prefill_xml);
+            model_decode = core.read_model(decode_xml);
+        }
+
         ov::CompiledModel compiled_model_prefill;
         ov::CompiledModel compiled_model_decode;
         auto remote_context = ggml_openvino_get_remote_context();
@@ -708,6 +745,11 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
         auto infer_request_prefill = std::make_shared<ov::InferRequest>(compiled_model_prefill.create_infer_request());
         auto infer_request_decode = std::make_shared<ov::InferRequest>(compiled_model_decode.create_infer_request());
         compile_end_time = ggml_time_us();
+
+        if (!ir_scratch.empty()) {
+            std::error_code ec;
+            std::filesystem::remove_all(ir_scratch, ec);
+        }
 
         model = is_prefill ? model_prefill : model_decode;
         ggml_decoder = is_prefill ? ggml_decoder_prefill : ggml_decoder_decode;
