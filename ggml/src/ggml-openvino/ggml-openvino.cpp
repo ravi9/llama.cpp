@@ -1173,6 +1173,10 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
             // GGML_LOG_WARN("OpenVINO backend does not support CPY with non-contiguous data or bf16 types\n");
             return true;
         }
+        // CPY to a quantized destination (e.g. f32 -> q4_0) is numerically unstable with OpenVINO backend.
+        if (ggml_is_quantized(op->type)) {
+            return true;
+        }
         if (ggml_nelements(op->src[0]) != ggml_nelements(op->src[1])) {
             return true;
         }
