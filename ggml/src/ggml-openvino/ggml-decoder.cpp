@@ -357,6 +357,18 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         break;
     }
     case GGML_OP_VIEW: {
+        if (m_is_static && node->src[0] != nullptr &&
+            (node->src[0]->op == GGML_OP_GATED_DELTA_NET || node->src[0]->op == GGML_OP_CONCAT)) {
+            // VIEW slicing a GATED_DELTA_NET combined [attn|state] output, or the conv_input
+            // CONCAT. The consuming CPY/RMS_NORM op recovers the true window at runtime via
+            // ssm_state_size / the fixed conv kernel width, so this VIEW must stay an identity
+            // pass-through of the full source here too (it already is on the dynamic path);
+            // otherwise the generic static-mode Slice below would bake in the *captured*
+            // cgraph's token count, which is wrong once the compiled static model runs with a
+            // different token count (prefill chunk size or 1).
+            op_case = 1;
+            break;
+        }
         if (node->src[0]->op == GGML_OP_VIEW) {
             auto * src = node->src[0];
             if (ggml_nelements(node) != ggml_nelements(src)) {
@@ -712,10 +724,8 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
                 ComputeParams::RsWriteback writeback;
                 writeback.slot_begin = (int) (dest_view->view_offs / row_bytes);
                 if (is_conv) {
-                    // conv_input column the copied window starts at
                     writeback.src_begin = (int) (node->src[0]->view_offs / node->src[0]->view_src->nb[0]);
                 } else if (is_gdn) {
-                    // first row of the state part of the gated-delta-net output
                     writeback.src_begin = (int) (node->src[0]->view_offs / node->src[0]->view_src->nb[1]);
                 }
                 compute_params.rs_writebacks[get_tensor_ov_name(cgraph, node)] = writeback;
@@ -800,7 +810,9 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
         input_shape = ov::PartialShape{1, 1, 1, len};
 
     } else if (is_inp_s_copy(input, op) || is_s_copy_leaf(input)) {
-        input_shape = ov::PartialShape{1, 1, 1, -1};
+        // On NPU the total slot count (n_seq_max) is fixed at translation time, so the s_copy
+        // index list has a static length; on CPU/GPU it may change across compiles (defrag).
+        input_shape = m_is_static ? ov::PartialShape{get_shape(input)} : ov::PartialShape{1, 1, 1, -1};
 
     } else {
         input_shape = ov::PartialShape{get_shape(input)};
@@ -852,8 +864,8 @@ void GgmlOvDecoder::add_extra_inputs() {
     //     see llama_kv_cache_unified::get_n_kv and llama_kv_cache_unified::get_padding.
     // 2. `n_seq_active` and `seq_active_start`, used in FLASH_ATTN_EXT to indicate the active sequences in the batch
 
-    auto create_1d_input = [this](const std::string & name, int64_t value) {
-        m_model_extra_inputs[name] = {ov::element::i64, ov::Shape{1}, value, !m_is_static};
+    auto create_1d_input = [this](const std::string & name, int64_t value, bool force_parameter = false) {
+        m_model_extra_inputs[name] = {ov::element::i64, ov::Shape{1}, value, force_parameter || !m_is_static};
     };
 
     if (m_compute_params.attention_size != -1) {
@@ -874,17 +886,32 @@ void GgmlOvDecoder::add_extra_inputs() {
     // create_1d_input("token_len", m_compute_params.token_len_per_seq * m_compute_params.n_seq_active);
 
     if (m_compute_params.cache_rs_reset_idx != -1) {
-        create_1d_input("cache_rs_reset_idx", m_compute_params.cache_rs_reset_idx);
-        create_1d_input("cache_rs_reset_len", m_compute_params.cache_rs_reset_len);
+        // Whether/which cache slot to reset varies per compute call (e.g. a new sequence starting
+        // vs. continued decoding). can_reuse_statically() does not invalidate the cached static
+        // model on ComputeParams changes, so these must stay runtime Parameters even when static
+        // (scale.cpp op_case 1 only uses them in value comparisons, never as Slice bounds, so this
+        // does not reintroduce dynamic shapes).
+        create_1d_input("cache_rs_reset_idx", m_compute_params.cache_rs_reset_idx, /*force_parameter=*/true);
+        create_1d_input("cache_rs_reset_len", m_compute_params.cache_rs_reset_len, /*force_parameter=*/true);
     }
 
     if (m_compute_params.s_copy_active_slot_len != -1) {
         create_1d_input("s_copy_active_slot_len", m_compute_params.s_copy_active_slot_len);
+        if (m_is_static) {
+            // Number of real tokens in the current prefill chunk. The last chunk is padded with
+            // fabricated token ids; attention masks them out, but the recurrent (GDN/conv) path
+            // would otherwise fold them into cache_r/cache_s permanently. Varies per chunk, so it
+            // must stay a runtime Parameter; it is only compared against a Range or used as Gather
+            // indices, so it does not make any shape dynamic.
+            create_1d_input("chunk_valid_len", get_static_n_tokens(), /*force_parameter=*/true);
+        }
     }
 
     for (const auto & [node_name, writeback] : m_compute_params.rs_writebacks) {
         create_1d_input("rs_slot_begin_" + node_name, writeback.slot_begin);
-        create_1d_input("rs_src_begin_" + node_name, writeback.src_begin);
+        if (!m_is_static) {
+            create_1d_input("rs_src_begin_" + node_name, writeback.src_begin);
+        }
     }
 }
 
@@ -1850,13 +1877,23 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
                     auto dynamic_dim_stride = src_logical_nb[dynamic_dim_idx] / ggml_type_size(node->src[0]->type) *
                                               ggml_type_size(node->type);
                     int matched_dim_count = 0;
+                    int first_matched_dim = -1;
                     for (int i = 0; i < GGML_MAX_DIMS; i++) {
                         if (node->nb[i] == dynamic_dim_stride && node->ne[i] == node->src[0]->ne[dynamic_dim_idx]) {
+                            if (first_matched_dim == -1) {
+                                first_matched_dim = i;
+                            }
                             m_node_dynamic_dims[node] = i;
                             matched_dim_count++;
                         }
                     }
-                    if (matched_dim_count != 1) {
+                    if (matched_dim_count > 1 && node->src[0]->ne[dynamic_dim_idx] == 1) {
+                        // Single-token capture: every trailing dim is size 1 with the same stride, so
+                        // the match is ambiguous. The lowest index is the real axis; the rest are
+                        // ggml's size-1 padding. Bailing out here would bake the captured token count
+                        // into the static prefill model, which then runs with a different one.
+                        m_node_dynamic_dims[node] = first_matched_dim;
+                    } else if (matched_dim_count != 1) {
                         m_node_dynamic_dims[node] = -1;
                         GGML_LOG_WARN("ggml-openvino: cannot determine dynamic dim for CONT node '%s', src[0]: '%s'\n",
                                       node->name, node->src[0]->name);

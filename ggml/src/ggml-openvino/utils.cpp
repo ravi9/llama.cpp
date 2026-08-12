@@ -48,7 +48,7 @@ enum ggml_status ov_graph_compute(ggml_cgraph * cgraph, ggml_backend_t backend) 
             GgmlOvDecoder::dump_cgraph(cgraph, filename);
         }
 
-        const auto is_static = ggml_openvino_is_npu();
+        const auto is_static = ggml_openvino_is_npu() || ggml_openvino_getenv_int("GGML_OPENVINO_FORCE_STATIC");
 
         GGML_ASSERT(ctx->runtime_context != nullptr);
         std::shared_ptr<ov_runtime_context> r_ctx = std::static_pointer_cast<ov_runtime_context>(ctx->runtime_context);
@@ -594,7 +594,9 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
         return chunk_size;
     };
 
-    static std::string device = "NPU";
+    // Normally NPU, but honors GGML_OPENVINO_DEVICE so GGML_OPENVINO_FORCE_STATIC can run the
+    // static-shape path on CPU/GPU to isolate translation bugs from NPUW/NPU-driver issues.
+    static std::string device = ggml_openvino_get_device_name();
     static auto is_static = true;
     static auto stateful = false;
 
@@ -614,7 +616,7 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
     std::tie(m_params, c_params) = GgmlOvDecoder::compute_llm_params(cgraph, is_static);
 
     const auto * inp_pos = get_inp_pos_tensor(cgraph);
-    const auto is_prefill = get_is_prefill(inp_pos);
+    const auto is_prefill = get_is_prefill(cgraph, inp_pos);
     graph_key key(cgraph);
     static const bool cache_enabled = !ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_CACHE");
     bool cache_hit = false;
@@ -753,7 +755,7 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
     }
 
     if (is_prefill) {
-        auto inp_len = inp_pos->ne[0];
+        auto inp_len = get_inp_pos_n_tokens(cgraph, inp_pos);
         for (int chunk_index = 0; chunk_index * prefill_chunk_size < inp_len; chunk_index++) {
             for (size_t i = 0; i < ov_input_names_local.size(); i++) {
                 auto param_name = ov_input_names_local[i];
@@ -773,6 +775,11 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
                     continue;
                 }
                 auto * ggml_tensor = model_output_it->second;
+                if (ggml_nbytes(ggml_tensor) == 0) {
+                    // Zero-row in-place writeback (e.g. the empty s_copy defrag remainder). The OV
+                    // Result is the full cache, so binding it over this 0-byte buffer overflows it.
+                    continue;
+                }
                 auto output_tensor = create_ov_output_tensor(ggml_decoder, infer_request, i, ggml_tensor);
                 infer_request->set_output_tensor(i, output_tensor);
             }
@@ -809,6 +816,9 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
                 continue;
             }
             auto * ggml_tensor = model_output_it->second;
+            if (ggml_nbytes(ggml_tensor) == 0) {
+                continue;
+            }
             auto output_tensor = create_ov_output_tensor(ggml_decoder, infer_request, i, ggml_tensor);
             infer_request->set_output_tensor(i, output_tensor);
         }
@@ -1085,6 +1095,9 @@ ov::Tensor get_ov_input_tensor(std::shared_ptr<GgmlOvDecoder> ggml_decoder, cons
 ov::Tensor get_ov_input_tensor_static_decode(std::shared_ptr<GgmlOvDecoder> ggml_decoder,
                                              const std::string & param_name) {
     // NPU decoding stage
+    if (ggml_decoder->get_model_extra_inputs().count(param_name)) {
+        return get_ov_input_tensor(ggml_decoder, param_name);
+    }
     const auto * ggml_tensor = ggml_decoder->get_input_ggml_tensor(param_name);
     const auto * op = ggml_decoder->get_tensor_used_op(ggml_tensor);
 
@@ -1134,13 +1147,29 @@ ov::Tensor get_ov_input_tensor_static_prefill(std::shared_ptr<GgmlOvDecoder> ggm
                                               const std::string & param_name,
                                               int chunk_index) {
     // NPU prompt processing stage
-    const auto * ggml_tensor = ggml_decoder->get_input_ggml_tensor(param_name);
-    const auto * op = ggml_decoder->get_tensor_used_op(ggml_tensor);
-
     const size_t input_len = ggml_decoder->get_input_len();
     const size_t chunk_size = ggml_decoder->m_prefill_chunk_size;
     const size_t chunk_valid_size = std::min(chunk_size, input_len - chunk_index * chunk_size);
     const size_t chunk_pad_size = chunk_size - chunk_valid_size;
+
+    if (param_name == "chunk_valid_len") {
+        ov::Tensor input_tensor(ov::element::i64, ov::Shape{1});
+        *input_tensor.data<int64_t>() = (int64_t) chunk_valid_size;
+        return input_tensor;
+    }
+    if (chunk_index > 0 && param_name == "cache_rs_reset_len") {
+        // The recurrent-state clear belongs to the start of the sequence. Re-applying it on every
+        // chunk would wipe the state accumulated by the preceding chunks, so disable it (a zero
+        // length makes scale.cpp's keep-mask select every slot) after the first chunk.
+        ov::Tensor input_tensor(ov::element::i64, ov::Shape{1});
+        *input_tensor.data<int64_t>() = 0;
+        return input_tensor;
+    }
+    if (ggml_decoder->get_model_extra_inputs().count(param_name)) {
+        return get_ov_input_tensor(ggml_decoder, param_name);
+    }
+    const auto * ggml_tensor = ggml_decoder->get_input_ggml_tensor(param_name);
+    const auto * op = ggml_decoder->get_tensor_used_op(ggml_tensor);
 
     if (GgmlOvDecoder::is_inp_pos(ggml_tensor, op) && GgmlOvDecoder::get_inp_pos_n_planes(op) > 1) {
         // IMROPE: inp_pos stacks n_planes (t/h/w/e) position planes, each of length
@@ -1425,8 +1454,24 @@ const ggml_tensor * get_inp_pos_tensor(ggml_cgraph * cgraph) {
     throw std::runtime_error("get_inp_pos_tensor: inp_pos not found in cgraph");
 }
 
-bool get_is_prefill(const ggml_tensor * inp_pos) {
-    return inp_pos->ne[0] > 1;
+int64_t get_inp_pos_n_tokens(ggml_cgraph * cgraph, const ggml_tensor * inp_pos) {
+    // IMROPE stacks n_planes (t/h/w/e) position planes into inp_pos, so ne[0] is
+    // n_planes * n_tokens. Callers that need a token count must divide the planes out.
+    int n_planes = 1;
+    for (int i = 0; i < cgraph->n_nodes; ++i) {
+        auto * op = cgraph->nodes[i];
+        for (int j = 0; j < GGML_MAX_SRC; ++j) {
+            if (op->src[j] == inp_pos) {
+                n_planes = GgmlOvDecoder::get_inp_pos_n_planes(op);
+                break;
+            }
+        }
+    }
+    return inp_pos->ne[0] / n_planes;
+}
+
+bool get_is_prefill(ggml_cgraph * cgraph, const ggml_tensor * inp_pos) {
+    return get_inp_pos_n_tokens(cgraph, inp_pos) > 1;
 }
 
 #pragma GCC diagnostic pop

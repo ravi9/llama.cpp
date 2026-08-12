@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <memory>
+#include <numeric>
 #include <openvino/frontend/exception.hpp>
 #include <openvino/op/add.hpp>
 #include <openvino/op/concat.hpp>
@@ -30,7 +31,6 @@ namespace op {
 
 OutputVector translate_cpy(const NodeContext & context) {
     auto op_case = context.get_op_case();
-    auto input = process_view_input_new(context, 0);
     auto input_shape = context.get_input_shape(0);
     auto output_shape = context.get_input_shape(1);
 
@@ -69,10 +69,27 @@ OutputVector translate_cpy(const NodeContext & context) {
         return rename_outputs_with_suffix({res}, context.get_name());
     }
 
-    // Recurrent state cache writeback into a slot block of the cache. Where the block starts and
-    // where the copied data starts in the source are runtime inputs, so the cached model works for
-    // any kv head, active sequence count and token count. The result is the full updated cache.
+    // Recurrent state cache writeback into a slot block of the cache. Where the block starts is a
+    // runtime input, so the cached model works for any kv head and active sequence count. The
+    // result is the full updated cache.
     // op_case 1: gated-delta-net state, op_case 2: conv state, op_case 3: defrag remainder.
+    if (op_case == 3) {
+        // With -np 1 (and generally whenever there is no defrag remainder) this GET_ROWS gathers
+        // zero rows: nothing to write back, and the cache is unchanged. NPU rejects zero-size
+        // tensors, so short-circuit instead of building a degenerate Slice/Concat chain.
+        bool is_empty = false;
+        if (input_shape.rank().is_static()) {
+            for (const auto & d : input_shape) {
+                if (d.is_static() && d.get_length() == 0) {
+                    is_empty = true;
+                    break;
+                }
+            }
+        }
+        if (is_empty) {
+            return {context.get_input(1)};
+        }
+    }
     const std::string slot_begin_name = "rs_slot_begin_" + context.get_name();
     const bool slice_assign =
         context.has_input(slot_begin_name) && !context.is_stateful() && (op_case >= 1 && op_case <= 3);
@@ -89,19 +106,49 @@ OutputVector translate_cpy(const NodeContext & context) {
         ov::Output<ov::Node> begin = context.get_input(slot_begin_name);
         auto base = context.get_input(1);
         if (op_case == 1) {
-            // GDN packs [attn | state snapshots]; the state part runs from src_begin to the end.
-            auto src_begin = context.get_input("rs_src_begin_" + context.get_name());
-            auto state_part = std::make_shared<ov::op::v8::Slice>(context.get_input(0), src_begin, int_max, one, axis);
+            ov::Output<ov::Node> state_begin;
+            const std::string src_begin_name = "rs_src_begin_" + context.get_name();
+            if (context.has_input(src_begin_name)) {
+                state_begin = context.get_input(src_begin_name);
+            } else {
+                auto ssm_state_size = context.get_ssm_state_size();
+                if (context.has_input("s_copy_active_slot_len")) {
+                    auto len = context.get_input("s_copy_active_slot_len");
+                    auto state_rows = std::make_shared<ov::op::v1::Multiply>(
+                        ov::op::v0::Constant::create(ov::element::i64, {1}, {ssm_state_size}), len);
+                    state_begin = std::make_shared<ov::op::v0::Negative>(state_rows);
+                } else {
+                    state_begin = ov::op::v0::Constant::create(ov::element::i64, {1}, {-ssm_state_size});
+                }
+            }
+            auto state_part =
+                std::make_shared<ov::op::v8::Slice>(context.get_input(0), state_begin, int_max, one, axis);
             src = std::make_shared<ov::op::v1::Reshape>(state_part, feature, false);
         } else if (op_case == 2) {
-            // conv_input is [previous conv state | new tokens]; copy the conv_kernel_size - 1 wide
-            // window starting at src_begin, which is the snapshot this writeback corresponds to.
+            // conv_input is [previous conv state | new tokens]; the snapshot is the conv_kernel_size - 1
+            // columns ending at the last *valid* token. Gather (rather than Slice) keeps the output
+            // shape static even though the window start is a runtime value.
             auto window_size = (int64_t) input_shape[3].get_length();
-            auto src_begin = context.get_input("rs_src_begin_" + context.get_name());
-            auto src_end = std::make_shared<ov::op::v1::Add>(
-                src_begin, ov::op::v0::Constant::create(ov::element::i64, {1}, {window_size}));
-            auto window = std::make_shared<ov::op::v8::Slice>(context.get_input(0), src_begin, src_end, one,
-                                                              ov::op::v0::Constant::create(ov::element::i64, {1}, {3}));
+            ov::Output<ov::Node> window;
+            auto col_axis = ov::op::v0::Constant::create(ov::element::i64, {1}, {3});
+            const std::string src_begin_name = "rs_src_begin_" + context.get_name();
+            if (context.has_input(src_begin_name)) {
+                auto src_begin = context.get_input(src_begin_name);
+                auto src_end = std::make_shared<ov::op::v1::Add>(
+                    src_begin, ov::op::v0::Constant::create(ov::element::i64, {1}, {window_size}));
+                window = std::make_shared<ov::op::v8::Slice>(context.get_input(0), src_begin, src_end, one, col_axis);
+            } else if (context.has_input("chunk_valid_len")) {
+                std::vector<int64_t> offsets(window_size);
+                std::iota(offsets.begin(), offsets.end(), 0);
+                auto indices = std::make_shared<ov::op::v1::Add>(
+                    ov::op::v0::Constant::create(ov::element::i64, {(size_t) window_size}, offsets),
+                    context.get_input("chunk_valid_len"));
+                window = std::make_shared<ov::op::v8::Gather>(context.get_input(0), indices, col_axis);
+            } else {
+                auto window_begin = ov::op::v0::Constant::create(ov::element::i64, {1}, {-window_size});
+                window =
+                    std::make_shared<ov::op::v8::Slice>(context.get_input(0), window_begin, int_max, one, col_axis);
+            }
             const auto base_shape = base.get_partial_shape();
             FRONT_END_OP_CONVERSION_CHECK(base_shape.rank().is_static() && base_shape.rank().get_length() == 4,
                                           "CPY conv state cache update requires rank-4 base cache");
@@ -162,6 +209,8 @@ OutputVector translate_cpy(const NodeContext & context) {
         auto res = std::make_shared<ov::op::v0::Concat>(ov::OutputVector{head_part, src, tail_part}, slot_axis);
         return rename_outputs_with_suffix({res}, context.get_name());
     }
+
+    auto input = process_view_input_new(context, 0);
 
     if (op_case == 5 || op_case == 6) {
         auto input_shape = context.get_input_shape(0);
