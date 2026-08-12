@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ggml.h"
+#include "ggml-openvino-quantization.h"
 #include "openvino/runtime/core.hpp"
 
 #define CL_TARGET_OPENCL_VERSION 300
@@ -13,9 +14,6 @@
 #include <openvino/runtime/tensor.hpp>
 #include <optional>
 #include <string>
-
-// ExtraQuantType enum - defines requantization target formats
-enum class ExtraQuantType { F16, Q4_0_C, Q8_1_C, Q4_0_128, Q8_0_C, Q8_0_32 };
 
 ov::Core & ov_singleton_core();
 
@@ -104,17 +102,6 @@ bool ggml_openvino_release_weights_enabled(const std::string & device);
 // Check if running on NPU
 bool ggml_openvino_is_npu();
 
-// Host weight-buffer release (GGML_OPENVINO_RELEASE_WEIGHTS, GPU only).
-// register: record a host weight buffer (idempotent per data pointer).
-// release:  madvise(MADV_DONTNEED) all registered buffers, dropping their RSS.
-// released: true once release has run (used to fail-fast on post-release recompile).
-void ggml_openvino_register_weight_buffer(void * data, size_t size);
-void ggml_openvino_release_weight_buffers();
-bool ggml_openvino_weight_buffers_released();
-
-// Get requantization type for a tensor type (returns nullopt if no requant needed)
-std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor * tensor, bool no_requant = false);
-
 // =====================================================
 // OpenVINO Tensor Extra Types
 // =====================================================
@@ -167,33 +154,8 @@ struct ggml_openvino_tensor_extra : public ggml_openvino_extra_base {
         tensor(std::move(t)) {}
 };
 
-// =====================================================
-// Extracted Size Calculation for Quantized Tensors
-// =====================================================
-// For quantized tensors, we need extra space to store extracted weights, scales, and zero points.
-// Returns the total size needed in the buffer for extracted data.
-
-struct ggml_openvino_extracted_layout {
-    size_t total_size = 0;      // Total bytes needed
-    size_t weights_offset = 0;  // Offset to weights in buffer
-    size_t weights_size = 0;    // Size of weights in bytes
-    size_t scales_offset = 0;   // Offset to scales in buffer
-    size_t scales_size = 0;     // Size of scales in bytes
-    size_t zp_offset = 0;       // Offset to zero points in buffer
-    size_t zp_size = 0;         // Size of zero points in bytes (U4 or U8)
-    bool is_u4;                 // true for U4 weights, false for U8
-    int64_t weights_per_block;  // weights per scale/zp block
-    bool is_symmetric;          // true for symmetric quantization
-
-    // Requantization info
-    bool is_requant = false;                     // true if this tensor needs requantization
-    std::optional<ExtraQuantType> requant_type;  // target requant type if is_requant
-};
-
-// Calculate the buffer layout for extracted quantized data
-ggml_openvino_extracted_layout ggml_openvino_get_extracted_layout(const ggml_tensor * tensor, bool use_bias = false);
-
-ggml_openvino_tensor_extra * ggml_openvino_create_tensor_extra(const ggml_tensor * tensor, bool is_remote);
+std::unique_ptr<ggml_openvino_tensor_extra> ggml_openvino_create_tensor_extra_unique(const ggml_tensor * tensor,
+                                                                                     bool is_remote);
 
 // Check if a tensor's buffer uses remote (device) memory (e.g. GPU USM)
 bool ggml_openvino_buffer_is_remote(const ggml_tensor * tensor);

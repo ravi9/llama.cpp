@@ -213,7 +213,7 @@ OutputVector translate_mul_mat_id(const NodeContext & context) {
 
     // General (non-packed) path: dense F32/F16/BF16 weights, or the f16 dequantization chain for
     // quantized MoE experts (see extract_quantized_weights / make_int4_weights / make_int8_weights in
-    // ggml-quants.cpp). Routed through ov::op::internal::GatherMatmul instead of a naive
+    // ggml-openvino-quant-weights.cpp). Routed through ov::op::internal::GatherMatmul instead of a naive
     // Gather+Broadcast+MatMul, so the selected expert's full weight matrix is never materialized per
     // token. The CPU plugin's ConvertGatherMatmulToGatherMatmulCompressed pass (run during
     // compile_model) fuses the dequantization chain feeding GatherMatmul's B input into a

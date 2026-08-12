@@ -1,10 +1,10 @@
 #pragma once
-#include "ggml-openvino-extra.h"  // For ExtraQuantType
 #include "ggml.h"
+#include "ggml-openvino-quantization.h"
 
 #include <cstdint>
-#include <openvino/op/constant.hpp>
 #include <openvino/core/node_output.hpp>
+#include <openvino/op/constant.hpp>
 #include <openvino/runtime/tensor.hpp>
 
 void unpack_32_4(const uint8_t * data, uint8_t * dst);
@@ -53,6 +53,9 @@ void extract_q6_k_data(const ggml_tensor * tensor,
 void extract_mxfp4_data(const ggml_tensor * tensor, ov::Tensor & weights_arr, ov::Tensor & scales_arr);
 
 static constexpr size_t GGML_QUANTIZATION_GROUP_SIZE = 32;
+static constexpr size_t MXFP4_BLOCK_SIZE = 32;
+static constexpr size_t MXFP4_BLOCK_QS_SIZE = MXFP4_BLOCK_SIZE / 2;
+static constexpr size_t MXFP4_BLOCK_BYTES = sizeof(uint8_t) + MXFP4_BLOCK_QS_SIZE;
 
 // If for_gather_matmul is true, the weight tensor may be N-D (e.g. 3D MoE expert weights
 // [n_expert, rows, cols]). The dequantization chain (Convert->[Subtract]->Multiply) is built as
@@ -107,25 +110,6 @@ std::shared_ptr<ov::Node> requantize_to_buffers(const ggml_tensor * tensor,
                                                 ov::Tensor & weights,
                                                 ov::Tensor & scales,
                                                 ov::Tensor & zp);
-
-inline const char * extra_quant_type_name(ExtraQuantType t) {
-    switch (t) {
-    case ExtraQuantType::F16:
-        return "F16";
-    case ExtraQuantType::Q4_0_C:
-        return "Q4_0_C";
-    case ExtraQuantType::Q4_0_128:
-        return "Q4_0_128";
-    case ExtraQuantType::Q8_0_C:
-        return "Q8_0_C";
-    case ExtraQuantType::Q8_0_32:
-        return "Q8_0_32";
-    case ExtraQuantType::Q8_1_C:
-        return "Q8_1_C";
-    default:
-        return "unknown";
-    }
-}
 
 // Result from process_weight_tensor containing the weight node and tensors.
 // For quantized weights, also contains the extracted layout and scale/zp tensors.

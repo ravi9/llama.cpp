@@ -3,7 +3,7 @@
 #include "ggml-impl.h"
 #include "ggml-openvino-extra.h"
 #include "ggml-openvino.h"
-#include "ggml-quants.h"
+#include "ggml-openvino-quant-weights.h"
 #include "ggml.h"
 #include "utils.h"
 
