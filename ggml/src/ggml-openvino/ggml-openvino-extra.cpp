@@ -42,6 +42,9 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_DUMP_IR",
         "GGML_OPENVINO_DEBUG_INPUT",
         "GGML_OPENVINO_DEBUG_OUTPUT",
+        // Force the static (NPU-shape) compute path on any device, e.g. GGML_OPENVINO_DEVICE=CPU,
+        // to test the static-shape translation without NPUW/real NPU hardware in the loop.
+        "GGML_OPENVINO_FORCE_STATIC",
         "GGML_OPENVINO_PRINT_CGRAPH_TENSOR_ADDRESS",
         "GGML_OPENVINO_ENABLE_CACHE",
         "GGML_OPENVINO_DISABLE_CACHE",
