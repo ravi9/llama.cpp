@@ -104,14 +104,6 @@ bool ggml_openvino_release_weights_enabled(const std::string & device);
 // Check if running on NPU
 bool ggml_openvino_is_npu();
 
-// Host weight-buffer release (GGML_OPENVINO_RELEASE_WEIGHTS, GPU only).
-// register: record a host weight buffer (idempotent per data pointer).
-// release:  madvise(MADV_DONTNEED) all registered buffers, dropping their RSS.
-// released: true once release has run (used to fail-fast on post-release recompile).
-void ggml_openvino_register_weight_buffer(void * data, size_t size);
-void ggml_openvino_release_weight_buffers();
-bool ggml_openvino_weight_buffers_released();
-
 // Get requantization type for a tensor type (returns nullopt if no requant needed)
 std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor * tensor, bool no_requant = false);
 
@@ -193,7 +185,8 @@ struct ggml_openvino_extracted_layout {
 // Calculate the buffer layout for extracted quantized data
 ggml_openvino_extracted_layout ggml_openvino_get_extracted_layout(const ggml_tensor * tensor, bool use_bias = false);
 
-ggml_openvino_tensor_extra * ggml_openvino_create_tensor_extra(const ggml_tensor * tensor, bool is_remote);
+std::unique_ptr<ggml_openvino_tensor_extra> ggml_openvino_create_tensor_extra_unique(const ggml_tensor * tensor,
+                                                                                     bool is_remote);
 
 // Check if a tensor's buffer uses remote (device) memory (e.g. GPU USM)
 bool ggml_openvino_buffer_is_remote(const ggml_tensor * tensor);
