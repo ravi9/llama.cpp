@@ -71,6 +71,10 @@ struct ggml_backend_openvino_buffer_context {
     void * data;
     size_t size;
     bool is_remote;
+    // Host-addressable memory allocated by the plugin (ov::RemoteContext::create_host_tensor).
+    // Unlike is_remote it is a plain ov::Tensor, so every host path keeps working; the plugin
+    // imports it directly instead of staging a private copy per infer.
+    bool plugin_host;
 
     // Set when the buffer is a file-backed spill mapping (GGML_OPENVINO_SPILL_DIR); it must be
     // munmap'd rather than freed.
@@ -86,7 +90,7 @@ struct ggml_backend_openvino_buffer_context {
     // Used for re-allocation on device for kvcache
     void * data_prev;
 
-    ggml_backend_openvino_buffer_context(int device, size_t size, bool is_remote = false) :
+    ggml_backend_openvino_buffer_context(int device, size_t size, bool is_remote = false, bool plugin_host = false) :
         device(device),
         name(std::string(GGML_OPENVINO_NAME) + std::to_string(device)),
         id([]() {
@@ -95,7 +99,8 @@ struct ggml_backend_openvino_buffer_context {
         }()),
         data(nullptr),
         size(size),
-        is_remote(is_remote) {
+        is_remote(is_remote),
+        plugin_host(plugin_host) {
         if (size == 0) {
             return;
         }
@@ -110,6 +115,14 @@ struct ggml_backend_openvino_buffer_context {
                 gpu_context.create_usm_device_tensor(ov::element::u8, ov::Shape{size});
             data = usm_tensor.get();
             ov_buffer = std::make_shared<ov::intel_gpu::ocl::USMTensor>(std::move(usm_tensor));
+        } else if (plugin_host) {
+            auto host_tensor =
+                ov_singleton_core().get_default_context(device_name).create_host_tensor(ov::element::u8,
+                                                                                       ov::Shape{size});
+            data = host_tensor.data();
+            GGML_ASSERT(data);
+            memset(data, 0, size);
+            ov_buffer = std::make_shared<ov::Tensor>(std::move(host_tensor));
         } else {
 #ifndef _WIN32
             if (const char * spill_dir = ggml_openvino_getenv_str("GGML_OPENVINO_SPILL_DIR")) {
@@ -188,7 +201,7 @@ struct ggml_backend_openvino_buffer_context {
             munmap(spill_mapping, spill_size);
         } else
 #endif
-        if (!is_remote && data != nullptr) {
+        if (!is_remote && !plugin_host && data != nullptr) {
             ggml_aligned_free(data, size);
         }
     }
@@ -303,6 +316,22 @@ static enum ggml_status ggml_backend_openvino_buffer_init_tensor(ggml_backend_bu
         auto * data_prev = ctx->data;
         delete ctx;
         ctx = new ggml_backend_openvino_buffer_context(device, size, true);
+        buffer->context = ctx;
+        tensor->data = (char *) ctx->data + ((char *) tensor->data - (char *) data_prev);
+    }
+
+    // On NPU the kvcache is both a graph input and output, so ordinary host memory makes the
+    // plugin stage a private copy of it on every infer. Re-allocating it in plugin host memory
+    // lets the plugin import it directly and drops that duplicate (~1 kvcache of RSS).
+    if (strncmp(tensor->name, "cache_", 6) == 0 && !ctx->is_remote && !ctx->plugin_host &&
+        ggml_openvino_get_device_name() == "NPU" && !is_stateful_enabled() &&
+        ggml_openvino_getenv_int("GGML_OPENVINO_NPU_HOST_KV")) {
+        GGML_ASSERT(ctx->tensor_extras.empty());
+        auto device = ctx->device;
+        auto size = ctx->size;
+        auto * data_prev = ctx->data;
+        delete ctx;
+        ctx = new ggml_backend_openvino_buffer_context(device, size, false, true);
         buffer->context = ctx;
         tensor->data = (char *) ctx->data + ((char *) tensor->data - (char *) data_prev);
     }
