@@ -2,6 +2,7 @@
 
 #include "ggml-impl.h"
 #include "ggml-openvino-extra.h"
+#include "ggml-openvino-weight-buffer-release.h"
 #include "ggml-openvino/ggml-decoder.h"
 #include "ggml.h"
 #include "model-cache.h"
@@ -39,6 +40,10 @@
 // Suppress  deprecation warning for ov::Tensor::data()
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+
+bool ggml_openvino_is_stateful_enabled() {
+    return ggml_openvino_getenv_int("GGML_OPENVINO_STATEFUL_EXECUTION") != 0;
+}
 
 enum ggml_status ov_graph_compute(ggml_cgraph * cgraph, ggml_backend_t backend) {
     ggml_backend_openvino_context * ctx = (ggml_backend_openvino_context *) backend->context;

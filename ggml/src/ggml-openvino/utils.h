@@ -128,6 +128,8 @@ enum ggml_status ov_graph_compute(struct ggml_cgraph * cgraph, ggml_backend_t ba
 enum ggml_status ov_graph_compute_dynamic(struct ggml_cgraph * cgraph, std::shared_ptr<ov_runtime_context> r_ctx);
 enum ggml_status ov_graph_compute_static(struct ggml_cgraph * cgraph, std::shared_ptr<ov_runtime_context> r_ctx);
 
+bool ggml_openvino_is_stateful_enabled();
+
 size_t checksum(const void * data, size_t size);
 
 bool save_ggml_tensor_data_to_txt(const ggml_tensor * tensor, const std::string & file_path);

@@ -438,7 +438,8 @@ ggml_openvino_extracted_layout ggml_openvino_get_extracted_layout(const ggml_ten
     return layout;
 }
 
-ggml_openvino_tensor_extra * ggml_openvino_create_tensor_extra(const ggml_tensor * tensor, bool is_remote) {
+std::unique_ptr<ggml_openvino_tensor_extra> ggml_openvino_create_tensor_extra_unique(const ggml_tensor * tensor,
+                                                                                     bool is_remote) {
     ov::Shape shape;
     for (int i = GGML_MAX_DIMS - 1; i >= 0; --i) {
         shape.push_back(static_cast<size_t>(tensor->ne[i]));
@@ -479,5 +480,5 @@ ggml_openvino_tensor_extra * ggml_openvino_create_tensor_extra(const ggml_tensor
         ov_tensor = std::make_shared<ov::Tensor>(element_type, shape, tensor->data);
     }
 
-    return new ggml_openvino_tensor_extra(ov_tensor);
+    return std::make_unique<ggml_openvino_tensor_extra>(ov_tensor);
 }
