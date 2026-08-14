@@ -254,7 +254,7 @@ public:
 
     const std::map<std::string, ggml_tensor *> & get_model_outputs() const { return m_model_outputs; }
 
-    virtual int get_ctx_size() const { return m_model_params.ctx; }
+    virtual int get_ctx_size() const override { return m_model_params.ctx; }
 
     virtual int get_ctx_per_seq() const { return m_model_params.ctx_per_seq; }
 
@@ -289,6 +289,8 @@ public:
     virtual int32_t * get_rope_params() const override { return const_cast<int32_t *>(m_model_params.rope_params); }
 
     virtual bool has_mixed_rope_params() const override { return m_model_params.mixed_rope_params; }
+
+    virtual const std::vector<float> & get_rope_freqs_data() const override { return m_rope_freqs_data; }
 
     virtual int get_ssm_state_size() const override { return m_model_params.state_size; }
 
@@ -447,6 +449,9 @@ private:
 
     void validate_cgraph() const;
 
+    // Copy the ROPE freq_factors weight to the host so sin/cos can be tabulated at conversion time.
+    void collect_rope_freqs();
+
     ggml_cgraph * m_cgraph = nullptr;
     std::map<std::string, ggml_tensor *> m_inputs;
 
@@ -457,6 +462,8 @@ private:
     std::set<std::string> m_model_output_names;
     std::vector<NodeInfo> m_node_info_list;
     std::map<ggml_tensor *, int> m_node_dynamic_dims;
+
+    std::vector<float> m_rope_freqs_data;
 
     ModelParams m_model_params;
     ComputeParams m_compute_params;

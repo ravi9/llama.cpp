@@ -8,6 +8,7 @@
 #include <openvino/frontend/decoder.hpp>
 #include <set>
 #include <string>
+#include <vector>
 
 namespace ov {
 namespace frontend {
@@ -112,6 +113,11 @@ public:
     virtual int32_t * get_rope_params() const = 0;
 
     virtual bool has_mixed_rope_params() const = 0;
+
+    virtual int get_ctx_size() const = 0;
+
+    // Host-side values of the ROPE freq_factors input (src[2]); empty if the model has none.
+    virtual const std::vector<float> & get_rope_freqs_data() const = 0;
 
     virtual int get_ssm_state_size() const = 0;
 

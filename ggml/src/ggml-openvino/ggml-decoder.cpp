@@ -64,6 +64,7 @@ GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph,
 
     validate_cgraph();
 
+    collect_rope_freqs();
     set_input_output();
     compute_node_dynamic_dims();
     compute_model_inputs();
@@ -75,6 +76,23 @@ GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph,
     }
 
     add_extra_inputs();
+}
+
+void GgmlOvDecoder::collect_rope_freqs() {
+    m_rope_freqs_data.clear();
+    for (int i = 0; i < m_cgraph->n_nodes; i++) {
+        const ggml_tensor * node = m_cgraph->nodes[i];
+        if (node->op != GGML_OP_ROPE || node->src[2] == nullptr) {
+            continue;
+        }
+        const ggml_tensor * freqs = node->src[2];
+        if (freqs->type != GGML_TYPE_F32 || freqs->buffer == nullptr || !ggml_backend_buffer_is_host(freqs->buffer)) {
+            return;
+        }
+        const auto * data = (const float *) freqs->data;
+        m_rope_freqs_data.assign(data, data + ggml_nelements(freqs));
+        return;
+    }
 }
 
 void GgmlOvDecoder::update_io(ggml_cgraph * cgraph) {

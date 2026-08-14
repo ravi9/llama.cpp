@@ -4,6 +4,7 @@
 #include "ggml-openvino/ggml-openvino-extra.h"
 #include "ggml-openvino/openvino/node_context.h"
 #include "ggml-openvino/openvino/utils.h"
+#include "ggml.h"
 #include "input_model.h"
 #include "pass/fuse_to_conv.h"
 #include "pass/kv_state_seq_axis.h"
@@ -13,8 +14,10 @@
 #include "rt_info/weightless_caching_attributes.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <openvino/core/node.hpp>
@@ -237,11 +240,98 @@ void add_rope_sin_cos(TensorMap & tensor_map, GgmlDecoder & ggml_model_decoder) 
     tensor_map.insert({"rope_sin", sin_theta});
 }
 
+// Tabulate cos/sin for every position at conversion time and expose the tables as a single
+// Gather on inp_pos. Without this each ROPE op rebuilds its own theta chain and Cos/Sin, so a
+// 32-layer model carries 64 copies of an identical, tiny subgraph - pure dispatch overhead on
+// NPU. Restricted to the flat NORMAL/NEOX position encoding: MROPE/VISION/IMROPE index
+// positions per section, and YaRN (ext_factor != 0) mixes two theta ramps, neither of which a
+// [pos, n_dims/2] table can express.
+void add_rope_sin_cos_precomputed(TensorMap & tensor_map, GgmlDecoder & ggml_model_decoder) {
+    if (ggml_model_decoder.has_mixed_rope_params() || ggml_model_decoder.is_stateful()) {
+        return;
+    }
+    int32_t * rope_params = ggml_model_decoder.get_rope_params();
+    if (rope_params == nullptr || tensor_map.find("inp_pos") == tensor_map.end()) {
+        return;
+    }
+
+    const int n_dims = rope_params[1];
+    const int mode = rope_params[2];
+    const int ctx = ggml_model_decoder.get_ctx_size();
+    if (n_dims <= 0 || n_dims % 2 != 0 || ctx <= 0) {
+        return;
+    }
+    if (mode != GGML_ROPE_TYPE_NORMAL && mode != GGML_ROPE_TYPE_NEOX) {
+        return;
+    }
+
+    float freq_base, freq_scale, ext_factor, attn_factor;
+    memcpy(&freq_base, rope_params + 5, sizeof(float));
+    memcpy(&freq_scale, rope_params + 6, sizeof(float));
+    memcpy(&ext_factor, rope_params + 7, sizeof(float));
+    memcpy(&attn_factor, rope_params + 8, sizeof(float));
+    if (ext_factor != 0.0f) {
+        return;
+    }
+
+    const size_t half = (size_t) n_dims / 2;
+    const auto & rope_freqs = ggml_model_decoder.get_rope_freqs_data();
+    const bool has_freqs = !rope_freqs.empty();
+    if (has_freqs && rope_freqs.size() < half) {
+        return;
+    }
+
+    const float theta_scale = powf(freq_base, -2.0f / n_dims);
+    std::vector<float> inv_freq(half);
+    inv_freq[0] = 1.0f;
+    for (size_t i = 1; i < half; i++) {
+        inv_freq[i] = theta_scale * inv_freq[i - 1];
+    }
+    if (has_freqs) {
+        for (size_t i = 0; i < half; i++) {
+            inv_freq[i] /= rope_freqs[i];
+        }
+    }
+
+    std::vector<float> cos_table((size_t) ctx * half);
+    std::vector<float> sin_table((size_t) ctx * half);
+    for (int p = 0; p < ctx; p++) {
+        for (size_t i = 0; i < half; i++) {
+            const float theta = (float) p * inv_freq[i] * freq_scale;
+            cos_table[(size_t) p * half + i] = cosf(theta) * attn_factor;
+            sin_table[(size_t) p * half + i] = sinf(theta) * attn_factor;
+        }
+    }
+
+    // make_sin_cos() yields [1, seq, 1, n_dims/2] on the stateless path; match it exactly so
+    // every downstream ROPE branch broadcasts as before.
+    auto inp_pos = tensor_map.at("inp_pos");
+    auto pos_flat = std::make_shared<v1::Reshape>(
+        inp_pos, v0::Constant::create(ov::element::i64, {1}, {-1}), false);
+    auto gather_axis = v0::Constant::create(ov::element::i64, ov::Shape{}, {0});
+    auto out_shape = v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{1, -1, 1, (int64_t) half});
+
+    const ov::Shape table_shape{(size_t) ctx, half};
+    auto make_table = [&](const std::vector<float> & table, const char * name) -> Output<Node> {
+        auto tab = v0::Constant::create(ov::element::f32, table_shape, table);
+        auto gathered = std::make_shared<v8::Gather>(tab, pos_flat, gather_axis);
+        auto reshaped = std::make_shared<v1::Reshape>(gathered, out_shape, false);
+        reshaped->set_friendly_name(name);
+        return reshaped->output(0);
+    };
+
+    tensor_map.insert({"rope_cos", make_table(cos_table, "rope_cos")});
+    tensor_map.insert({"rope_sin", make_table(sin_table, "rope_sin")});
+}
+
 // Create common patterns
 void preprocess(TensorMap & tensor_map, GgmlDecoder & ggml_model_decoder) {
     if (ggml_model_decoder.is_stateful()) {
         add_sliced_mask_stateful(tensor_map);
         add_position_mask_stateful_swa(tensor_map);
+    }
+    if (ggml_openvino_getenv_int("GGML_OPENVINO_ROPE_PRECOMPUTE")) {
+        add_rope_sin_cos_precomputed(tensor_map, ggml_model_decoder);
     }
     // This optimization is error-prone
     // add_rope_sin_cos(tensor_map, ggml_model_decoder);
