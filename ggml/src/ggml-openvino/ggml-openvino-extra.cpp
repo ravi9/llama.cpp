@@ -35,6 +35,9 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_DEBUG_NODE",
         "GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR",
         "GGML_OPENVINO_NPU_COMPILE_CONFIG",
+        "GGML_OPENVINO_NPU_COMPILER_TYPE",
+        "GGML_OPENVINO_NPUW_FUNCALL_FOR_ALL",
+        "GGML_OPENVINO_NPUW_UNFOLD_IREQS",
         // Integer values (use ggml_openvino_getenv_int)
         "GGML_OPENVINO_PREFILL_CHUNK_SIZE",
         // Boolean toggles (treated as int flags via ggml_openvino_getenv_int)
@@ -98,6 +101,24 @@ void ggml_openvino_device_config::init() {
             ggml_openvino_getenv_str("GGML_OPENVINO_NPU_COMPILE_CONFIG");
         if (compilation_mode_params && strlen(compilation_mode_params) > 0) {
             compile_config["NPU_COMPILATION_MODE_PARAMS"] = compilation_mode_params;
+        }
+        // PLUGIN | DRIVER | PREFER_PLUGIN. The in-plugin compiler and the driver compiler
+        // can differ substantially in generated code quality for the same op.
+        const char * compiler_type = ggml_openvino_getenv_str("GGML_OPENVINO_NPU_COMPILER_TYPE");
+        if (compiler_type && strlen(compiler_type) > 0) {
+            compile_config["NPU_COMPILER_TYPE"] = compiler_type;
+        }
+        // NPUW_FUNCALL_FOR_ALL=YES hangs the NPU (device lost via TDR) for context
+        // lengths >= ~786 on the 2026.3 in-plugin compiler. Allow turning it off.
+        const char * funcall_for_all = ggml_openvino_getenv_str("GGML_OPENVINO_NPUW_FUNCALL_FOR_ALL");
+        if (funcall_for_all && strlen(funcall_for_all) > 0) {
+            compile_config["NPUW_FUNCALL_FOR_ALL"] = funcall_for_all;
+        }
+        // Unfolds function calls into separate infer requests, trading memory for the
+        // per-call dispatch overhead that repeated funcalls otherwise pay.
+        const char * unfold_ireqs = ggml_openvino_getenv_str("GGML_OPENVINO_NPUW_UNFOLD_IREQS");
+        if (unfold_ireqs && strlen(unfold_ireqs) > 0) {
+            compile_config["NPUW_UNFOLD_IREQS"] = unfold_ireqs;
         }
     } else if (cache_dir && strlen(cache_dir) > 0) {
         compile_config.insert(ov::cache_dir(cache_dir));
