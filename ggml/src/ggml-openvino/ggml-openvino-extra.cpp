@@ -31,6 +31,7 @@ void ggml_openvino_device_config::init() {
         // String values (use ggml_openvino_getenv_str)
         "GGML_OPENVINO_DEVICE",
         "GGML_OPENVINO_CACHE_DIR",
+        "GGML_OPENVINO_SPILL_DIR",
         "GGML_OPENVINO_DEBUG_NODE",
         "GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR",
         "GGML_OPENVINO_NPU_COMPILE_CONFIG",

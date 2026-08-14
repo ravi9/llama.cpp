@@ -10,7 +10,10 @@
 #include "ggml.h"
 
 #include <atomic>
+#include <cerrno>
+#include <climits>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -24,6 +27,11 @@
 #include <set>
 #include <string>
 #include <vector>
+
+#ifndef _WIN32
+#    include <sys/mman.h>
+#    include <unistd.h>
+#endif
 
 #if defined(_WIN32)
 #    define WIN32_LEAN_AND_MEAN
@@ -64,6 +72,11 @@ struct ggml_backend_openvino_buffer_context {
     size_t size;
     bool is_remote;
 
+    // Set when the buffer is a file-backed spill mapping (GGML_OPENVINO_SPILL_DIR); it must be
+    // munmap'd rather than freed.
+    void * spill_mapping = nullptr;
+    size_t spill_size = 0;
+
     // Wrapping of the buffer
     std::shared_ptr<ov::Tensor> ov_buffer;
 
@@ -98,10 +111,56 @@ struct ggml_backend_openvino_buffer_context {
             data = usm_tensor.get();
             ov_buffer = std::make_shared<ov::intel_gpu::ocl::USMTensor>(std::move(usm_tensor));
         } else {
-            data = ggml_aligned_malloc(size);
-            GGML_ASSERT(data);
-            memset(data, 0, size);
-            ov_buffer = std::make_shared<ov::Tensor>(ov::element::u8, ov::Shape{size}, data);
+#ifndef _WIN32
+            if (const char * spill_dir = ggml_openvino_getenv_str("GGML_OPENVINO_SPILL_DIR")) {
+                // Disk-backed weight buffer: back the repacked weights with a temp file via MAP_SHARED
+                // instead of anonymous memory. Anonymous pages can only be evicted to swap, so the
+                // repacked buffer stays pinned alongside the mmap'd source and both are resident at once
+                // -- that double residency is the load-time peak. File-backed pages are reclaimable: the
+                // kernel can write them back and drop them under pressure, then re-read on demand, so RSS
+                // becomes a working set rather than the whole buffer. The file is unlinked immediately,
+                // so it disappears when the process exits.
+                //
+                // The directory must be real storage. Pointing this at a tmpfs mount (/tmp on many
+                // systems) backs the "spill" with RAM and makes matters worse.
+                char path[PATH_MAX];
+                snprintf(path, sizeof(path), "%s/ggml-ov-weights-%d-XXXXXX", spill_dir, (int) getpid());
+                int fd = mkstemp(path);
+                if (fd < 0) {
+                    GGML_LOG_ERROR("%s: mkstemp(%s) failed: %s\n", __func__, path, strerror(errno));
+                    return;
+                }
+                unlink(path);  // anonymous-but-file-backed: freed on process exit
+                if (ftruncate(fd, (off_t) size) != 0) {
+                    GGML_LOG_ERROR("%s: ftruncate(%zu) failed: %s\n", __func__, size, strerror(errno));
+                    close(fd);
+                    return;
+                }
+                void * m = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+                close(fd);  // the mapping keeps the file alive
+                if (m == MAP_FAILED) {
+                    GGML_LOG_ERROR("%s: mmap(%zu) failed: %s\n", __func__, size, strerror(errno));
+                    return;
+                }
+                data = m;
+                spill_mapping = m;
+                spill_size = size;
+                GGML_LOG_INFO("%s: weight buffer spilled to %s (%zu MB, file-backed)\n", __func__, spill_dir,
+                              size / 1024 / 1024);
+                ov_buffer = std::make_shared<ov::Tensor>(ov::element::u8, ov::Shape{size}, data);
+            } else
+#endif
+            {
+#ifdef _WIN32
+                if (ggml_openvino_getenv_str("GGML_OPENVINO_SPILL_DIR")) {
+                    GGML_LOG_WARN("%s: GGML_OPENVINO_SPILL_DIR is not supported on Windows, ignoring\n", __func__);
+                }
+#endif
+                data = ggml_aligned_malloc(size);
+                GGML_ASSERT(data);
+                memset(data, 0, size);
+                ov_buffer = std::make_shared<ov::Tensor>(ov::element::u8, ov::Shape{size}, data);
+            }
         }
 
         if (data == nullptr) {
@@ -124,6 +183,11 @@ struct ggml_backend_openvino_buffer_context {
             delete pair.second;
         }
         tensor_extras.clear();
+#ifndef _WIN32
+        if (spill_mapping != nullptr) {
+            munmap(spill_mapping, spill_size);
+        } else
+#endif
         if (!is_remote && data != nullptr) {
             ggml_aligned_free(data, size);
         }
