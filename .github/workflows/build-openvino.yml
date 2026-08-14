@@ -78,18 +78,16 @@ jobs:
 
       - name: Test (CPU)
         id: cmake_test_cpu
-        # TODO: fix and re-enable the `test-llama-archs` test below
         run: |
           cd ${{ github.workspace }}
-          ctest --test-dir build/ReleaseOV -L main -E "test-llama-archs" --verbose --timeout 2000
+          ctest --test-dir build/ReleaseOV -L main --verbose --timeout 2000
 
       - name: Test (GPU)
         id: cmake_test_gpu
-        # TODO: fix and re-enable the `test-llama-archs` test below
         run: |
           cd ${{ github.workspace }}
           export GGML_OPENVINO_DEVICE=GPU
-          ctest --test-dir build/ReleaseOV -L main -E "test-llama-archs" --verbose --timeout 3000
+          ctest --test-dir build/ReleaseOV -L main --verbose --timeout 3000
 
   openvino-windows-2022:
     runs-on: windows-2022
@@ -159,11 +157,10 @@ jobs:
       - name: Test (CPU)
         id: cmake_test_cpu
         shell: cmd
-        # TODO: fix and re-enable the `test-llama-archs` test below
         run: |
           REM Find extracted OpenVINO folder dynamically
           for /d %%i in (openvino_toolkit\*) do set OPENVINO_ROOT=%%i
           call "%OPENVINO_ROOT%\setupvars.bat"
 
           cd build
-          ctest --test-dir ReleaseOV -L main -E "test-llama-archs" -C Release --verbose --timeout 3000
+          ctest --test-dir ReleaseOV -L main -C Release --verbose --timeout 3000

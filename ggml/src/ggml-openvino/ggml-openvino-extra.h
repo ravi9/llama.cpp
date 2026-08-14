@@ -193,7 +193,8 @@ struct ggml_openvino_extracted_layout {
 // Calculate the buffer layout for extracted quantized data
 ggml_openvino_extracted_layout ggml_openvino_get_extracted_layout(const ggml_tensor * tensor, bool use_bias = false);
 
-ggml_openvino_tensor_extra * ggml_openvino_create_tensor_extra(const ggml_tensor * tensor, bool is_remote);
+std::unique_ptr<ggml_openvino_tensor_extra> ggml_openvino_create_tensor_extra_unique(const ggml_tensor * tensor,
+                                                                                     bool is_remote);
 
 // Check if a tensor's buffer uses remote (device) memory (e.g. GPU USM)
 bool ggml_openvino_buffer_is_remote(const ggml_tensor * tensor);
