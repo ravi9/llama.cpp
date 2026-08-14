@@ -63,6 +63,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_LOG_SWA_LAYERS",
         "GGML_OPENVINO_REQUANT_KQUANT",
         "GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT",
+        "GGML_OPENVINO_TOKEN_EMBD_I4",
     };
 
     for (const char * const & env_var : env_var_names) {
@@ -279,8 +280,15 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
         return std::nullopt;
     }
     if (strncmp(tensor->name, "token_embd.weight", 17) == 0) {
-        return ((ggml_openvino_is_npu() && tensor->type == GGML_TYPE_Q6_K) ? ExtraQuantType::F16 :
-                                                                             ExtraQuantType::Q8_0_C);
+        // GGML_OPENVINO_TOKEN_EMBD_I4 opts the table into group-128 int4. Only worth it for a
+        // tied embedding, where the table is also the lm_head weight - see gather_compressed_rows.
+        if (ggml_openvino_is_npu() && tensor->type == GGML_TYPE_Q6_K) {
+            if (ggml_openvino_getenv_int("GGML_OPENVINO_TOKEN_EMBD_I4")) {
+                return ExtraQuantType::Q4_0_128;
+            }
+            return ExtraQuantType::F16;
+        }
+        return ExtraQuantType::Q8_0_C;
     }
     if (strncmp(tensor->name, "output.weight", 13) == 0) {
         return ExtraQuantType::Q8_0_C;
