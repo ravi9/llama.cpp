@@ -64,6 +64,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_REQUANT_KQUANT",
         "GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT",
         "GGML_OPENVINO_TOKEN_EMBD_I4",
+        "GGML_OPENVINO_TOKEN_EMBD_I8",
         "GGML_OPENVINO_NPU_HOST_KV",
         "GGML_OPENVINO_ROPE_PRECOMPUTE",
     };
@@ -287,6 +288,13 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
         if (ggml_openvino_is_npu() && tensor->type == GGML_TYPE_Q6_K) {
             if (ggml_openvino_getenv_int("GGML_OPENVINO_TOKEN_EMBD_I4")) {
                 return ExtraQuantType::Q4_0_128;
+            }
+            // GGML_OPENVINO_TOKEN_EMBD_I8 opts the table into per-channel int8 - the same
+            // ExtraQuantType the CPU/GPU path uses below. It sits between group-128 int4 and
+            // fp16: the table stays on the NPU host buffer (a Q6_K table left at F16 falls
+            // back to CPU) while keeping more precision than int4. I4 wins if both are set.
+            if (ggml_openvino_getenv_int("GGML_OPENVINO_TOKEN_EMBD_I8")) {
+                return ExtraQuantType::Q8_0_C;
             }
             return ExtraQuantType::F16;
         }
