@@ -235,7 +235,20 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
             if (cache_hit) {
                 entry = it->second;
             } else {
-                r_ctx->clear_caches_locked();
+                // r_ctx (and therefore this cache) is shared across every ggml_backend
+                // sharing this model (see backend_count / ggml_backend_openvino_free) --
+                // that includes multiple llama_context objects decoding concurrently on
+                // separate threads. Wiping the whole cache here used to assume only one
+                // graph shape is ever live at a time, which is only true for sequential
+                // single-context use: with concurrent contexts of the same model, a miss
+                // for context B's shape would evict context A's still-in-flight entry
+                // (and vice versa), causing a full-recompile ping-pong between them and,
+                // in the stateful path (utils.h:102), stale reads of infer_request_cache
+                // for a key another thread just tore down. Just add the new entry instead
+                // -- for the intended single-shape-per-session case this is a no-op (the
+                // cache only ever gets its one entry, so there was never anything to clear
+                // in the first place); for concurrent multi-context use it lets each
+                // context's shape coexist without evicting the others.
                 auto mutex = std::make_shared<std::mutex>();
                 entry = std::make_shared<decoder_runtime_ctx>(mutex);
                 r_ctx->decoder_cache[key] = entry;
