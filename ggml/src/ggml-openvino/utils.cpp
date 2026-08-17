@@ -16,6 +16,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -700,32 +702,55 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
                                                                    stateful, false, false, prefill_chunk_size);
         decoder_end_time = ggml_time_us();
 
-        auto input_model_prefill = std::make_shared<ov::frontend::ggml::InputModel>(ggml_decoder_prefill);
-        auto input_model_decode = std::make_shared<ov::frontend::ggml::InputModel>(ggml_decoder_decode);
+        const bool dump_ir = ggml_openvino_getenv_int("GGML_OPENVINO_DUMP_IR");
+        const auto dump_ir_timestamp = static_cast<long long>(ggml_time_us());
 
-        auto model_prefill = ov::frontend::ggml::FrontEnd::convert(input_model_prefill);
-        ggml_decoder_prefill->clear_model_weights();
-        auto model_decode = ov::frontend::ggml::FrontEnd::convert(input_model_decode);
-        ggml_decoder_decode->clear_model_weights();
-        conversion_end_time = ggml_time_us();
+        auto build_static_model = [&core, &config, dump_ir, dump_ir_timestamp](
+                          std::shared_ptr<GgmlOvDecoder> decoder,
+                          const char * tag,
+                          std::shared_ptr<ov::Model> & model,
+                          ov::CompiledModel & compiled_model,
+                          std::shared_ptr<ov::InferRequest> & infer_request,
+                          int64_t & local_conversion_end_time,
+                          int64_t & local_compile_end_time) {
+            auto input_model = std::make_shared<ov::frontend::ggml::InputModel>(decoder);
+            model = ov::frontend::ggml::FrontEnd::convert(input_model);
+            decoder->clear_model_weights();
+            local_conversion_end_time = ggml_time_us();
 
-        if (ggml_openvino_getenv_int("GGML_OPENVINO_DUMP_IR")) {
-            char timestamped_filename[64];
-            auto timestamp = (long long) ggml_time_us();
-            snprintf(timestamped_filename, sizeof(timestamped_filename), "model_prefill_%lld.xml", timestamp);
-            ov::serialize(model_prefill, timestamped_filename);
-            snprintf(timestamped_filename, sizeof(timestamped_filename), "model_decode_%lld.xml", timestamp);
-            ov::serialize(model_decode, timestamped_filename);
-        }
+            if (dump_ir) {
+                char timestamped_filename[64];
+                snprintf(timestamped_filename, sizeof(timestamped_filename), "model_%s_%lld.xml", tag,
+                         dump_ir_timestamp);
+                ov::serialize(model, timestamped_filename);
+            }
 
+            compiled_model = core.compile_model(model, device, config);
+            infer_request = std::make_shared<ov::InferRequest>(compiled_model.create_infer_request());
+            local_compile_end_time = ggml_time_us();
+        };
+        std::shared_ptr<ov::Model> model_prefill;
+        std::shared_ptr<ov::Model> model_decode;
         ov::CompiledModel compiled_model_prefill;
         ov::CompiledModel compiled_model_decode;
-        compiled_model_prefill = core.compile_model(model_prefill, device, config);
-        compiled_model_decode = core.compile_model(model_decode, device, config);
-
-        auto infer_request_prefill = std::make_shared<ov::InferRequest>(compiled_model_prefill.create_infer_request());
-        auto infer_request_decode = std::make_shared<ov::InferRequest>(compiled_model_decode.create_infer_request());
-        compile_end_time = ggml_time_us();
+        std::shared_ptr<ov::InferRequest> infer_request_prefill;
+        std::shared_ptr<ov::InferRequest> infer_request_decode;
+        int64_t prefill_conversion_end_time;
+        int64_t decode_conversion_end_time;
+        int64_t prefill_compile_end_time;
+        int64_t decode_compile_end_time;
+        auto prefill_future = std::async(std::launch::async, build_static_model, ggml_decoder_prefill, "prefill",
+                                         std::ref(model_prefill), std::ref(compiled_model_prefill),
+                                         std::ref(infer_request_prefill), std::ref(prefill_conversion_end_time),
+                                         std::ref(prefill_compile_end_time));
+        auto decode_future = std::async(std::launch::async, build_static_model, ggml_decoder_decode, "decode",
+                                        std::ref(model_decode), std::ref(compiled_model_decode),
+                                        std::ref(infer_request_decode), std::ref(decode_conversion_end_time),
+                                        std::ref(decode_compile_end_time));
+        prefill_future.get();
+        decode_future.get();
+        conversion_end_time = std::max(prefill_conversion_end_time, decode_conversion_end_time);
+        compile_end_time = std::max(prefill_compile_end_time, decode_compile_end_time);
 
         model = is_prefill ? model_prefill : model_decode;
         ggml_decoder = is_prefill ? ggml_decoder_prefill : ggml_decoder_decode;
