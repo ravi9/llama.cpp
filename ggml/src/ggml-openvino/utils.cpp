@@ -720,14 +720,8 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
 
         ov::CompiledModel compiled_model_prefill;
         ov::CompiledModel compiled_model_decode;
-        auto remote_context = ggml_openvino_get_remote_context();
-        if (remote_context.has_value()) {
-            compiled_model_prefill = core.compile_model(model_prefill, remote_context.value(), config);
-            compiled_model_decode = core.compile_model(model_decode, remote_context.value(), config);
-        } else {
-            compiled_model_prefill = core.compile_model(model_prefill, device, config);
-            compiled_model_decode = core.compile_model(model_decode, device, config);
-        }
+        compiled_model_prefill = core.compile_model(model_prefill, device, config);
+        compiled_model_decode = core.compile_model(model_decode, device, config);
 
         auto infer_request_prefill = std::make_shared<ov::InferRequest>(compiled_model_prefill.create_infer_request());
         auto infer_request_decode = std::make_shared<ov::InferRequest>(compiled_model_decode.create_infer_request());
