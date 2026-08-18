@@ -61,6 +61,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_LOG_SWA_LAYERS",
         "GGML_OPENVINO_REQUANT_KQUANT",
         "GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT",
+        "GGML_OPENVINO_LOG_SUPPORTS_OP",
     };
 
     for (const char * const & env_var : env_var_names) {
