@@ -236,6 +236,10 @@ public:
 
     ggml_tensor * get_input_ggml_tensor(const std::string & name) const { return m_inputs.at(name); }
 
+    // Every name get_input_ggml_tensor() accepts. Used to map a cached blob's port names
+    // back onto this run's tensors.
+    const std::map<std::string, ggml_tensor *> & get_inputs() const { return m_inputs; }
+
     virtual int get_op_case(int node_idx) const override { return m_node_info_list[node_idx].node_op_case; }
 
     virtual const std::map<std::string, ov::frontend::ggml::ModelInputInfo> & get_model_inputs() const override {

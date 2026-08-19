@@ -221,10 +221,14 @@ bool ggml_openvino_reduce_compile_mem_enabled() {
     return ggml_openvino_getenv_int("GGML_OPENVINO_MEMORY_OPTIMIZE") != 0;
 }
 
+// GPU releases once a graph is compiled (the plugin holds its own device copy). NPU
+// releases only after a compiled-model cache import, where the blob's weights come from
+// the cached bin instead; it is therefore opt-in via the explicit flag only, never
+// implied by GGML_OPENVINO_MEMORY_OPTIMIZE.
 bool ggml_openvino_release_weights_enabled(const std::string & device) {
     const char * release_weights = ggml_openvino_getenv_str("GGML_OPENVINO_RELEASE_WEIGHTS");
     if (release_weights != nullptr) {
-        return device == "GPU" && ggml_openvino_getenv_int("GGML_OPENVINO_RELEASE_WEIGHTS") != 0;
+        return (device == "GPU" || device == "NPU") && ggml_openvino_getenv_int("GGML_OPENVINO_RELEASE_WEIGHTS") != 0;
     }
     return device == "GPU" && ggml_openvino_getenv_int("GGML_OPENVINO_MEMORY_OPTIMIZE") != 0;
 }
