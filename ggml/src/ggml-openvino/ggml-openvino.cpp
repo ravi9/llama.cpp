@@ -1212,13 +1212,11 @@ static bool is_op_unsupported_case(const ggml_tensor * op) {
         if (op->src[0] != nullptr && op->src[0]->ne[2] <= 1) {
             return true;
         }
-        if (ggml_openvino_get_device_name() == "GPU" && op->src[0] != nullptr && op->src[0]->type == GGML_TYPE_BF16) {
+        if (ggml_openvino_get_device_name() == "GPU" && op->src[0] != nullptr && !ggml_is_quantized(op->src[0]->type)) {
             return true;
         }
-        // GPU MUL_MAT_ID uses a Gather+MatMul fallback because the GPU plugin rejects internal
-        // GatherMatmul for these test shapes. Skip cases that would materialize a large selected
-        // expert-weight temporary.
-        if (ggml_openvino_get_device_name() == "GPU" && mul_mat_id_requires_large_tmp(op)) {
+        if (ggml_openvino_get_device_name() == "GPU" && op->src[0] != nullptr && op->src[0]->type == GGML_TYPE_MXFP4 &&
+            mul_mat_id_requires_large_tmp(op)) {
             return true;
         }
         break;
