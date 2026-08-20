@@ -860,13 +860,16 @@ std::shared_ptr<ov::Node> requantize_to_buffers(const ggml_tensor * tensor,
     // a chunk of complete rows into a small scratch and quantize/convert it straight into
     // the output buffers, capping the transient F32 footprint at CHUNK_ROWS*ne0 floats.
     //
-    // Only valid (and only used) for the Q8_0_C / Q8_1_C / F16 targets whose block size
-    // divides a row (channel-wise _C uses block_size == ne0) so no target block straddles
-    // a row boundary, and Q8/F16 have no cross-block packing. The u4 (Q4_0) path packs two
-    // weights per byte with running zp ORs that assume a single whole-array call, so it is
-    // never streamed. When the flag is off, behavior is identical to the original
-    // full-materialization path.
-    const bool stream_requant = ggml_openvino_reduce_compile_mem_enabled() && !is_u4 &&
+    // Only valid when the target block size divides a row (channel-wise _C uses
+    // block_size == ne0) so no target block straddles a row boundary.
+    //
+    // u4 (Q4_0) is streamed too. Its weight nibbles pack strictly within a block, so the
+    // weight stream is chunk-safe. Its asymmetric zp packs two blocks per byte (even block
+    // assigns, odd block ORs the high nibble), which only stays intact if every chunk
+    // starts on an even block: CHUNK_ROWS below is even, and block_size divides the row,
+    // so blocks-per-chunk is even and every chunk boundary lands on an even block.
+    // When the flag is off, behavior is identical to the original full-materialization path.
+    const bool stream_requant = ggml_openvino_reduce_compile_mem_enabled() &&
                                 !(block_size > 0 && ne0 % block_size != 0);
 
     if (!stream_requant) {
@@ -890,8 +893,10 @@ std::shared_ptr<ov::Node> requantize_to_buffers(const ggml_tensor * tensor,
             quantize_q8_0(weights_f32.data(), weights, scales, zp, n_elements, block_size);
         }
     } else {
-        // Streaming path for Q8_0_C / Q8_1_C / F16 (covers token_embd, output.weight,
-        // and per-layer Q6_K/Q5_K requant — the large transient cases).
+        // Streaming path for Q4_0 (u4) / Q8_0_C / Q8_1_C / F16 — covers token_embd,
+        // output.weight, per-layer Q6_K/Q5_K requant, and (on NPU) every Q4_0_128 layer
+        // weight, which is where the bulk of the transient came from.
+        // CHUNK_ROWS must stay EVEN to keep u4's zp byte pairing on a chunk boundary.
         const int64_t CHUNK_ROWS = std::min<int64_t>(n_rows, 256);
         std::vector<float> scratch(CHUNK_ROWS * ne0);
         // F16 destination: 2 bytes/element, advanced per chunk by r0*ne0 elements.
@@ -907,7 +912,9 @@ std::shared_ptr<ov::Node> requantize_to_buffers(const ggml_tensor * tensor,
                     ->from_float_ref(scratch.data(), f16_base + (r0 * ne0) * sizeof(uint16_t), elems);
             } else {
                 const int64_t block_offset = (r0 * ne0) / block_size;
-                if (requant_type == ExtraQuantType::Q8_1_C) {
+                if (is_u4) {
+                    quantize_q4_0(scratch.data(), weights, scales, zp, elems, block_size, block_offset);
+                } else if (requant_type == ExtraQuantType::Q8_1_C) {
                     quantize_q8_1(scratch.data(), weights, scales, zp, elems, block_size, block_offset);
                 } else {
                     quantize_q8_0(scratch.data(), weights, scales, zp, elems, block_size, block_offset);
@@ -1102,16 +1109,23 @@ void quantize_q4_0(const float * x,
                    ov::Tensor & scales_arr,
                    ov::Tensor & zp_arr,
                    int64_t k,
-                   int64_t qk) {
+                   int64_t qk,
+                   int64_t block_offset) {
     assert(k % qk == 0);
     const int nb = k / qk;
+    // Chunked calls must land on an even block so the zp byte pairing stays intact.
+    assert(block_offset % 2 == 0);
 
-    auto * weights = static_cast<uint8_t *>(weights_arr.data());
-    auto * scales = scales_arr.data<ov::element_type_traits<ov::element::f16>::value_type>();
+    // Advance the destinations to this chunk's first block. Weight nibbles are packed
+    // strictly within a block (both nibbles of a byte come from the same block), so the
+    // weight stream is chunk-safe once offset; scales are one per block; zp is two
+    // blocks per byte, hence the /2.
+    auto * weights = static_cast<uint8_t *>(weights_arr.data()) + block_offset * qk / 2;
+    auto * scales = scales_arr.data<ov::element_type_traits<ov::element::f16>::value_type>() + block_offset;
     bool is_symmetric = (weights_arr.get_element_type() == ov::element::i4);  // Signed i4 path
 
     if (!is_symmetric) {
-        auto * zp = static_cast<uint8_t *>(zp_arr.data());
+        auto * zp = static_cast<uint8_t *>(zp_arr.data()) + block_offset / 2;
         for (int i = 0; i < nb; i++) {
             float amax = 0.0f;
             float max = 0.0f;

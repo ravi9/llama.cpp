@@ -157,12 +157,17 @@ OvWeight process_weight_tensor(
                                        // regardless of this flag, and also settable explicitly for
                                        // test-backend-ops.
 
+// block_offset shifts the destination block index, so a tensor can be quantized in
+// chunks. Chunks must start on an EVEN block: the asymmetric zp packs two blocks per
+// byte (even block assigns the byte, odd block ORs the high nibble), so a chunk
+// starting on an odd block would clobber the previous chunk's nibble.
 void quantize_q4_0(const float * x,
                    ov::Tensor & weights_arr,
                    ov::Tensor & scales_arr,
                    ov::Tensor & zp_arr,
                    int64_t k,
-                   int64_t qk);
+                   int64_t qk,
+                   int64_t block_offset = 0);
 void quantize_q8_1(const float * x,
                    ov::Tensor & weights_arr,
                    ov::Tensor & scales_arr,
