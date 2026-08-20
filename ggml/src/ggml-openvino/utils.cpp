@@ -297,6 +297,14 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
                 } else if (r_ctx->stateful_kv_size == static_cast<size_t>(pos_data[0])) {
                     r_ctx->stateful_kv_size += pos_shape[3];
                 } else {
+                    // Which axis of the KV state holds the sequence. Must match the condition
+                    // in pass::KVStateSeqAxis, which moves it from dim 1 to dim 2 when
+                    // n_heads_kv == 1 (see that pass for why only then).
+                    const size_t seq_axis =
+                        (!ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT") &&
+                         ggml_decoder->get_model_params().n_heads_kv == 1) ? 2 : 1;
+                    const size_t head_axis = seq_axis == 2 ? 1 : 2;
+
                     auto states = infer_request->query_state();
                     for (auto state : states) {
                         auto state_tensor = state.get_state();
@@ -311,14 +319,18 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
                                 return GGML_STATUS_FAILED;
                             }
                             auto kv_tensor = get_ov_input_tensor(ggml_decoder, state_name);
-                            kv_tensor.set_shape({state_tensor_shape[0], kv_tensor.get_shape()[2], state_tensor_shape[2],
-                                                 state_tensor_shape[3]});
+                            ov::Shape refill_shape(4);
+                            refill_shape[0] = state_tensor_shape[0];
+                            refill_shape[seq_axis] = kv_tensor.get_shape()[2];
+                            refill_shape[head_axis] = state_tensor_shape[head_axis];
+                            refill_shape[3] = state_tensor_shape[3];
+                            kv_tensor.set_shape(refill_shape);
                             state_tensor = kv_tensor;
                             state_tensor_shape = state_tensor.get_shape();
                         }
                         ov::Coordinate begin = {0, 0, 0, 0};
-                        ov::Coordinate end = {state_tensor_shape[0], static_cast<uint32_t>(pos_data[0]),
-                                              state_tensor_shape[2], state_tensor_shape[3]};
+                        ov::Coordinate end(state_tensor_shape.begin(), state_tensor_shape.end());
+                        end[seq_axis] = static_cast<uint32_t>(pos_data[0]);
                         ov::Tensor new_state_tensor(state_tensor, begin, end);
                         state.set_state(new_state_tensor);
                     }
