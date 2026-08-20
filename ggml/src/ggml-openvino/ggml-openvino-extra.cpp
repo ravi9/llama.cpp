@@ -33,6 +33,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_CACHE_DIR",
         "GGML_OPENVINO_DEBUG_NODE",
         "GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR",
+        "GGML_OPENVINO_NPU_COMPILE_CONFIG",
         // Integer values (use ggml_openvino_getenv_int)
         "GGML_OPENVINO_PREFILL_CHUNK_SIZE",
         // Boolean toggles (treated as int flags via ggml_openvino_getenv_int)
@@ -88,6 +89,11 @@ void ggml_openvino_device_config::init() {
         if (cache_dir && strlen(cache_dir) > 0) {
             compile_config["NPUW_CACHE_DIR"] = cache_dir;
             compile_config.insert(ov::cache_mode(ov::CacheMode::OPTIMIZE_SIZE));
+        }
+        const char * compilation_mode_params =
+            ggml_openvino_getenv_str("GGML_OPENVINO_NPU_COMPILE_CONFIG");
+        if (compilation_mode_params && strlen(compilation_mode_params) > 0) {
+            compile_config["NPU_COMPILATION_MODE_PARAMS"] = compilation_mode_params;
         }
     } else if (cache_dir && strlen(cache_dir) > 0) {
         compile_config.insert(ov::cache_dir(cache_dir));
