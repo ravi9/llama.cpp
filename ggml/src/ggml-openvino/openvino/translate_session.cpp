@@ -6,6 +6,7 @@
 #include "ggml-openvino/openvino/utils.h"
 #include "input_model.h"
 #include "pass/fuse_to_conv.h"
+#include "pass/kv_state_seq_axis.h"
 #include "pass/mark_decompression_convert_constant_folding.h"
 #include "pass/mark_dequantization_subgraph.h"
 #include "pass/squeeze_matmul.h"
@@ -404,6 +405,10 @@ std::shared_ptr<Model> TranslateSession::apply_transformations(std::shared_ptr<M
             const auto kv_param_res_names = ggml_model_decoder->get_kv_param_res_names();
             const auto kv_param_res_pairs = get_kv_param_res_pairs(model, kv_param_res_names);
             manager.register_pass<ov::pass::MakeStateful>(kv_param_res_pairs);
+            // Must run after MakeStateful, which is what creates the ReadValue/Assign pairs.
+            if (!ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT")) {
+                manager.register_pass<pass::KVStateSeqAxis>();
+            }
         }
 
         if (ggml_model_decoder->is_static()) {
