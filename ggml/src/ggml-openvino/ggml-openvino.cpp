@@ -222,10 +222,11 @@ struct ggml_backend_openvino_buffer_type_context {
 // weight for inference and can be dropped to reclaim RSS (~weights size).
 //
 // We do NOT free the buffer (ggml owns its lifetime and tensors still point
-// into it); instead madvise(MADV_DONTNEED) drops the resident pages while
-// keeping the mapping valid. A later recompile would re-read these Constants
-// from now-zeroed memory and produce garbage, so once released we fail fast
-// if the cache-miss compile branch is reached again (see utils.cpp).
+// into it); instead the resident pages are dropped while the mapping stays
+// valid -- madvise(MADV_DONTNEED) on posix, DiscardVirtualMemory on Windows.
+// A later recompile would re-read these Constants from now-zeroed memory and
+// produce garbage, so once released we fail fast if the cache-miss compile
+// branch is reached again (see utils.cpp).
 namespace {
 struct ov_weight_buffer_registry {
     std::mutex mutex;
@@ -267,7 +268,42 @@ void ggml_openvino_release_weight_buffers() {
         return;
     }
     size_t total = 0;
-#if !defined(_WIN32)
+#if defined(_WIN32)
+    // DiscardVirtualMemory is the MADV_DONTNEED analogue: it drops the resident
+    // pages while keeping the reservation valid, so tensors may still point into
+    // the buffer (contents are undefined afterwards, same as the posix path).
+    // Resolved dynamically because it needs Windows 8.1+; on older systems fall
+    // back to VirtualAlloc(MEM_RESET), which marks the contents discardable.
+    // Note both only act on private committed pages: weights loaded with
+    // --load-mode mmap are file-backed and will not be dropped here.
+    using discard_fn = DWORD(WINAPI *)(PVOID, SIZE_T);
+    static discard_fn discard = [] {
+        HMODULE h = GetModuleHandleW(L"kernel32.dll");
+        return h ? (discard_fn) GetProcAddress(h, "DiscardVirtualMemory") : nullptr;
+    }();
+
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    const size_t page = si.dwPageSize;
+    for (const auto & b : reg.buffers) {
+        uintptr_t start = reinterpret_cast<uintptr_t>(b.first);
+        uintptr_t end = start + b.second;
+        uintptr_t astart = (start + page - 1) & ~(uintptr_t) (page - 1);
+        uintptr_t aend = end & ~(uintptr_t) (page - 1);
+        if (aend <= astart) {
+            continue;
+        }
+        void * p = reinterpret_cast<void *>(astart);
+        const size_t len = aend - astart;
+        if (discard != nullptr) {
+            if (discard(p, len) == ERROR_SUCCESS) {
+                total += len;
+            }
+        } else if (VirtualAlloc(p, len, MEM_RESET, PAGE_READWRITE) != nullptr) {
+            total += len;
+        }
+    }
+#else
     for (const auto & b : reg.buffers) {
         // Align down/up to page boundaries so madvise only drops whole pages
         // fully owned by this buffer.
