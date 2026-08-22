@@ -420,6 +420,23 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         }
         break;
     }
+    case GGML_OP_POOL_2D: {
+        const ggml_op_pool pool_mode = static_cast<ggml_op_pool>(node->op_params[0]);
+        switch (pool_mode) {
+        case GGML_OP_POOL_MAX: {
+            op_case = 1;
+            break;
+        }
+        case GGML_OP_POOL_AVG: {
+            op_case = 2;
+            break;
+        }
+        default:
+            op_case = 0;
+            break;
+        }
+        break;
+    }
     case GGML_OP_CPY: {
         if (node->src[0]->op == GGML_OP_VIEW) {
             if (node->src[0]->src[0]->op == GGML_OP_GATED_DELTA_NET) {
