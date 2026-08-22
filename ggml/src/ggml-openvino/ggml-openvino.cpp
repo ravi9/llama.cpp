@@ -1146,6 +1146,20 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         }
         break;
     }
+    case GGML_OP_POOL_2D: {
+        const auto& name = ggml_openvino_get_device_name();
+        if (name == "GPU" || name == "NPU") {
+            const int32_t * params = op->op_params;
+            const int k0 = params[1];
+            const int k1 = params[2];
+            const int p0 = params[5];
+            const int p1 = params[6];
+            if ((p0 > 0 || p1 > 0) && (k0 < 3 || k1 < 3)) {
+                return true;
+            }
+        }
+        break;
+    }
     case GGML_OP_SUM_ROWS: {
         if (op->src[0]->op == GGML_OP_PERMUTE) {
             return {false, "SUM_ROWS with PERMUTE input is not supported"};
