@@ -10,6 +10,7 @@
 #include <openvino/op/matmul.hpp>
 #include <openvino/op/multiply.hpp>
 #include <openvino/op/negative.hpp>
+#include <openvino/op/relu.hpp>
 #include <openvino/op/sigmoid.hpp>
 #include <openvino/op/subtract.hpp>
 #include <openvino/op/tanh.hpp>
@@ -48,6 +49,7 @@ std::unordered_map<std::string, CreatorFunction> get_supported_ops() {
         {"GGML_OP_SUB",             op::translate_1to1_match_2_inputs<v1::Subtract>},
         {"GGML_OP_TRANSPOSE",       op::translate_transpose                        },
         {"GGML_UNARY_OP_GELU",      op::translate_1to1_match_1_input<v7::Gelu>     },
+        {"GGML_GLU_OP_GEGLU_QUICK", op::translate_glu_geglu_quick                },
         {"GGML_UNARY_OP_SIGMOID",   op::translate_1to1_match_1_input<v0::Sigmoid>  },
         {"GGML_UNARY_OP_SILU",      op::translate_unary_silu                       },
         {"GGML_UNARY_OP_SOFTPLUS",  op::translate_unary_softplus                   },
@@ -55,6 +57,7 @@ std::unordered_map<std::string, CreatorFunction> get_supported_ops() {
         {"GGML_UNARY_OP_SIGMOID",   op::translate_1to1_match_1_input<v0::Sigmoid>  },
         {"GGML_UNARY_OP_EXP",       op::translate_1to1_match_1_input<v0::Exp>      },
         {"GGML_UNARY_OP_NEG",       op::translate_1to1_match_1_input<v0::Negative> },
+        {"GGML_UNARY_OP_RELU",      op::translate_1to1_match_1_input<v0::Relu>     },
         {"GGML_OP_VIEW",            op::translate_view                             },
         {"GGML_GLU_OP_SWIGLU",      op::translate_glu_swiglu                       },
         {"GGML_GLU_OP_SWIGLU_OAI",  op::translate_glu_swiglu_oai                   },
@@ -72,6 +75,8 @@ std::unordered_map<std::string, CreatorFunction> get_supported_ops() {
         {"GGML_OP_DIAG",            op::translate_diag                             },
         {"GGML_OP_TRI",             op::translate_tri                              },
         {"GGML_OP_SET",             op::translate_set                              },
+        {"GGML_OP_POOL_2D",         op::translate_pool_2d                          },
+        {"GGML_OP_ROLL",            op::translate_roll                             },
         // solve_tri has accuracy issues on GPU
         // {"GGML_OP_SOLVE_TRI",       op::translate_solve_tri                        },
     };
