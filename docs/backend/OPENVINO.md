@@ -726,9 +726,11 @@ Boolean flags follow a uniform convention: set to a **positive integer** (e.g. `
 | `GGML_OPENVINO_DEBUG_INPUT`       | Boolean   | `0`        | Enable input debugging and print input tensor info.                                                         |
 | `GGML_OPENVINO_DEBUG_OUTPUT`      | Boolean   | `0`        | Enable output debugging and print output tensor info.                                                       |
 | `GGML_OPENVINO_PRINT_CGRAPH_TENSOR_ADDRESS` | Boolean | `0` | Print tensor address map once.                                                                           |
+| `GGML_OPENVINO_LOG_UNSUPPORTED_OPS`| Boolean   | `0`        | Log warning messages with tensor details and rejection reasons for any ops not supported by the OpenVINO backend. Emits at `WARN` level (requires `--log-verbosity >= 2`, enabled by default). |
 
 > [!NOTE]
->`GGML_OPENVINO_STATEFUL_EXECUTION` is an **Experimental** feature to allow stateful execution for managing the KV cache internally inside the OpenVINO model, improving performance on CPUs and GPUs. Stateful execution is not effective on NPUs, and not all models currently support this feature. This feature is experimental and has been validated only with the llama-simple, llama-cli, llama-bench, and llama-run applications and is recommended to enable for the best performance. Other applications, such as llama-server and llama-perplexity, are not yet supported.
+> - `GGML_OPENVINO_STATEFUL_EXECUTION` is an **Experimental** feature to allow stateful execution for managing the KV cache internally inside the OpenVINO model, improving performance on CPUs and GPUs. Stateful execution is not effective on NPUs, and not all models currently support this feature. This feature is experimental and has been validated only with the llama-simple, llama-cli, llama-bench, and llama-run applications and is recommended to enable for the best performance. Other applications, such as llama-server and llama-perplexity, are not yet supported.
+> - `GGML_OPENVINO_LOG_UNSUPPORTED_OPS` emits logs at `WARN` level (`GGML_LOG_WARN`), which requires application log verbosity `--log-verbosity >= 2` (or `-lv 2`).
 
 ### Example Usage
 

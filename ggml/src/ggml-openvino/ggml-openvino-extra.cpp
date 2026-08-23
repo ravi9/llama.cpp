@@ -32,6 +32,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_DEVICE",
         "GGML_OPENVINO_CACHE_DIR",
         "GGML_OPENVINO_DEBUG_NODE",
+        "GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR",
         // Integer values (use ggml_openvino_getenv_int)
         "GGML_OPENVINO_PREFILL_CHUNK_SIZE",
         // Boolean toggles (treated as int flags via ggml_openvino_getenv_int)
@@ -50,7 +51,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_MEMORY_OPTIMIZE",
         "GGML_OPENVINO_RELEASE_WEIGHTS",
         "GGML_OPENVINO_REDUCE_COMPILE_MEM",
-        "GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR",
+        "GGML_OPENVINO_LOG_UNSUPPORTED_OPS",
     };
 
     for (const char * const & env_var : env_var_names) {
