@@ -52,6 +52,11 @@ struct ComputeParams {
     int attention_size = -1;
     int attention_size_swa = -1;
     int attention_size_static = -1;  // encoder/cross-attn KV fill level (whisper)
+    // Sliding window width, read back from the band of ggml's own SWA mask. ggml never passes
+    // n_swa down to a backend, but fill_mask() bakes it into the mask contents, so the widest
+    // unmasked row recovers it. Shorter than n_swa while the sequence is still short, which is
+    // harmless: every causal pair is inside the window then anyway.
+    int swa_window = -1;
     int input_len = -1;
     int token_len_per_seq = -1;
     int past_kv_len = -1;
