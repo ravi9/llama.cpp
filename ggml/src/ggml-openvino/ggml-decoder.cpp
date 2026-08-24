@@ -544,6 +544,40 @@ std::optional<int> extract_layer_from_name(const std::string & name) {
     return layer;
 }
 
+// Recover the sliding window width from ggml's own SWA mask. llama.cpp never passes n_swa to a
+// backend, but fill_mask() writes it into the mask: a query row keeps exactly the cells inside
+// its window, so the widest row counts min(pos + 1, n_swa) unmasked cells. Counting rather than
+// looking for a contiguous band is what makes this work on the KV-cache mask, where columns are
+// physical cache cells in arbitrary order, not positions.
+// Assumes LLAMA_SWA_TYPE_STANDARD, the only type the caller reconstructs.
+static int get_swa_window_from_mask(const ggml_tensor * mask) {
+    if (mask->data == nullptr || !ggml_backend_buffer_is_host(mask->buffer)) {
+        return -1;
+    }
+    if (mask->type != GGML_TYPE_F16 && mask->type != GGML_TYPE_F32) {
+        return -1;
+    }
+
+    const int64_t n_kv = mask->ne[0];
+    const int64_t n_tokens = mask->ne[1];
+    int64_t window = 0;
+
+    for (int64_t r = 0; r < n_tokens; r++) {
+        int64_t kept = 0;
+        for (int64_t c = 0; c < n_kv; c++) {
+            const size_t i = (size_t) r * n_kv + c;
+            const float v = mask->type == GGML_TYPE_F16 ? ggml_fp16_to_fp32(((const ggml_fp16_t *) mask->data)[i]) :
+                                                          ((const float *) mask->data)[i];
+            if (v > -INFINITY) {
+                kept++;
+            }
+        }
+        window = std::max(window, kept);
+    }
+
+    return window > 0 ? (int) window : -1;
+}
+
 std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgraph * cgraph, bool is_static) {
     ModelParams model_params;
     ComputeParams compute_params;
@@ -778,6 +812,7 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
 
             if (layer_is_swa) {
                 compute_params.attention_size_swa = mask->ne[0];
+                compute_params.swa_window = get_swa_window_from_mask(mask);
             } else {
                 compute_params.attention_size = mask->ne[0];
             }
@@ -1004,6 +1039,10 @@ void GgmlOvDecoder::add_extra_inputs() {
     }
     if (m_compute_params.attention_size_swa != -1) {
         create_1d_input("attention_size_swa", m_compute_params.attention_size_swa);
+    }
+    // only the stateful SWA mask consumes this
+    if (is_stateful() && m_compute_params.swa_window != -1) {
+        create_1d_input("swa_window", m_compute_params.swa_window);
     }
     create_1d_input("n_seq_active", m_compute_params.n_seq_active);
     create_1d_input("seq_active_start", m_compute_params.seq_active_start);
