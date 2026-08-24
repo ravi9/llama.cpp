@@ -1237,7 +1237,7 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         const int mode = op_params[2];
         if (op_params[15] != 0) {
             // FIXME: support ggml_rope_set_offset
-            return true;
+            return {false, "ggml_rope_set_offset is not supported"};
         }
         if (mode != GGML_ROPE_TYPE_NORMAL && mode != GGML_ROPE_TYPE_NEOX && mode != GGML_ROPE_TYPE_IMROPE) {
             return {false, "ROPE with mode " + std::to_string(mode) + " is not supported"};
