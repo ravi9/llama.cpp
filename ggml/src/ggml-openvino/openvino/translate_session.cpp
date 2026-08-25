@@ -5,6 +5,7 @@
 #include "ggml-openvino/openvino/node_context.h"
 #include "ggml-openvino/openvino/utils.h"
 #include "input_model.h"
+#include "pass/fuse_moe_compressed.h"
 #include "pass/fuse_to_conv.h"
 #include "pass/kv_state_seq_axis.h"
 #include "pass/mark_decompression_convert_constant_folding.h"
@@ -466,6 +467,12 @@ std::shared_ptr<Model> TranslateSession::apply_transformations(std::shared_ptr<M
         manager.register_pass<ov::pass::MarkDequantization>(
             std::vector<ov::element::Type>{ov::element::u8, ov::element::i8, ov::element::u4, ov::element::i4});
         manager.register_pass<pass::FuseToConv>();
+
+        // MOECompressed has no CPU plugin implementation, so keep the GatherMatmul path
+        // everywhere else. Opt-in while the fused path is being brought up.
+        if (ggml_openvino_get_device_name() == "GPU" && getenv("GGML_OPENVINO_MOE_OP")) {
+            manager.register_pass<pass::FuseMoeCompressed>();
+        }
 
         if (ggml_model_decoder->is_stateful()) {
             const auto kv_param_res_names = ggml_model_decoder->get_kv_param_res_names();
