@@ -313,8 +313,9 @@ fi
 echo "============================================"
 echo "Configuring with CMake..."
 echo "============================================"
-# shellcheck disable=SC1091
+set +u
 source "${OPENVINO_ROOT}/setupvars.sh"
+set -u
 
 cmake -B build/ReleaseOV -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
