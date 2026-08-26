@@ -425,8 +425,7 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
                    is_kvcache(node->src[1]->view_src, nullptr)) {
             // s_copy defrag remainder writeback: gathered extra state rows copied back into the cache
             op_case = 3;
-        } else if (node->src[1] != nullptr && node->src[1]->op == GGML_OP_VIEW &&
-                node->src[1]->view_src != nullptr) {
+        } else if (node->src[1] != nullptr && node->src[1]->op == GGML_OP_VIEW && node->src[1]->view_src != nullptr) {
             // op_case 5: KV write for decoder self-attention (dynamic write offset)
             // op_case 6: KV write for encoder self-attn or cross-attn (static offset)
             const ggml_tensor * kv_buf = node->src[1]->view_src;
@@ -443,7 +442,7 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
                     // K (src[1]) and V (src[2]) are 3-D views whose view_src is
                     // the flat KV buffer we are writing to.
                     if ((n->src[1] != nullptr && n->src[1]->view_src == kv_buf) ||
-                            (n->src[2] != nullptr && n->src[2]->view_src == kv_buf)) {
+                        (n->src[2] != nullptr && n->src[2]->view_src == kv_buf)) {
                         if (n->src[3] != nullptr) {
                             op_case = 5;  // decoder self-attention: mask present
                         }
@@ -474,9 +473,8 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         }
         break;
     }
-        case GGML_OP_FLASH_ATTN_EXT: {
-        if (node->src[1] != nullptr && node->src[1]->op == GGML_OP_VIEW &&
-                node->src[1]->view_src != nullptr) {
+    case GGML_OP_FLASH_ATTN_EXT: {
+        if (node->src[1] != nullptr && node->src[1]->op == GGML_OP_VIEW && node->src[1]->view_src != nullptr) {
             const ggml_tensor * kv_buf = node->src[1]->view_src;
             if (kv_buf->ne[1] == 1 && kv_buf->ne[2] == 1 && kv_buf->ne[3] == 1) {
                 op_case = (node->src[3] != nullptr) ? 1 : 2;
@@ -529,8 +527,7 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
             case GGML_OP_CPY:
                 // case 1: src[1] is CPY of a PERMUTE(VIEW), mask required
                 if (node->src[3] != nullptr && node->src[1]->src[0] != nullptr &&
-                    node->src[1]->src[0]->op == GGML_OP_PERMUTE &&
-                    node->src[1]->src[0]->src[0] != nullptr &&
+                    node->src[1]->src[0]->op == GGML_OP_PERMUTE && node->src[1]->src[0]->src[0] != nullptr &&
                     node->src[1]->src[0]->src[0]->op == GGML_OP_VIEW) {
                     return 1;
                 }
@@ -539,9 +536,9 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
                 // cases 4/5/6: whisper - K is a direct non-contiguous VIEW_3D of a KV cache
                 if (node->src[1]->view_src != nullptr) {
                     if (node->src[3] != nullptr) {
-                        return 4; // decoder self-attention
+                        return 4;  // decoder self-attention
                     } else {
-                        return 5; // cross-attention or encoder self-attention
+                        return 5;  // cross-attention or encoder self-attention
                     };
                 }
                 break;

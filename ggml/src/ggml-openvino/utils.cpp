@@ -177,11 +177,10 @@ ov::Tensor create_ov_output_tensor(std::shared_ptr<GgmlOvDecoder> ggml_decoder,
         // own (smaller) shape.  Using the CPY shape here causes set_output_tensor to
         // fail with a shape-incompatibility error.  Use view_src's shape and data
         // pointer instead so the OV tensor matches the model output exactly.
-        if (ggml_tensor->op == GGML_OP_CPY &&
-            ggml_tensor->view_src != nullptr &&
+        if (ggml_tensor->op == GGML_OP_CPY && ggml_tensor->view_src != nullptr &&
             ggml_nbytes(ggml_tensor) != ggml_nbytes(ggml_tensor->view_src)) {
             output_shape = ggml_decoder->get_shape(ggml_tensor->view_src);
-            output_data  = ggml_tensor->view_src->data;
+            output_data = ggml_tensor->view_src->data;
         } else {
             output_shape = ggml_decoder->get_shape(ggml_tensor);
         }
