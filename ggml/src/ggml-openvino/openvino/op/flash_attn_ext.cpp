@@ -26,13 +26,13 @@ namespace frontend {
 namespace ggml {
 namespace op {
 static ov::Output<ov::Node> reshape_flat_kv(const ov::Output<ov::Node> & kv_flat,
-                                             size_t view_offset_bytes,
-                                             size_t nb1_bytes,
-                                             int64_t n_head,
-                                             int64_t head_size,
-                                             const ov::Output<ov::Node> & attention_size) {
+                                            size_t view_offset_bytes,
+                                            size_t nb1_bytes,
+                                            int64_t n_head,
+                                            int64_t head_size,
+                                            const ov::Output<ov::Node> & attention_size) {
     int64_t n_state = n_head * head_size;
-    int64_t layer_start_elem = (int64_t)(view_offset_bytes / (nb1_bytes / n_state));
+    int64_t layer_start_elem = (int64_t) (view_offset_bytes / (nb1_bytes / n_state));
     // Dynamic slice: [layer_start_elem, layer_start_elem + n_kv * n_state)
     auto start_c = ov::op::v0::Constant::create(ov::element::i64, {1}, {layer_start_elem});
     auto n_state_c = ov::op::v0::Constant::create(ov::element::i64, {1}, {n_state});
@@ -50,8 +50,8 @@ static ov::Output<ov::Node> reshape_flat_kv(const ov::Output<ov::Node> & kv_flat
     auto n_head_c = ov::op::v0::Constant::create(ov::element::i64, {1}, {n_head});
     auto head_size_c = ov::op::v0::Constant::create(ov::element::i64, {1}, {head_size});
     // reshape: {n_kv*n_state} -> {1, n_kv, n_head, head_size}
-    auto new_shape = std::make_shared<ov::op::v0::Concat>(
-        ov::OutputVector{one_c, attention_size, n_head_c, head_size_c}, 0);
+    auto new_shape =
+        std::make_shared<ov::op::v0::Concat>(ov::OutputVector{one_c, attention_size, n_head_c, head_size_c}, 0);
     auto reshaped = std::make_shared<ov::op::v1::Reshape>(sliced, new_shape, false);
     // transpose: {1, n_kv, n_head, head_size} -> {1, n_head, n_kv, head_size}
     auto perm = ov::op::v0::Constant::create(ov::element::i64, {4}, {0, 2, 1, 3});
@@ -68,10 +68,10 @@ OutputVector translate_flash_attn_ext(const NodeContext & context) {
     const int op_case = context.get_op_case();
 
     if (op_case == 1 || op_case == 2) {
-        int64_t n_state_head = (int64_t)context.get_view_input_ggml_shape(1, 0)[3];
-        int64_t n_head = (int64_t)context.get_view_input_ggml_shape(1, 0)[1];
-        size_t  nb1 = context.get_view_input_stride(1, 0)[2];
-        size_t  offset = context.get_view_input_offset(1, 0);
+        int64_t n_state_head = (int64_t) context.get_view_input_ggml_shape(1, 0)[3];
+        int64_t n_head = (int64_t) context.get_view_input_ggml_shape(1, 0)[1];
+        size_t nb1 = context.get_view_input_stride(1, 0)[2];
+        size_t offset = context.get_view_input_offset(1, 0);
         ov::Output<ov::Node> attention_size;
         if (op_case == 1) {
             attention_size = context.get_input("attention_size");
@@ -163,8 +163,8 @@ OutputVector translate_flash_attn_ext(const NodeContext & context) {
         // 1→factor on the head dims.
         ov::Output<ov::Node> qk_masked;
         if (has_mask) {
-            auto mask_unsq1 = std::make_shared<ov::op::v0::Unsqueeze>(
-                mask, ov::op::v0::Constant::create(ov::element::i64, {1}, {2}));
+            auto mask_unsq1 =
+                std::make_shared<ov::op::v0::Unsqueeze>(mask, ov::op::v0::Constant::create(ov::element::i64, {1}, {2}));
             qk_masked = std::make_shared<ov::op::v1::Add>(qk_scaled, mask_unsq1);
         } else {
             qk_masked = qk_scaled;
@@ -224,12 +224,12 @@ OutputVector translate_flash_attn_ext(const NodeContext & context) {
     constexpr auto causal = false;
     if (has_mask) {
         auto sdpa = std::make_shared<ov::op::v13::ScaledDotProductAttention>(q, k, v, mask, scale_node, causal);
-        res = std::make_shared<ov::op::v1::Transpose>(sdpa,
-                                                      ov::op::v0::Constant::create(ov::element::i64, {4}, {0, 2, 1, 3}));
+        res = std::make_shared<ov::op::v1::Transpose>(
+            sdpa, ov::op::v0::Constant::create(ov::element::i64, {4}, {0, 2, 1, 3}));
     } else {
         auto sdpa = std::make_shared<ov::op::v13::ScaledDotProductAttention>(q, k, v, scale_node, causal);
-        res = std::make_shared<ov::op::v1::Transpose>(sdpa,
-                                                      ov::op::v0::Constant::create(ov::element::i64, {4}, {0, 2, 1, 3}));
+        res = std::make_shared<ov::op::v1::Transpose>(
+            sdpa, ov::op::v0::Constant::create(ov::element::i64, {4}, {0, 2, 1, 3}));
     }
     res = std::make_shared<ov::op::v0::Convert>(res, ov::element::f32);
     return rename_outputs_with_suffix({res}, context.get_name());
