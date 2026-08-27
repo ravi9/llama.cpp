@@ -317,23 +317,34 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
                         }
                     }
 
-                    // Which axis of the KV state holds the sequence. Must match the condition
-                    // in pass::KVStateSeqAxis, which moves it from dim 1 to dim 2 when
-                    // n_heads_kv == 1 (see that pass for why only then).
-                    const size_t seq_axis =
-                        (!ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT") &&
-                         ggml_decoder->get_model_params().n_heads_kv == 1) ? 2 : 1;
-                    const size_t head_axis = seq_axis == 2 ? 1 : 2;
+                    const bool relayout_enabled =
+                        !ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT");
 
                     auto states = infer_request->query_state();
                     for (auto state : states) {
                         auto state_tensor = state.get_state();
                         auto state_tensor_shape = state_tensor.get_shape();
+
+                        std::string state_name;
+                        if (auto it = r_ctx->kv_state_input_name_map.find(state.get_name());
+                            it != r_ctx->kv_state_input_name_map.end()) {
+                            state_name = it->second;
+                        }
+
+                        // Which axis of THIS state holds the sequence. Must match
+                        // pass::KVStateSeqAxis, which moves it from dim 1 to dim 2 per state and
+                        // only where that state's KV head count is 1. gemma-4 12B mixes 1-head
+                        // full layers with 8-head sliding layers, so it cannot be decided
+                        // model-wide.
+                        int n_heads_kv = ggml_decoder->get_model_params().n_heads_kv;
+                        if (auto layer = extract_layer_from_name(state_name); layer.has_value()) {
+                            n_heads_kv = ggml_decoder->get_n_heads_kv_for_layer(layer.value());
+                        }
+                        const size_t seq_axis = (relayout_enabled && n_heads_kv == 1) ? 2 : 1;
+                        const size_t head_axis = seq_axis == 2 ? 1 : 2;
+
                         if (refill) {
-                            std::string state_name;
-                            try {
-                                state_name = r_ctx->kv_state_input_name_map.at(state.get_name());
-                            } catch (...) {
+                            if (state_name.empty()) {
                                 GGML_LOG_ERROR(
                                     "GGML OpenVINO backend stateful inference failed: no input found for the state\n");
                                 return GGML_STATUS_FAILED;
