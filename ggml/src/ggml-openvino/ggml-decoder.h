@@ -21,6 +21,11 @@ struct ModelParams {
     int ctx_per_seq_swa = -1;
     int n_seq = 1;
     int n_heads_kv = -1;
+    // Per-layer KV head count. gemma-4 12B interleaves 8 x 256 sliding layers with 1 x 512
+    // full-attention layers, so no single scalar describes every layer. Keyed by layer, not by
+    // layer TYPE, because the SWA classification depends on the context size (extents tie at a
+    // small -c) while the head count does not.
+    std::map<int, int> n_heads_kv_per_layer;
     int head_size = -1;
     int state_size = -1;  // for SSM molels, eg qwen35
     int32_t rope_params[15];
@@ -104,6 +109,9 @@ struct ComputeParams {
     // cached model as a runtime input. Dynamic models also receive the source-side offset; static
     // models use a fixed end-anchored offset in the translator.
 };
+
+// defined below; declared here because GgmlOvDecoder uses it inline
+std::optional<int> extract_layer_from_name(const std::string & name);
 
 class GgmlOvDecoder : public ov::frontend::ggml::GgmlDecoder {
 public:
@@ -257,6 +265,21 @@ public:
     virtual int is_swa_layer(int layer) const override {
         return std::find(m_model_params.swa_layers.begin(), m_model_params.swa_layers.end(), layer) !=
                m_model_params.swa_layers.end();
+    }
+
+    // KV head count for one layer. Sliding and full layers can differ (gemma-4 12B), so callers
+    // that reinterpret a KV buffer must use this and not the model-level n_heads_kv.
+    int get_n_heads_kv_for_layer(int layer) const {
+        auto it = m_model_params.n_heads_kv_per_layer.find(layer);
+        return it != m_model_params.n_heads_kv_per_layer.end() ? it->second : m_model_params.n_heads_kv;
+    }
+
+    // Same, for a KV cache tensor: its layer comes from the leaf name (cache_k_l<N>).
+    int get_n_heads_kv_for_tensor(const ggml_tensor * kv_tensor) const {
+        if (auto layer = extract_layer_from_name(std::string(kv_tensor->name)); layer.has_value()) {
+            return get_n_heads_kv_for_layer(layer.value());
+        }
+        return m_model_params.n_heads_kv;
     }
 
     int get_past_kv_len() const { return m_compute_params.past_kv_len; }
