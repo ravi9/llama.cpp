@@ -1148,7 +1148,7 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
     }
     case GGML_OP_POOL_2D: {
         const auto& name = ggml_openvino_get_device_name();
-        if (name == "GPU" || name == "NPU") {
+        if (name == "GPU") {
             const int32_t * params = op->op_params;
             const int k0 = params[1];
             const int k1 = params[2];
