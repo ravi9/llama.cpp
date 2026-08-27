@@ -22,8 +22,8 @@ The OpenVINO backend is implemented in `ggml/src/ggml-openvino` and provides a t
   - [0. Prerequisites](#0-prerequisites)
   - [1. Install OpenVINO Runtime](#1-install-openvino-runtime)
   - [2. Build llama.cpp with OpenVINO Backend](#2-build-llamacpp-with-openvino-backend)
-    - [Automated Ubuntu Build Script](#automated-ubuntu-build-script)
-    - [Automated Windows Build Script](#automated-windows-build-script)
+    - [Ubuntu Build Script](#ubuntu-build-script)
+    - [Windows Build Script](#windows-build-script)
   - [3. Download Sample Model](#3-download-sample-model)
   - [4. Run Inference with OpenVINO Backend](#4-run-inference-with-openvino-backend)
   - [5. Docker Build](#5-docker-build)
@@ -96,7 +96,7 @@ Although, the validated models below were tested with `llama-cli` using the `Q4_
   - **SL** = Stateless (`GGML_OPENVINO_STATEFUL_EXECUTION=0`)
   - **SF** = Stateful (`GGML_OPENVINO_STATEFUL_EXECUTION=1`)
   - Note: The NPU operates in stateless mode only.
-- **Validation system:** Intel® Core™ Ultra 5 238V (Lunar Lake) | 32 GB RAM | Ubuntu 24.04 | Intel OpenCL GPU Driver 26.18.38308.1 | Intel NPU Driver 1.33.0.
+- **Validation system:** Intel® Core™ Ultra 5 238V (Lunar Lake) | 32 GB RAM | Ubuntu 24.04 | Intel OpenCL GPU Driver 26.31.39395.13-0 | Intel NPU Driver 1.35.0.
 - See [Known Limitations](#known-limitations) for context on observed failures.
 
 | Model | CPU (SL / SF) | GPU (SL / SF) | NPU (SL) |
@@ -105,27 +105,32 @@ Although, the validated models below were tested with `llama-cli` using the `Q4_
 | [bartowski/Llama-3.2-3B-Instruct-Q4_K_M](https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
 | [bartowski/Meta-Llama-3.1-8B-Instruct-Q4_K_M](https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
 |  |  |  |  |
-| [Qwen/qwen2.5-1.5b-instruct-q4_k_m](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF) | ✓ / ✓ | ✓ / ✗ | ✓ |
-| [Qwen/qwen2.5-coder-7b-instruct-q4_k_m](https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF) | ✓ / ✓ | ✓ / ✗ | ✓ |
-| [bartowski/Qwen_Qwen3-0.6B-Q4_K_M](https://huggingface.co/bartowski/Qwen_Qwen3-0.6B-GGUF) | ✓ / ✓ | ✓ / ✗ | ✓ |
-| [bartowski/Qwen_Qwen3-1.7B-Q4_K_M](https://huggingface.co/bartowski/Qwen_Qwen3-1.7B-GGUF) | ✓ / ✓ | ✓ / ✗ | ✓ |
-| [Qwen/Qwen3-4B-Q4_K_M](https://huggingface.co/Qwen/Qwen3-4B-GGUF) | ✓ / ✓ | ✓ / ✗ | ✓ |
-| [lm-kit/Qwen3-8B-Q4_K_M](https://huggingface.co/lm-kit/qwen-3-8b-instruct-gguf) | ✓ / ✓ | ✓ / ✗ | ✓ |
+| [Qwen/qwen2.5-1.5b-instruct-q4_k_m](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
+| [Qwen/qwen2.5-coder-7b-instruct-q4_k_m](https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
+| [bartowski/Qwen_Qwen3-0.6B-Q4_K_M](https://huggingface.co/bartowski/Qwen_Qwen3-0.6B-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
+| [bartowski/Qwen_Qwen3-1.7B-Q4_K_M](https://huggingface.co/bartowski/Qwen_Qwen3-1.7B-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
+| [Qwen/Qwen3-4B-Q4_K_M](https://huggingface.co/Qwen/Qwen3-4B-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
+| [lm-kit/Qwen3-8B-Q4_K_M](https://huggingface.co/lm-kit/qwen-3-8b-instruct-gguf) | ✓ / ✓ | ✓ / ✓ | ✓ |
+| [bartowski/Qwen_Qwen3.5-0.8B-Q4_K_M](https://huggingface.co/bartowski/Qwen_Qwen3.5-0.8B-GGUF) | ✓ / ✗ | ✓ / ✗ | ✗ |
+| [bartowski/Qwen_Qwen3.5-2B-Q4_K_M](https://huggingface.co/bartowski/Qwen_Qwen3.5-2B-GGUF) | ✓ / ✗ | ✓ / ✗ | ✗ |
+| [bartowski/Qwen_Qwen3.5-4B-Q4_K_M](https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF) | ✓ / ✗ | ✓ / ✗ | ✗ |
+| [lmstudio-community/Qwen3.5-9B-Q4_K_M](https://huggingface.co/lmstudio-community/Qwen3.5-9B-GGUF) | ✓ / ✗ | ✓ / ✗ | ✗ |
 |  |  |  |  |
-| [unsloth/gemma-3-4b-it-Q4_K_M](https://huggingface.co/unsloth/gemma-3-4b-it-GGUF) | ✓ / ✓ | ✓ / ✗ | ✓ |
-| [bartowski/google_gemma-4-E2B-it-Q4_K_M](https://huggingface.co/bartowski/google_gemma-4-E2B-it-GGUF) | ✓ / ✗ | ✓ / ✗ | ✓ |
+| [unsloth/gemma-3-4b-it-Q4_K_M](https://huggingface.co/unsloth/gemma-3-4b-it-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
+| [bartowski/google_gemma-4-E2B-it-Q4_K_M](https://huggingface.co/bartowski/google_gemma-4-E2B-it-GGUF) | ✓ / ✗ | ✓ / ✗ | ✗ |
 | [bartowski/google_gemma-4-E4B-it-Q4_K_M](https://huggingface.co/bartowski/google_gemma-4-E4B-it-GGUF) | ✓ / ✗ | ✓ / ✗ | ✓ |
-| [bartowski/gemma-4-12B-it-Q4_K_M](https://huggingface.co/bartowski/gemma-4-12B-it-GGUF) | ✓ / ✗ | ✓ / ✗ | ✗ |
+| [bartowski/gemma-4-12B-it-Q4_K_M](https://huggingface.co/bartowski/gemma-4-12B-it-GGUF) | ✓ / ✗ | ✓ / ✗ | ✓ |
 |  |  |  |  |
-| [bartowski/Phi-3-mini-4k-instruct-Q4_K_M](https://huggingface.co/bartowski/Phi-3-mini-4k-instruct-GGUF) | ✓ / ✓ | ✓ / ✗ | ✓ |
-| [bartowski/Phi-3.5-mini-instruct-Q4_K_M](https://huggingface.co/bartowski/Phi-3.5-mini-instruct-GGUF) | ✓ / ✓ | ✓ / ✗ | ✓ |
+| [bartowski/Phi-3-mini-4k-instruct-Q4_K_M](https://huggingface.co/bartowski/Phi-3-mini-4k-instruct-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
+| [bartowski/Phi-3.5-mini-instruct-Q4_K_M](https://huggingface.co/bartowski/Phi-3.5-mini-instruct-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
+| [bartowski/microsoft_Phi-4-mini-instruct-Q4_K_M](https://huggingface.co/bartowski/microsoft_Phi-4-mini-instruct-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
 |  |  |  |  |
 | [bartowski/Mistral-7B-Instruct-v0.3-Q4_K_M](https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
 | [QuantFactory/Ministral-3b-instruct.Q4_K_M](https://huggingface.co/QuantFactory/Ministral-3b-instruct-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
 | [bartowski/Ministral-8B-Instruct-2410-Q4_K_M](https://huggingface.co/bartowski/Ministral-8B-Instruct-2410-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
 |  |  |  |  |
 | [bartowski/DeepSeek-R1-Distill-Llama-8B-Q4_K_M](https://huggingface.co/bartowski/DeepSeek-R1-Distill-Llama-8B-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
-| [bartowski/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M](https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF) | ✓ / ✓ | ✓ / ✗ | ✓ |
+| [bartowski/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M](https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
 |  |  |  |  |
 | [ibm-granite/granite-4.0-350m-Q4_K_M](https://huggingface.co/ibm-granite/granite-4.0-350m-GGUF) | ✓ / ✓ | ✗ / ✗ | ✓ |
 | [ibm-granite/granite-4.0-micro-Q4_K_M](https://huggingface.co/ibm-granite/granite-4.0-micro-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
@@ -133,10 +138,10 @@ Although, the validated models below were tested with `llama-cli` using the `Q4_
 | [ibm-research/granite-3.2-8b-instruct-Q4_K_M](https://huggingface.co/ibm-research/granite-3.2-8b-instruct-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
 |  |  |  |  |
 | [HuggingFaceTB/smollm2-1.7b-instruct-q4_k_m](https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B-Instruct-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
-| [openbmb/MiniCPM-V-2_6-Q4_K_M](https://huggingface.co/openbmb/MiniCPM-V-2_6-gguf) | ✓ / ✓ | ✓ / ✗ | ✓ |
-| [bartowski/tencent_Hunyuan-7B-Instruct-Q4_K_M](https://huggingface.co/bartowski/tencent_Hunyuan-7B-Instruct-GGUF) | ✓ / ✓ | ✓ / ✗ | ✓ |
-| [LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct-Q4_K_M](https://huggingface.co/LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct-GGUF) | ✓ / ✓ | ✓ / ✗ | ✓ |
-| [bartowski/prism-ml_Bonsai-8B-unpacked-Q4_K_M](https://huggingface.co/bartowski/prism-ml_Bonsai-8B-unpacked-GGUF) | ✓ / ✓ | ✓ / ✗ | ✓ |
+| [openbmb/MiniCPM-V-2_6-Q4_K_M](https://huggingface.co/openbmb/MiniCPM-V-2_6-gguf) | ✓ / ✓ | ✓ / ✓ | ✓ |
+| [bartowski/tencent_Hunyuan-7B-Instruct-Q4_K_M](https://huggingface.co/bartowski/tencent_Hunyuan-7B-Instruct-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
+| [LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct-Q4_K_M](https://huggingface.co/LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
+| [bartowski/prism-ml_Bonsai-8B-unpacked-Q4_K_M](https://huggingface.co/bartowski/prism-ml_Bonsai-8B-unpacked-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
 |  |  |  |  |
 | [gpustack/bge-m3-Q4_K_M.gguf](https://huggingface.co/gpustack/bge-m3-GGUF) | ✓ | ✗ | ✗ |
 
@@ -217,18 +222,18 @@ cmake --build build\ReleaseOV --parallel
 > [!NOTE]
 > The Windows install path is `C:\Intel\openvino` (no spaces) to avoid quoting problems some CMake/Ninja toolchains have with `C:\Program Files (x86)\...`. Adjust to wherever you installed OpenVINO Runtime. From `cmd`, run `C:\Intel\openvino\setupvars.bat`; from PowerShell, run `& "C:\Intel\openvino\setupvars.ps1"` instead. Once the build is finished you can launch the binaries from any `cmd` or `PowerShell` window after sourcing the matching `setupvars` script for that shell.
 
-#### Automated Ubuntu Build Script
+#### Ubuntu Build Script
 
 For Ubuntu24 users, the following shell script automates the prerequisite installs (build tools, OpenCL ICD), the OpenVINO Runtime download/extract/setup, and the Ninja-based llama.cpp build.
-Save the following as `ubuntu-llamacpp-ov-install.sh` next to where you want the `llama.cpp` folder to land, then run it:
+Save the following as `build-llamacpp-ov.sh` next to where you want the `llama.cpp` folder to land, then run it:
 
 ```bash
-chmod +x ubuntu-llamacpp-ov-install.sh
-./ubuntu-llamacpp-ov-install.sh
+chmod +x build-llamacpp-ov.sh
+./build-llamacpp-ov.sh
 ```
 
 <details>
-<summary>Click to expand <code>ubuntu-llamacpp-ov-install.sh</code></summary>
+<summary>Click to expand <code>build-llamacpp-ov.sh</code></summary>
 
 ```bash
 #!/usr/bin/env bash
@@ -339,23 +344,23 @@ echo "  ./build/ReleaseOV/bin/llama-cli -m model.gguf"
 
 </details>
 
-#### Automated Windows Build Script
+#### Windows Build Script
 
 For Windows users, the following `.bat` script automates the prerequisite installs (Git, Ninja, CMake, Visual Studio 2022 Build Tools, vcpkg + OpenCL), the OpenVINO Runtime download/extract, and the Ninja-based llama.cpp build.
-Save the following as `windows-llamacpp-ov-install.bat` next to where you want the `llama.cpp` to land, then run it from either **Command Prompt** or **PowerShell**:
+Save the following as `build-llamacpp-ov.bat` next to where you want the `llama.cpp` to land, then run it from either **Command Prompt** or **PowerShell**:
 
 ```cmd
 :: Command Prompt
-windows-llamacpp-ov-install.bat
+build-llamacpp-ov.bat
 ```
 
 ```powershell
 # PowerShell
-.\windows-llamacpp-ov-install.bat
+.\build-llamacpp-ov.bat
 ```
 
 <details>
-<summary>Click to expand <code>windows-llamacpp-ov-install.bat</code></summary>
+<summary>Click to expand <code>build-llamacpp-ov.bat</code></summary>
 
 ```bat
 @echo off
@@ -454,9 +459,6 @@ if exist "%OPENVINO_INSTALL_DIR%\setupvars.bat" (
     )
 
     REM Move the single top-level folder contents into the versioned install dir.
-    REM NOTE: delayed expansion (!VAR!) is required because the surrounding else( ... )
-    REM block is parsed once up-front, so %OPENVINO_EXTRACTED% would expand to "" here
-    REM and xcopy would then treat "\*" as C:\* and fail with "Cannot perform a cyclic copy".
     set "OPENVINO_EXTRACTED="
     for /d %%i in ("%OPENVINO_EXTRACT_TMP%\*") do set "OPENVINO_EXTRACTED=%%i"
     if not defined OPENVINO_EXTRACTED (
