@@ -24,14 +24,13 @@ const std::vector<int64_t> & seq_axis_perm() {
 
 // True when the state still has the frontend's stateful KV layout, so the sequence axis
 // can be moved: rank 4, batch and both head dims static, and seq the only dynamic dim,
-// at dim 1. n_heads_kv (dim 2) must also be 1, because only then do [1, seq, 1, head]
-// and [1, 1, seq, head] describe the same memory - that keeps this a pure metadata
-// change and keeps the state byte-compatible with ggml's own [seq][n_heads_kv * head]
-// cache buffer. It is also the only case that gains anything, since the append is what
-// the GPU plugin handles badly on dim 1.
+// at dim 1. Any KV head count is fine. With a single head the rewrite is pure metadata
+// ([1, seq, 1, head] and [1, 1, seq, head] are the same memory); with several heads it
+// also drops the reader-side transpose of the whole accumulated state, which is where
+// most of the gain comes from at depth.
 bool can_move_seq_axis(const ov::PartialShape & shape) {
     return shape.rank().is_static() && shape.rank().get_length() == 4 && shape[0].is_static() &&
-           shape[1].is_dynamic() && shape[2].is_static() && shape[2].get_length() == 1 && shape[3].is_static();
+           shape[1].is_dynamic() && shape[2].is_static() && shape[3].is_static();
 }
 
 std::shared_ptr<ov::op::v0::Concat> match_kv_append(const std::shared_ptr<ov::op::v6::Assign> & assign) {
