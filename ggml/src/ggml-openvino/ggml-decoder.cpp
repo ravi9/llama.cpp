@@ -797,6 +797,7 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
                                                 layer) != model_params.swa_layers.end();
 
             model_params.kv_buffer_ctx_id = ggml_backend_openvino_buffer_get_ctx_id(cache_k->buffer);
+            model_params.n_heads_kv_per_layer[layer] = cache_k_permute->ne[2];
             if (layer_is_swa) {
                 model_params.ctx_per_seq_swa = cache_k->ne[1];
             } else {
@@ -954,17 +955,19 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
         if (is_stateful() && !is_flat_kv) {
             // Convert stateless KV cache layout [1, 1, seq, n_heads_kv * head_size]
             // to stateful layout [1, seq, n_heads_kv, head_size].
-            // NOTE: Gemma4 uses per-layer-type head sizes (sliding_attention layers
-            // head_dim=256, full_attention layers global_head_dim=512), so the single
-            // scalar m_model_params.head_size cannot describe every layer. Derive the
-            // head size from THIS tensor's own combined dim instead, so SWA and full
-            // layers each get their correct head_size.
+            // NOTE: Gemma4 uses per-layer-type KV shapes, so no single scalar describes every
+            // layer. E2B varies only the head size (sliding 256, full 512); 12B also varies the
+            // head COUNT (sliding 8 x 256, full 1 x 512). Take the head count for this tensor's
+            // own layer type and derive the head size from its own combined dim, so both layer
+            // types get the correct split. Using the model-level count split 12B's sliding
+            // states as 1 x 2048 and decoded garbage.
             assert(input_shape.size() == 4 && input_shape[0] == 1 && input_shape[1] == 1 &&
-                   input_shape[2].is_dynamic() && input_shape[3].is_static() &&
-                   input_shape[3].get_length() % m_model_params.n_heads_kv == 0);
+                   input_shape[2].is_dynamic() && input_shape[3].is_static());
+            const int n_heads_kv = get_n_heads_kv_for_tensor(input);
+            assert(n_heads_kv > 0 && input_shape[3].get_length() % n_heads_kv == 0);
             const int64_t combined_dim = input_shape[3].get_length();  // n_heads_kv * head_size
-            const int64_t head_size = combined_dim / m_model_params.n_heads_kv;
-            input_shape = {input_shape[0], ov::Dimension::dynamic(), m_model_params.n_heads_kv, head_size};
+            const int64_t head_size = combined_dim / n_heads_kv;
+            input_shape = {input_shape[0], ov::Dimension::dynamic(), n_heads_kv, head_size};
         }
 
     } else if (is_kv_idx(input, op)) {
