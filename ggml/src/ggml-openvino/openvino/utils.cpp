@@ -22,6 +22,7 @@
 #include <openvino/op/squeeze.hpp>
 #include <openvino/op/subtract.hpp>
 #include <openvino/op/transpose.hpp>
+#include <openvino/op/unsqueeze.hpp>
 #include <string>
 
 namespace ov {
@@ -334,6 +335,15 @@ ov::Output<ov::Node> process_view_input_new(const NodeContext & context, int inp
         if (shapes_match) {
             return input;
         }
+    }
+
+    // some weight tensors have 2D/3D shapes which would be incompatible with the
+    // 4D slices in this utility. unsqueeze to 4D in order to avoid this issue.
+    ov::Rank rank = input.get_partial_shape().rank();
+    if (rank.is_static() && rank.get_length() == 2){
+        input = std::make_shared<ov::op::v0::Unsqueeze>(input, ov::op::v0::Constant::create(ov::element::i64, {2}, {0, 1}));
+    } else if (rank.is_static() && rank.get_length() == 3){
+        input = std::make_shared<ov::op::v0::Unsqueeze>(input, ov::op::v0::Constant::create(ov::element::i64, {1}, {0}));
     }
 
     // In static mode, use Split instead of Slice for single-dimension reductions.
