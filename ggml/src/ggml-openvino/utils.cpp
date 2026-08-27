@@ -191,6 +191,26 @@ ov::Tensor create_ov_output_tensor(std::shared_ptr<GgmlOvDecoder> ggml_decoder,
     return output_tensor;
 }
 
+// Rewrite ggml's KV rows into a relayout state that keeps the sequence on dim 2.
+// ggml stores [seq][n_heads_kv * head_size]; the state wants [1, n_heads_kv, seq, head_size],
+// a different element order, so the rows are copied instead of reinterpreted.
+static ov::Tensor kv_rows_to_seq_axis_2(const ov::Tensor & kv_tensor, size_t n_heads_kv) {
+    const size_t rows = kv_tensor.get_shape()[2];
+    const size_t head_size = kv_tensor.get_shape()[3] / n_heads_kv;
+    const size_t elem = kv_tensor.get_element_type().size();
+    const size_t head_bytes = head_size * elem;
+
+    ov::Tensor out(kv_tensor.get_element_type(), ov::Shape{1, n_heads_kv, rows, head_size});
+    const auto * src = static_cast<const uint8_t *>(kv_tensor.data());
+    auto * dst = static_cast<uint8_t *>(out.data());
+    for (size_t s = 0; s < rows; s++) {
+        for (size_t h = 0; h < n_heads_kv; h++) {
+            memcpy(dst + (h * rows + s) * head_bytes, src + (s * n_heads_kv + h) * head_bytes, head_bytes);
+        }
+    }
+    return out;
+}
+
 enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<ov_runtime_context> r_ctx) {
     auto & core = ov_singleton_core();
     const auto & config = ggml_openvino_get_compile_config();
@@ -331,16 +351,16 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
                             state_name = it->second;
                         }
 
-                        // Which axis of THIS state holds the sequence. Must match
-                        // pass::KVStateSeqAxis, which moves it from dim 1 to dim 2 per state and
-                        // only where that state's KV head count is 1. gemma-4 12B mixes 1-head
-                        // full layers with 8-head sliding layers, so it cannot be decided
-                        // model-wide.
+                        // Which axis holds the sequence: pass::KVStateSeqAxis moves it from dim 1
+                        // to dim 2. The head count is still needed below, because only a 1-head
+                        // state stays byte-compatible with ggml's cache buffer. gemma-4 12B mixes
+                        // 1-head full layers with 8-head sliding layers, so it is per state.
                         int n_heads_kv = ggml_decoder->get_model_params().n_heads_kv;
                         if (auto layer = extract_layer_from_name(state_name); layer.has_value()) {
                             n_heads_kv = ggml_decoder->get_n_heads_kv_for_layer(layer.value());
                         }
-                        const size_t seq_axis = (relayout_enabled && n_heads_kv == 1) ? 2 : 1;
+                        const bool relayout_this_state = relayout_enabled;
+                        const size_t seq_axis = relayout_this_state ? 2 : 1;
                         const size_t head_axis = seq_axis == 2 ? 1 : 2;
 
                         if (refill) {
@@ -350,13 +370,19 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
                                 return GGML_STATUS_FAILED;
                             }
                             auto kv_tensor = get_ov_input_tensor(ggml_decoder, state_name);
-                            ov::Shape refill_shape(4);
-                            refill_shape[0] = state_tensor_shape[0];
-                            refill_shape[seq_axis] = kv_tensor.get_shape()[2];
-                            refill_shape[head_axis] = state_tensor_shape[head_axis];
-                            refill_shape[3] = state_tensor_shape[3];
-                            kv_tensor.set_shape(refill_shape);
-                            state_tensor = kv_tensor;
+                            if (relayout_this_state && n_heads_kv != 1) {
+                                // several heads with seq on dim 2: not the same bytes as ggml's
+                                // buffer, so the rows have to be copied into the new order
+                                state_tensor = kv_rows_to_seq_axis_2(kv_tensor, (size_t) n_heads_kv);
+                            } else {
+                                ov::Shape refill_shape(4);
+                                refill_shape[0] = state_tensor_shape[0];
+                                refill_shape[seq_axis] = kv_tensor.get_shape()[2];
+                                refill_shape[head_axis] = state_tensor_shape[head_axis];
+                                refill_shape[3] = state_tensor_shape[3];
+                                kv_tensor.set_shape(refill_shape);
+                                state_tensor = kv_tensor;
+                            }
                             state_tensor_shape = state_tensor.get_shape();
                         }
                         // Only ever shrink to a prefix the source really has. Slicing past it used to
