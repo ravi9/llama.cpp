@@ -23,7 +23,7 @@ struct ModelParams {
     int n_heads_kv = -1;
     int head_size = -1;
     int state_size = -1;  // for SSM molels, eg qwen35
-    int32_t rope_params[15];
+    int32_t rope_params[15] = {0};
     bool mixed_rope_params = false;
     std::vector<int> swa_layers;
 
