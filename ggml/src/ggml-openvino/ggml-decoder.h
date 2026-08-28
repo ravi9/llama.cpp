@@ -28,7 +28,7 @@ struct ModelParams {
     std::map<int, int> n_heads_kv_per_layer;
     int head_size = -1;
     int state_size = -1;  // for SSM molels, eg qwen35
-    int32_t rope_params[15];
+    int32_t rope_params[16];
     bool mixed_rope_params = false;
     std::vector<int> swa_layers;
     // The sliding-window mask tensor, identified in compute_llm_params() by grouping attention
@@ -41,7 +41,7 @@ struct ModelParams {
 
     bool same_rope_params(const ModelParams & other) const {
         return mixed_rope_params == other.mixed_rope_params &&
-               memcmp(rope_params, other.rope_params, sizeof(int32_t) * 15) == 0;
+               memcmp(rope_params, other.rope_params, sizeof(int32_t) * 16) == 0;
     }
 
     bool can_reuse_dynamically(const ModelParams & other) const { return same_rope_params(other); }

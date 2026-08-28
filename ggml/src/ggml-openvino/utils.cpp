@@ -445,7 +445,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
             if (!model_cache_dir.empty() && !model_is_splitted) {
                 const uint64_t extra_cfg = ggml_openvino_model_cache_extra_cfg(device, stateful);
                 model_fp = ggml_openvino_model_fingerprint(cgraph, device, /*fa=*/true, m_params.rope_params,
-                                                           15, extra_cfg);
+                                                           16, extra_cfg);
                 blob_path = ggml_openvino_model_cache_blob_path(model_cache_dir, model_fp);
                 manifest_path = ggml_openvino_model_cache_manifest_path(model_cache_dir, model_fp);
 
