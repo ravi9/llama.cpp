@@ -3,6 +3,7 @@
 #include "ggml-impl.h"
 #include "ggml.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <openvino/runtime/intel_gpu/ocl/ocl.hpp>
@@ -13,6 +14,46 @@
 ov::Core & ov_singleton_core() {
     static ov::Core core;
     return core;
+}
+
+static bool has_prefix(const std::string & s, const std::string & prefix) {
+    return s.size() >= prefix.size() && std::equal(prefix.begin(), prefix.end(), s.begin());
+}
+
+static bool is_virtual_routing_device(const std::string & device_name) {
+    return has_prefix(device_name, "AUTO") || has_prefix(device_name, "MULTI") || has_prefix(device_name, "HETERO");
+}
+
+static std::vector<std::string> ov_enumerate_devices() {
+    std::vector<std::string> result;
+
+    for (const auto & device : ov_singleton_core().get_available_devices()) {
+        if (!is_virtual_routing_device(device)) {
+            result.push_back(device);
+        }
+    }
+
+    if (result.empty()) {
+        result.push_back("CPU");
+    }
+
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
+}
+
+static std::string resolve_openvino_device_name(const std::vector<std::string> & available_devices,
+                                                const std::string & requested) {
+    if (available_devices.empty()) {
+        return "CPU";
+    }
+
+    auto it = std::find(available_devices.begin(), available_devices.end(), requested);
+    if (it != available_devices.end()) {
+        return *it;
+    }
+
+    return "CPU";
 }
 
 // =====================================================
@@ -65,16 +106,17 @@ void ggml_openvino_device_config::init() {
         }
     }
 
-    device_name = ggml_openvino_getenv_str("GGML_OPENVINO_DEVICE", "CPU");
-    auto available_devices = ov_singleton_core().get_available_devices();
-    if (std::find(available_devices.begin(), available_devices.end(), device_name) == available_devices.end()) {
-        GGML_LOG_WARN("GGML OpenVINO Backend: device %s is not available, fallback to CPU\n", device_name.c_str());
-        device_name = "CPU";
+    const std::string requested_device = ggml_openvino_getenv_str("GGML_OPENVINO_DEVICE", "CPU");
+    available_devices = ov_enumerate_devices();
+    device_name = resolve_openvino_device_name(available_devices, requested_device);
+    if (device_name != requested_device) {
+        GGML_LOG_WARN("GGML OpenVINO Backend: device %s is not available, fallback to %s\n", requested_device.c_str(),
+                      device_name.c_str());
     }
-    is_npu = (device_name == "NPU");
+    is_npu = has_prefix(device_name, "NPU");
 
     const char * cache_dir = ggml_openvino_getenv_str("GGML_OPENVINO_CACHE_DIR");
-    if (device_name == "NPU") {
+    if (has_prefix(device_name, "NPU")) {
         compile_config = {
             {"NPU_COMPILER_DYNAMIC_QUANTIZATION", "YES"   },
             {"NPU_USE_NPUW",                      "YES"   },
@@ -101,7 +143,7 @@ void ggml_openvino_device_config::init() {
     }
 
     // Initialize remote context with queue sharing for GPU
-    if (device_name == "GPU") {
+    if (has_prefix(device_name, "GPU")) {
         // Create OpenCL context and queue
         cl_int err;
         cl_platform_id platform;
@@ -136,7 +178,7 @@ void ggml_openvino_device_config::init() {
 
         // Release the context (queue keeps a reference)
         clReleaseContext(cl_ctx);
-    } else if (device_name == "NPU") {
+    } else if (has_prefix(device_name, "NPU")) {
         // remote tensor is not used for NPU yet
         // remote_context = ov_singleton_core().get_default_context(device_name);
     }
@@ -165,6 +207,12 @@ void ggml_openvino_init_device_config() {
 // Get the device name
 const std::string & ggml_openvino_get_device_name() {
     return ggml_openvino_get_device_config().device_name;
+}
+
+std::vector<std::string> ggml_openvino_get_available_devices() {
+    auto & config = ggml_openvino_get_device_config();
+    config.init();
+    return config.available_devices;
 }
 
 // Get the value of a GGML_OPENVINO_* env var as a string. Returns

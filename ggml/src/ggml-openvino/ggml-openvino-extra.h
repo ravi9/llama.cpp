@@ -60,6 +60,7 @@ clEnqueueMemcpyINTEL_fn ggml_openvino_get_clEnqueueMemcpyINTEL();
 
 struct ggml_openvino_device_config {
     std::string device_name = "CPU";
+    std::vector<std::string> available_devices;
     bool is_npu = false;
     bool initialized = false;
     std::optional<ov::RemoteContext> remote_context;
@@ -79,6 +80,9 @@ void ggml_openvino_init_device_config();
 
 // Get the device name
 const std::string & ggml_openvino_get_device_name();
+
+// Get all available physical OpenVINO devices
+std::vector<std::string> ggml_openvino_get_available_devices();
 
 // Environment variable accessors. All GGML_OPENVINO_* env vars are read once
 // during backend init and cached on the device config; consumers must go
