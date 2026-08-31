@@ -752,16 +752,10 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
         int64_t decode_conversion_end_time;
         int64_t prefill_compile_end_time;
         int64_t decode_compile_end_time;
-        auto prefill_future = std::async(std::launch::async, build_static_model, ggml_decoder_prefill, "prefill",
-                                         std::ref(model_prefill), std::ref(compiled_model_prefill),
-                                         std::ref(infer_request_prefill), std::ref(prefill_conversion_end_time),
-                                         std::ref(prefill_compile_end_time));
-        auto decode_future = std::async(std::launch::async, build_static_model, ggml_decoder_decode, "decode",
-                                        std::ref(model_decode), std::ref(compiled_model_decode),
-                                        std::ref(infer_request_decode), std::ref(decode_conversion_end_time),
-                                        std::ref(decode_compile_end_time));
-        prefill_future.get();
-        decode_future.get();
+        build_static_model(ggml_decoder_prefill, "prefill", model_prefill, compiled_model_prefill,
+                   infer_request_prefill, prefill_conversion_end_time, prefill_compile_end_time);
+        build_static_model(ggml_decoder_decode, "decode", model_decode, compiled_model_decode, infer_request_decode,
+                   decode_conversion_end_time, decode_compile_end_time);
         conversion_end_time = std::max(prefill_conversion_end_time, decode_conversion_end_time);
 
         std::filesystem::path ir_scratch;
@@ -792,16 +786,9 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
                 infer_request = std::make_shared<ov::InferRequest>(compiled_model.create_infer_request());
                 local_compile_end_time = ggml_time_us();
             };
-            auto prefill_compile_future = std::async(std::launch::async, compile_static_model, model_prefill,
-                                                     std::ref(compiled_model_prefill),
-                                                     std::ref(infer_request_prefill),
-                                                     std::ref(prefill_compile_end_time));
-            auto decode_compile_future = std::async(std::launch::async, compile_static_model, model_decode,
-                                                    std::ref(compiled_model_decode),
-                                                    std::ref(infer_request_decode),
-                                                    std::ref(decode_compile_end_time));
-            prefill_compile_future.get();
-            decode_compile_future.get();
+            compile_static_model(model_prefill, compiled_model_prefill, infer_request_prefill,
+                                 prefill_compile_end_time);
+            compile_static_model(model_decode, compiled_model_decode, infer_request_decode, decode_compile_end_time);
         }
         compile_end_time = std::max(prefill_compile_end_time, decode_compile_end_time);
 

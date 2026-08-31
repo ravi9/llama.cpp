@@ -1281,14 +1281,9 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
             return {false, "ROPE with type " + std::string(ggml_type_name(op->type)) + " is not supported"};
         }
         if (op->src[0]->op == GGML_OP_VIEW) {
-            const struct ggml_tensor * view = op->src[0];
-            const struct ggml_tensor * view_src = view->view_src;
-            if (view_src->ne[1] != view->ne[1] || view_src->ne[2] != view->ne[2] || view_src->ne[3] != view->ne[3]) {
-                return {false, "ROPE with view_src->ne [" + std::to_string(view_src->ne[1]) + ", " +
-                               std::to_string(view_src->ne[2]) + ", " + std::to_string(view_src->ne[3]) +
-                               "] != view->ne [" + std::to_string(view->ne[1]) + ", " +
-                               std::to_string(view->ne[2]) + ", " + std::to_string(view->ne[3]) +
-                               "] is not supported"};
+            if (op->src[0]->view_src->ne[1] != op->src[0]->ne[2]) {
+                return {false, "ROPE with src[0]->view_src->ne[1] " + std::to_string(op->src[0]->view_src->ne[1]) +
+                               " != src[0]->ne[2] " + std::to_string(op->src[0]->ne[2]) + " is not supported"};
             }
         }
         if (mode == GGML_ROPE_TYPE_IMROPE &&
