@@ -15,6 +15,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <unistd.h>
 #include <fstream>
 #include <functional>
 #include <future>
@@ -683,6 +685,14 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
         conversion_end_time = decoder_end_time;
         compile_end_time = decoder_end_time;
     } else {
+        // Same fail-fast as the dynamic path: once the host weight pages have been dropped
+        // they read as zeros, so a recompile here would bake garbage into the new model.
+        if (ggml_openvino_weight_buffers_released()) {
+            GGML_ABORT(
+                "ggml-openvino: a new graph needs to be compiled but host weight buffers were already "
+                "released via GGML_OPENVINO_RELEASE_WEIGHTS/GGML_OPENVINO_COMPILE_FROM_IR. This mode requires "
+                "stable graph shapes; disable host weight release for dynamic workloads.");
+        }
         if (cache_enabled) {
             std::lock_guard<std::mutex> map_lock(r_ctx->ctx_mutex);
             r_ctx->infer_request_cache.erase(key);
@@ -703,9 +713,10 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
         decoder_end_time = ggml_time_us();
 
         const bool dump_ir = ggml_openvino_getenv_int("GGML_OPENVINO_DUMP_IR");
+        const bool compile_from_ir = ggml_openvino_getenv_int("GGML_OPENVINO_COMPILE_FROM_IR");
         const auto dump_ir_timestamp = static_cast<long long>(ggml_time_us());
 
-        auto build_static_model = [&core, &config, dump_ir, dump_ir_timestamp](
+        auto build_static_model = [&core, &config, dump_ir, compile_from_ir, dump_ir_timestamp](
                           std::shared_ptr<GgmlOvDecoder> decoder,
                           const char * tag,
                           std::shared_ptr<ov::Model> & model,
@@ -725,9 +736,11 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
                 ov::serialize(model, timestamped_filename);
             }
 
-            compiled_model = core.compile_model(model, device, config);
-            infer_request = std::make_shared<ov::InferRequest>(compiled_model.create_infer_request());
-            local_compile_end_time = ggml_time_us();
+            if (!compile_from_ir) {
+                compiled_model = core.compile_model(model, device, config);
+                infer_request = std::make_shared<ov::InferRequest>(compiled_model.create_infer_request());
+                local_compile_end_time = ggml_time_us();
+            }
         };
         std::shared_ptr<ov::Model> model_prefill;
         std::shared_ptr<ov::Model> model_decode;
@@ -739,18 +752,50 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
         int64_t decode_conversion_end_time;
         int64_t prefill_compile_end_time;
         int64_t decode_compile_end_time;
-        auto prefill_future = std::async(std::launch::async, build_static_model, ggml_decoder_prefill, "prefill",
-                                         std::ref(model_prefill), std::ref(compiled_model_prefill),
-                                         std::ref(infer_request_prefill), std::ref(prefill_conversion_end_time),
-                                         std::ref(prefill_compile_end_time));
-        auto decode_future = std::async(std::launch::async, build_static_model, ggml_decoder_decode, "decode",
-                                        std::ref(model_decode), std::ref(compiled_model_decode),
-                                        std::ref(infer_request_decode), std::ref(decode_conversion_end_time),
-                                        std::ref(decode_compile_end_time));
-        prefill_future.get();
-        decode_future.get();
+        build_static_model(ggml_decoder_prefill, "prefill", model_prefill, compiled_model_prefill,
+                   infer_request_prefill, prefill_conversion_end_time, prefill_compile_end_time);
+        build_static_model(ggml_decoder_decode, "decode", model_decode, compiled_model_decode, infer_request_decode,
+                   decode_conversion_end_time, decode_compile_end_time);
         conversion_end_time = std::max(prefill_conversion_end_time, decode_conversion_end_time);
+
+        std::filesystem::path ir_scratch;
+        if (compile_from_ir) {
+            ir_scratch = std::filesystem::temp_directory_path() /
+                         ("ggml_ov_ir_" + std::to_string(static_cast<long long>(getpid())));
+            std::filesystem::create_directories(ir_scratch);
+            const auto prefill_xml = (ir_scratch / "prefill.xml").string();
+            const auto decode_xml = (ir_scratch / "decode.xml").string();
+            ov::serialize(model_prefill, prefill_xml);
+            ov::serialize(model_decode, decode_xml);
+
+            model_prefill.reset();
+            model_decode.reset();
+            if (!ggml_openvino_weight_buffers_released()) {
+                ggml_openvino_release_weight_buffers();
+            }
+
+            model_prefill = core.read_model(prefill_xml);
+            model_decode = core.read_model(decode_xml);
+
+            auto compile_static_model = [&core, &config](
+                                            const std::shared_ptr<ov::Model> & model,
+                                            ov::CompiledModel & compiled_model,
+                                            std::shared_ptr<ov::InferRequest> & infer_request,
+                                            int64_t & local_compile_end_time) {
+                compiled_model = core.compile_model(model, device, config);
+                infer_request = std::make_shared<ov::InferRequest>(compiled_model.create_infer_request());
+                local_compile_end_time = ggml_time_us();
+            };
+            compile_static_model(model_prefill, compiled_model_prefill, infer_request_prefill,
+                                 prefill_compile_end_time);
+            compile_static_model(model_decode, compiled_model_decode, infer_request_decode, decode_compile_end_time);
+        }
         compile_end_time = std::max(prefill_compile_end_time, decode_compile_end_time);
+
+        if (!ir_scratch.empty()) {
+            std::error_code ec;
+            std::filesystem::remove_all(ir_scratch, ec);
+        }
 
         model = is_prefill ? model_prefill : model_decode;
         ggml_decoder = is_prefill ? ggml_decoder_prefill : ggml_decoder_decode;
