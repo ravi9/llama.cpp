@@ -88,7 +88,9 @@ OutputVector translate_reshape(const NodeContext & context) {
             new_shape_node =
                 std::make_shared<ov::op::v0::Concat>(ov::OutputVector{one, n_slot_active_len, neg_one, emb_size}, 0);
         } else {
-            new_shape_node = ov::op::v0::Constant::create(ov::element::i64, {4}, context.get_output_shape().to_shape());
+            new_shape_node = ov::op::v0::Constant::create(
+                ov::element::i64, {4},
+                std::vector<int64_t>{1, 1, -1, (int64_t) context.get_output_shape().to_shape()[3]});
         }
     } else if (op_case == 7) {
         // 57: [  2048,     2,     1,     1] RESHAPE              linear_attn_out-0 (reshaped)
