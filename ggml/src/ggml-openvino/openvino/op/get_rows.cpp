@@ -27,6 +27,10 @@ OutputVector translate_get_rows(const NodeContext & context) {
     auto data = process_view_input_new(context, 0);
 
     auto op_case = context.get_op_case();
+    if (op_case == 3 || op_case == 4) {
+        return {data};
+    }
+
     ov::Output<ov::Node> indices;
     if ((op_case == 1 || op_case == 2) && context.has_input("s_copy_active_slot_len")) {
         // Recurrent state reorder (inp->s_copy): slice the active (op_case 1) or extra (op_case 2)

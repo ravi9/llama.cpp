@@ -90,10 +90,18 @@ OutputVector translate_cpy(const NodeContext & context) {
             return {context.get_input(1)};
         }
     }
+    // op_case 7/8/9 are the single-slot variants; the active state replaces the full cache and
+    // the defrag remainder is a no-op.
+    const bool single_slot_assign = op_case >= 7 && op_case <= 9;
+    const int writeback_case = single_slot_assign ? op_case - 6 : op_case;
     const std::string slot_begin_name = "rs_slot_begin_" + context.get_name();
-    const bool slice_assign =
-        context.has_input(slot_begin_name) && !context.is_stateful() && (op_case >= 1 && op_case <= 3);
+    const bool slice_assign = !context.is_stateful() && writeback_case >= 1 && writeback_case <= 3 &&
+                              (single_slot_assign || context.has_input(slot_begin_name));
     if (slice_assign) {
+        if (single_slot_assign && writeback_case == 3) {
+            return {context.get_input(1)};
+        }
+
         const int64_t slot_axis = 2;
         auto zero = ov::op::v0::Constant::create(ov::element::i64, {1}, {0});
         auto one = ov::op::v0::Constant::create(ov::element::i64, {1}, {1});
@@ -103,9 +111,12 @@ OutputVector translate_cpy(const NodeContext & context) {
                                                     std::vector<int64_t>{1, 1, -1, output_shape[3].get_length()});
 
         ov::Output<ov::Node> src;
-        ov::Output<ov::Node> begin = context.get_input(slot_begin_name);
+        ov::Output<ov::Node> begin;
+        if (!single_slot_assign) {
+            begin = context.get_input(slot_begin_name);
+        }
         auto base = context.get_input(1);
-        if (op_case == 1) {
+        if (writeback_case == 1) {
             ov::Output<ov::Node> state_begin;
             const std::string src_begin_name = "rs_src_begin_" + context.get_name();
             if (context.has_input(src_begin_name)) {
@@ -124,7 +135,7 @@ OutputVector translate_cpy(const NodeContext & context) {
             auto state_part =
                 std::make_shared<ov::op::v8::Slice>(context.get_input(0), state_begin, int_max, one, axis);
             src = std::make_shared<ov::op::v1::Reshape>(state_part, feature, false);
-        } else if (op_case == 2) {
+        } else if (writeback_case == 2) {
             // conv_input is [previous conv state | new tokens]; the snapshot is the conv_kernel_size - 1
             // columns ending at the last *valid* token. Gather (rather than Slice) keeps the output
             // shape static even though the window start is a runtime value.
@@ -177,6 +188,10 @@ OutputVector translate_cpy(const NodeContext & context) {
                 src = std::make_shared<ov::op::v0::Convert>(src, context.get_output_type());
             }
 
+            if (single_slot_assign) {
+                return rename_outputs_with_suffix({src}, context.get_name());
+            }
+
             auto src_len = std::make_shared<ov::op::v8::Gather>(
                 std::make_shared<ov::op::v3::ShapeOf>(src, ov::element::i64), axis,
                 ov::op::v0::Constant::create(ov::element::i64, {}, {0}));
@@ -198,6 +213,10 @@ OutputVector translate_cpy(const NodeContext & context) {
 
         if (src.get_element_type() != context.get_output_type()) {
             src = std::make_shared<ov::op::v0::Convert>(src, context.get_output_type());
+        }
+
+        if (single_slot_assign) {
+            return rename_outputs_with_suffix({src}, context.get_name());
         }
 
         auto src_len =

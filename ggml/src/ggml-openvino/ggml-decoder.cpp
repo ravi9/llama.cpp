@@ -128,6 +128,12 @@ bool is_conv_state_writeback(const ggml_tensor * node) {
            node->src[1]->view_src == node->view_src;
 }
 
+bool is_full_single_slot_writeback(const ggml_tensor * node) {
+    return node->view_src != nullptr && node->view_src->ne[1] == 1 && node->src[1] != nullptr &&
+           node->src[1]->op == GGML_OP_VIEW && node->src[1]->view_src == node->view_src &&
+           node->src[1]->view_offs == 0 && ggml_nbytes(node->src[1]) == ggml_nbytes(node->view_src);
+}
+
 // MoE expert aggregation (build_moe_ffn in llama-graph.cpp): each expert plane is
 // `ggml_view_2d(experts, n_embd, n_tokens, experts->nb[2], i*experts->nb[1])` and the planes
 // are summed with a chain of ADDs: moe_out = ((view_0 + view_1) + view_2) + ... + view_{n-1}.
@@ -342,11 +348,12 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         if (node->src[1]->op == GGML_OP_VIEW) {
             // GET_ROWS gathering recurrent state cache rows via the inp->s_copy index list:
             // src[0] is a reshape of cache_r/cache_s, src[1] is a view of the s_copy leaf.
-            // op_case 3: main view (active sequences, view offset 0)
-            // op_case 4: extra view (defrag remainder, nonzero view offset)
+            // op_case 1/2: active/extra rows of a multi-slot cache
+            // op_case 3/4: active/extra rows of a single-slot cache
             if (node->src[0]->op == GGML_OP_RESHAPE && node->src[0]->src[0] != nullptr &&
                 is_kvcache(node->src[0]->src[0], nullptr)) {
-                op_case = node->src[1]->view_offs == 0 ? 1 : 2;
+                const bool single_slot = node->src[0]->src[0]->ne[1] == 1;
+                op_case = (node->src[1]->view_offs == 0 ? 1 : 2) + (single_slot ? 2 : 0);
             }
         }
         break;
@@ -452,9 +459,9 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
     case GGML_OP_CPY: {
         if (node->src[0]->op == GGML_OP_VIEW) {
             if (node->src[0]->src[0]->op == GGML_OP_GATED_DELTA_NET) {
-                op_case = 1;
+                op_case = is_full_single_slot_writeback(node) ? 7 : 1;
             } else if (is_conv_state_writeback(node)) {
-                op_case = 2;
+                op_case = is_full_single_slot_writeback(node) ? 8 : 2;
                 break;
             } else if (is_conv_states_all_tensor(node->view_src) && node->src[1] != nullptr &&
                        node->src[1]->op == GGML_OP_VIEW && node->src[1]->view_src == node->view_src) {
@@ -465,7 +472,7 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
                    node->src[1]->op == GGML_OP_VIEW && node->src[1]->view_src != nullptr &&
                    is_kvcache(node->src[1]->view_src, nullptr)) {
             // s_copy defrag remainder writeback: gathered extra state rows copied back into the cache
-            op_case = 3;
+            op_case = node->src[1]->view_src->ne[1] == 1 ? 9 : 3;
         } else if (node->src[1] != nullptr && node->src[1]->op == GGML_OP_VIEW && node->src[1]->view_src != nullptr) {
             // op_case 5: KV write for decoder self-attention (dynamic write offset)
             // op_case 6: KV write for encoder self-attn or cross-attn (static offset)
@@ -888,7 +895,7 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
                 }
                 compute_params.rs_writebacks[get_tensor_ov_name(cgraph, node)] = writeback;
             }
-            if (is_conv || is_gdn) {
+            if ((is_conv || is_gdn) && !is_full_single_slot_writeback(node)) {
                 compute_params.s_copy_active_slot_len = (int) dest_view->ne[1];
             }
         }
