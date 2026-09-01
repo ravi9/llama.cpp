@@ -148,7 +148,58 @@ static uint64_t ggml_openvino_model_cache_extra_cfg(const std::string & device, 
     extra_cfg = extra_cfg * 131 + (ggml_openvino_reduce_compile_mem_enabled() ? 1u : 0u);
     extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_KV_SLICE") ? 1u : 0u);
     extra_cfg = extra_cfg * 131 + (manual_gqa_enabled ? 1u : 0u);
+    extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_PROFILING") >= 2 ? 1u : 0u);
     return extra_cfg;
+}
+
+static std::string ov_profiling_csv_field(const std::string & value) {
+    std::string escaped = "\"";
+    for (char c : value) {
+        escaped += c;
+        if (c == '"') {
+            escaped += c;
+        }
+    }
+    escaped += '"';
+    return escaped;
+}
+
+static void dump_ov_profiling_info(const ov::InferRequest & infer_request) {
+    if (ggml_openvino_getenv_int("GGML_OPENVINO_PROFILING") < 2) {
+        return;
+    }
+
+    static std::atomic<uint64_t> inference_index{0};
+    const uint64_t index = inference_index.fetch_add(1);
+    const std::string path = "openvino_profile_" + std::to_string(index) + ".csv";
+    std::ofstream output(path, std::ios::trunc);
+    if (!output.is_open()) {
+        GGML_LOG_WARN("ggml-openvino: failed to write profiling data to %s\n", path.c_str());
+        return;
+    }
+
+    output << "status,real_time_us,cpu_time_us,start_time_us,node_type,node_name,exec_type\n";
+    int64_t total_real_time = 0;
+    int64_t total_cpu_time = 0;
+    size_t executed_count = 0;
+    for (const auto & info : infer_request.get_profiling_info()) {
+        const char * status = "NOT_RUN";
+        if (info.status == ov::ProfilingInfo::Status::EXECUTED) {
+            status = "EXECUTED";
+            total_real_time += info.real_time.count();
+            total_cpu_time += info.cpu_time.count();
+            executed_count++;
+        } else if (info.status == ov::ProfilingInfo::Status::OPTIMIZED_OUT) {
+            status = "OPTIMIZED_OUT";
+        }
+
+        output << status << ',' << info.real_time.count() << ',' << info.cpu_time.count() << ','
+               << info.start_time.count() << ',' << ov_profiling_csv_field(info.node_type) << ','
+               << ov_profiling_csv_field(info.node_name) << ',' << ov_profiling_csv_field(info.exec_type) << '\n';
+    }
+
+    GGML_LOG_INFO("ggml-openvino: profile %s: %zu executed nodes, %.3f ms device, %.3f ms CPU\n", path.c_str(),
+                  executed_count, total_real_time / 1000.0, total_cpu_time / 1000.0);
 }
 
 ov::Tensor create_ov_output_tensor(std::shared_ptr<GgmlOvDecoder> ggml_decoder,
@@ -220,19 +271,28 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
 
     static const bool cache_disabled = ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_CACHE");
 
+    auto start_time = ggml_time_us();
+
     // is_model_splitted is O(n_nodes^2) plus a create_weight_nodes scan and takes ~20 ms
     // on a Llama-1B decode graph. It is called once per graph_compute invocation but the
     // graph shape is identical across all decode steps, so memoize by graph_key: compute
     // graph_key first (a few hundred us), and if the same key is already in decoder_cache
     // we know the graph is not splitted (only not-splitted graphs get inserted there).
+    const int64_t cache_key_start_time = ggml_time_us();
     graph_key key(cgraph);
+    const int64_t cache_key_compute_time = ggml_time_us() - cache_key_start_time;
+    int64_t cache_lookup_time = 0;
     bool key_seen = false;
     if (!cache_disabled) {
+        const int64_t cache_lookup_start_time = ggml_time_us();
         std::lock_guard<std::mutex> map_lock(r_ctx->ctx_mutex);
         key_seen = r_ctx->decoder_cache.find(key) != r_ctx->decoder_cache.end();
+        cache_lookup_time += ggml_time_us() - cache_lookup_start_time;
     }
 
+    const int64_t model_split_check_start_time = ggml_time_us();
     bool model_is_splitted = key_seen ? false : is_model_splitted(cgraph);
+    const int64_t model_split_check_time = ggml_time_us() - model_split_check_start_time;
 
     if (is_naive(cgraph)) {
         if (!model_is_splitted) {
@@ -240,13 +300,13 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
         }
     }
 
-    auto start_time = ggml_time_us();
-
     std::shared_ptr<GgmlOvDecoder> ggml_decoder;
     std::shared_ptr<ov::InferRequest> infer_request;
     ModelParams m_params;
     ComputeParams c_params;
+    const int64_t graph_param_compute_start_time = ggml_time_us();
     std::tie(m_params, c_params) = GgmlOvDecoder::compute_llm_params(cgraph, is_static);
+    const int64_t graph_param_compute_time = ggml_time_us() - graph_param_compute_start_time;
 
     const bool cache_enabled = !model_is_splitted && !cache_disabled;
     bool cache_hit = false;
@@ -261,6 +321,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
         std::shared_ptr<decoder_runtime_ctx> entry;
         ModelParams old_m_params;
 
+        const int64_t cache_lookup_start_time = ggml_time_us();
         if (cache_enabled) {
             std::lock_guard<std::mutex> map_lock(r_ctx->ctx_mutex);
             auto it = r_ctx->decoder_cache.find(key);
@@ -278,6 +339,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
             entry = std::make_shared<decoder_runtime_ctx>(mutex);
             cache_hit = false;
         }
+        cache_lookup_time += ggml_time_us() - cache_lookup_start_time;
 
         std::lock_guard<std::mutex> lock(*(entry->mutex));
 
@@ -636,6 +698,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
         ov_raw_infer_start = ggml_time_us();
         infer_request->infer();
         infer_end_time = ggml_time_us();
+        dump_ov_profiling_info(*infer_request);
 
         if (ggml_openvino_getenv_int("GGML_OPENVINO_DEBUG_OUTPUT") ||
             ggml_openvino_getenv_str("GGML_OPENVINO_DEBUG_NODE")) {
@@ -648,13 +711,17 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
         if (ggml_openvino_getenv_int("GGML_OPENVINO_PROFILING")) {
             GGML_LOG_INFO("\nGGML OpenVINO Backend: \n");
             GGML_LOG_INFO("  - Graph decoder time: %.3f ms \n", (decoder_end_time - start_time) / 1000.0);
+            GGML_LOG_INFO("    - cache key compute time: %.3f ms \n", cache_key_compute_time / 1000.0);
+            GGML_LOG_INFO("    - model split check time: %.3f ms \n", model_split_check_time / 1000.0);
+            GGML_LOG_INFO("    - graph param compute time: %.3f ms \n", graph_param_compute_time / 1000.0);
+            GGML_LOG_INFO("    - cache lookup time: %.3f ms \n", cache_lookup_time / 1000.0);
             if (!cache_hit) {
                 GGML_LOG_INFO("  - Graph conversion time: %.3f ms \n",
                               (conversion_end_time - decoder_end_time) / 1000.0);
                 GGML_LOG_INFO("  - Graph compile time: %.3f ms \n", (compile_end_time - conversion_end_time) / 1000.0);
             }
             GGML_LOG_INFO("  - Graph inference time: %.3f ms \n", (infer_end_time - compile_end_time) / 1000.0);
-            GGML_LOG_INFO("  - OV raw infer time: %.3f ms \n", (infer_end_time - ov_raw_infer_start) / 1000.0);
+            GGML_LOG_INFO("    - OV raw infer time: %.3f ms \n", (infer_end_time - ov_raw_infer_start) / 1000.0);
         }
     }
 

@@ -104,6 +104,10 @@ void ggml_openvino_device_config::init() {
         compile_config.insert(ov::cache_mode(ov::CacheMode::OPTIMIZE_SIZE));
     }
 
+    if (ggml_openvino_getenv_int("GGML_OPENVINO_PROFILING") >= 2) {
+        compile_config.insert(ov::enable_profiling(true));
+    }
+
     // Initialize remote context with queue sharing for GPU
     if (device_name == "GPU") {
         // Create OpenCL context and queue
@@ -128,7 +132,14 @@ void ggml_openvino_device_config::init() {
             return;
         }
 
-        cl_queue = clCreateCommandQueueWithProperties(cl_ctx, cl_device, nullptr, &err);
+        const cl_queue_properties profiling_properties[] = {
+            CL_QUEUE_PROPERTIES,
+            CL_QUEUE_PROFILING_ENABLE,
+            0,
+        };
+        const cl_queue_properties * queue_properties =
+            ggml_openvino_getenv_int("GGML_OPENVINO_PROFILING") >= 2 ? profiling_properties : nullptr;
+        cl_queue = clCreateCommandQueueWithProperties(cl_ctx, cl_device, queue_properties, &err);
         if (err != CL_SUCCESS) {
             GGML_LOG_ERROR("Failed to create OpenCL command queue: %d\n", err);
             clReleaseContext(cl_ctx);
