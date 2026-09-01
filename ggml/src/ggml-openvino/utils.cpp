@@ -191,6 +191,26 @@ ov::Tensor create_ov_output_tensor(std::shared_ptr<GgmlOvDecoder> ggml_decoder,
     return output_tensor;
 }
 
+// Rewrite ggml's KV rows into a relayout state that keeps the sequence on dim 2.
+// ggml stores [seq][n_heads_kv * head_size]; the state wants [1, n_heads_kv, seq, head_size],
+// a different element order, so the rows are copied instead of reinterpreted.
+static ov::Tensor kv_rows_to_seq_axis_2(const ov::Tensor & kv_tensor, size_t n_heads_kv) {
+    const size_t rows = kv_tensor.get_shape()[2];
+    const size_t head_size = kv_tensor.get_shape()[3] / n_heads_kv;
+    const size_t elem = kv_tensor.get_element_type().size();
+    const size_t head_bytes = head_size * elem;
+
+    ov::Tensor out(kv_tensor.get_element_type(), ov::Shape{1, n_heads_kv, rows, head_size});
+    const auto * src = static_cast<const uint8_t *>(kv_tensor.data());
+    auto * dst = static_cast<uint8_t *>(out.data());
+    for (size_t s = 0; s < rows; s++) {
+        for (size_t h = 0; h < n_heads_kv; h++) {
+            memcpy(dst + (h * rows + s) * head_bytes, src + (s * n_heads_kv + h) * head_bytes, head_bytes);
+        }
+    }
+    return out;
+}
+
 enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<ov_runtime_context> r_ctx) {
     auto & core = ov_singleton_core();
     const auto & config = ggml_openvino_get_compile_config();
@@ -297,32 +317,90 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
                 } else if (r_ctx->stateful_kv_size == static_cast<size_t>(pos_data[0])) {
                     r_ctx->stateful_kv_size += pos_shape[3];
                 } else {
+                    const size_t pos_begin = static_cast<size_t>(pos_data[0]);
+                    const bool refill = pos_begin > r_ctx->stateful_kv_size;
+
+                    // A refill seeds the state from ggml's KV cache, so it needs that cache to be a
+                    // plain prefix: cell i must hold position i. An SWA layer keeps only the last
+                    // n_swa positions, so once a position leaves the window ggml drops it and the
+                    // remaining cells shift - cell i stops holding position i. While every position
+                    // is still inside the window nothing has been dropped and the refill is sound.
+                    if (refill && !ggml_decoder->get_model_params().swa_layers.empty()) {
+                        const int n_swa = ggml_decoder->get_compute_params().swa_window;
+                        if (n_swa < 0 || static_cast<size_t>(n_swa) < pos_begin) {
+                            GGML_LOG_ERROR(
+                                "GGML OpenVINO backend stateful inference failed: cannot resume at position %zu from a "
+                                "state that holds %zu tokens, because the sliding-window layers keep only the last %d "
+                                "positions. Run without GGML_OPENVINO_STATEFUL_EXECUTION.\n",
+                                pos_begin, r_ctx->stateful_kv_size, n_swa);
+                            return GGML_STATUS_FAILED;
+                        }
+                    }
+
+                    const bool relayout_enabled =
+                        !ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT");
+
                     auto states = infer_request->query_state();
                     for (auto state : states) {
                         auto state_tensor = state.get_state();
                         auto state_tensor_shape = state_tensor.get_shape();
-                        if (static_cast<uint32_t>(pos_data[0]) > r_ctx->stateful_kv_size) {
-                            std::string state_name;
-                            try {
-                                state_name = r_ctx->kv_state_input_name_map.at(state.get_name());
-                            } catch (...) {
+
+                        std::string state_name;
+                        if (auto it = r_ctx->kv_state_input_name_map.find(state.get_name());
+                            it != r_ctx->kv_state_input_name_map.end()) {
+                            state_name = it->second;
+                        }
+
+                        // Which axis holds the sequence: pass::KVStateSeqAxis moves it from dim 1
+                        // to dim 2. The head count is still needed below, because only a 1-head
+                        // state stays byte-compatible with ggml's cache buffer. gemma-4 12B mixes
+                        // 1-head full layers with 8-head sliding layers, so it is per state.
+                        int n_heads_kv = ggml_decoder->get_model_params().n_heads_kv;
+                        if (auto layer = extract_layer_from_name(state_name); layer.has_value()) {
+                            n_heads_kv = ggml_decoder->get_n_heads_kv_for_layer(layer.value());
+                        }
+                        const bool relayout_this_state = relayout_enabled;
+                        const size_t seq_axis = relayout_this_state ? 2 : 1;
+                        const size_t head_axis = seq_axis == 2 ? 1 : 2;
+
+                        if (refill) {
+                            if (state_name.empty()) {
                                 GGML_LOG_ERROR(
                                     "GGML OpenVINO backend stateful inference failed: no input found for the state\n");
                                 return GGML_STATUS_FAILED;
                             }
                             auto kv_tensor = get_ov_input_tensor(ggml_decoder, state_name);
-                            kv_tensor.set_shape({state_tensor_shape[0], kv_tensor.get_shape()[2], state_tensor_shape[2],
-                                                 state_tensor_shape[3]});
-                            state_tensor = kv_tensor;
+                            if (relayout_this_state && n_heads_kv != 1) {
+                                // several heads with seq on dim 2: not the same bytes as ggml's
+                                // buffer, so the rows have to be copied into the new order
+                                state_tensor = kv_rows_to_seq_axis_2(kv_tensor, (size_t) n_heads_kv);
+                            } else {
+                                ov::Shape refill_shape(4);
+                                refill_shape[0] = state_tensor_shape[0];
+                                refill_shape[seq_axis] = kv_tensor.get_shape()[2];
+                                refill_shape[head_axis] = state_tensor_shape[head_axis];
+                                refill_shape[3] = state_tensor_shape[3];
+                                kv_tensor.set_shape(refill_shape);
+                                state_tensor = kv_tensor;
+                            }
                             state_tensor_shape = state_tensor.get_shape();
                         }
+                        // Only ever shrink to a prefix the source really has. Slicing past it used to
+                        // surface as a bare ov::Exception from the ROI constructor.
+                        if (state_tensor_shape[seq_axis] < pos_begin) {
+                            GGML_LOG_ERROR(
+                                "GGML OpenVINO backend stateful inference failed: state '%s' holds %zu tokens on axis "
+                                "%zu, cannot resume at position %zu\n",
+                                state.get_name().c_str(), state_tensor_shape[seq_axis], seq_axis, pos_begin);
+                            return GGML_STATUS_FAILED;
+                        }
                         ov::Coordinate begin = {0, 0, 0, 0};
-                        ov::Coordinate end = {state_tensor_shape[0], static_cast<uint32_t>(pos_data[0]),
-                                              state_tensor_shape[2], state_tensor_shape[3]};
+                        ov::Coordinate end(state_tensor_shape.begin(), state_tensor_shape.end());
+                        end[seq_axis] = pos_begin;
                         ov::Tensor new_state_tensor(state_tensor, begin, end);
                         state.set_state(new_state_tensor);
                     }
-                    r_ctx->stateful_kv_size = pos_data[0] + pos_shape[3];
+                    r_ctx->stateful_kv_size = pos_begin + pos_shape[3];
                 }
             }
 
@@ -506,6 +584,18 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
             if (stateful && cache_enabled) {
                 const auto * inp_pos = get_inp_pos_tensor(cgraph);
                 auto pos_shape = ggml_decoder->get_shape(inp_pos);
+                // A freshly compiled model starts with an empty state, so it can only serve a
+                // sequence from its beginning. A non-zero start position means the KV history was
+                // built elsewhere (a restored ggml cache), which the state cannot adopt.
+                const int32_t pos_begin = ((int32_t *) inp_pos->data)[0];
+                if (pos_begin != 0) {
+                    GGML_LOG_ERROR(
+                        "GGML OpenVINO backend stateful inference failed: a new model was compiled for a sequence that "
+                        "starts at position %d, but its state is empty. Run without "
+                        "GGML_OPENVINO_STATEFUL_EXECUTION.\n",
+                        pos_begin);
+                    return GGML_STATUS_FAILED;
+                }
                 r_ctx->stateful_kv_size = pos_shape[3];
                 const auto kv_param_res_names = ggml_decoder->get_kv_param_res_names();
                 for (const auto & pair : kv_param_res_names) {
