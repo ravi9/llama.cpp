@@ -30,6 +30,7 @@ struct ModelParams {
     int state_size = -1;  // for SSM molels, eg qwen35
     int32_t rope_params[16];
     bool mixed_rope_params = false;
+    bool is_cacheless_attn = false;
     std::vector<int> swa_layers;
     // The sliding-window mask tensor, identified in compute_llm_params() by grouping attention
     // layers on the mask they consume. Only used to tell the two masks apart when naming OV
@@ -370,6 +371,12 @@ public:
     inline static bool is_inp_mask(const ggml_tensor * tensor, const ggml_tensor * op) {
         return op->op == GGML_OP_CPY || (op->op == GGML_OP_FLASH_ATTN_EXT && tensor == op->src[3]) ||
                (op->op == GGML_OP_SOFT_MAX && tensor == op->src[1]);
+    }
+
+    inline static bool is_inp_mean(const ggml_tensor * tensor, const ggml_tensor * op) {
+        return op->op == GGML_OP_MUL_MAT && tensor == op->src[1] && tensor->op == GGML_OP_NONE &&
+               (tensor->flags & GGML_TENSOR_FLAG_INPUT) && tensor->type == GGML_TYPE_F32 &&
+               op->src[0] != nullptr && op->src[0]->op != GGML_OP_NONE;
     }
 
     inline static bool is_rope_freqs_weight(const ggml_tensor * tensor, const ggml_tensor * op) {
