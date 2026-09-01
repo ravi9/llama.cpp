@@ -1268,7 +1268,10 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
     }
     case GGML_OP_CPY: {
         if (op->src[0]->type != GGML_TYPE_BF16 && op->src[1]->type == GGML_TYPE_BF16) {
-            return {false, "CPY with BF16 src type is not supported"};
+            return {false, "CPY with BF16 src[1] type is not supported"};
+        }
+        if (ggml_openvino_get_device_name() == "NPU" && (op->src[0]->type == GGML_TYPE_BF16 || op->src[1]->type == GGML_TYPE_BF16)) {
+            return {false, "CPY with BF16 is not supported is not supported on NPU"};
         }
         // CPY to a quantized destination (e.g. f32 -> q4_0) is numerically unstable with OpenVINO backend.
         if (ggml_is_quantized(op->type)) {
