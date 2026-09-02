@@ -251,7 +251,7 @@ void preprocess(TensorMap & tensor_map, GgmlDecoder & ggml_model_decoder) {
 }  // namespace
 
 TranslateSession::TranslateSession(const frontend::InputModel::Ptr & input_model,
-                                   const std::unordered_map<std::string, CreatorFunction> & translator_map,
+                                   const std::unordered_map<std::string, OpEntry> & translator_map,
                                    bool naive) :
     m_input_model(input_model),
     m_translator_map(translator_map),
@@ -303,7 +303,7 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
         FRONT_END_OP_CONVERSION_CHECK(it != m_translator_map.end(), "Translation for operation type ", operation_type,
                                       " is not implemented.");
         NodeContext node_context(decoder, tensor_map, node_idx, this);
-        ov::OutputVector converted_outputs = it->second(node_context);
+        ov::OutputVector converted_outputs = it->second.translate(node_context);
 
         const auto & node_output_names = decoder->get_output_names(node_idx);
         FRONT_END_OP_CONVERSION_CHECK(node_output_names.size() == converted_outputs.size(), "Number of ",
