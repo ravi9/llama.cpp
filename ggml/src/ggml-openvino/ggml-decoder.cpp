@@ -118,16 +118,6 @@ bool is_conv_states_all_tensor(const ggml_tensor * tensor) {
     return tensor != nullptr && strncmp(tensor->name, "conv_states_all", strlen("conv_states_all")) == 0;
 }
 
-// CPY writing the tail of conv_input (the concat of the previous conv state and the new tokens)
-// back into a slot block of the recurrent state cache. Detected structurally because the rollback
-// variant (cparams.n_rs_seq > 0) emits one such CPY per snapshot slot without naming them.
-bool is_conv_state_writeback(const ggml_tensor * node) {
-    return node->op == GGML_OP_CPY && node->view_src != nullptr && GgmlOvDecoder::is_kvcache(node->view_src, nullptr) &&
-           node->src[0] != nullptr && node->src[0]->op == GGML_OP_VIEW && node->src[0]->src[0] != nullptr &&
-           node->src[0]->src[0]->op == GGML_OP_CONCAT && node->src[1] != nullptr && node->src[1]->op == GGML_OP_VIEW &&
-           node->src[1]->view_src == node->view_src;
-}
-
 // MoE expert aggregation (build_moe_ffn in llama-graph.cpp): each expert plane is
 // `ggml_view_2d(experts, n_embd, n_tokens, experts->nb[2], i*experts->nb[1])` and the planes
 // are summed with a chain of ADDs: moe_out = ((view_0 + view_1) + view_2) + ... + view_{n-1}.
@@ -861,8 +851,14 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
             model_params.state_size = node->src[0]->ne[0];
         }
         if (node->op == GGML_OP_SCALE && node->view_src != nullptr && is_kvcache(node->view_src, nullptr)) {
-            compute_params.cache_rs_reset_len = ggml_nelements(node) / node->view_src->ne[0];
-            compute_params.cache_rs_reset_idx = node->src[0]->view_offs / node->view_src->ne[0];
+            // A recurrent state cache can have a zero-length row: minimax-01's linear attention
+            // carries no conv state, so cache_r is allocated with ne[0] == 0. The reset then covers
+            // nothing, so leave the params unset (-1) - add_extra_inputs skips them and the SCALE
+            // keeps its plain lowering. Dividing here instead raises SIGFPE.
+            if (node->view_src->ne[0] > 0) {
+                compute_params.cache_rs_reset_len = ggml_nelements(node) / node->view_src->ne[0];
+                compute_params.cache_rs_reset_idx = node->src[0]->view_offs / node->view_src->ne[0];
+            }
         }
         // Capture the destination slot block of every recurrent state cache writeback, plus the
         // conv_input window the conv state writeback copies. The active sequences occupy a
@@ -2110,6 +2106,12 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
         case GGML_OP_DIV:
         case GGML_OP_CLAMP:
         case GGML_OP_PAD:
+        // SQR appears in the ReLU^2 feed-forward (arcee, olmo2); leaving it untracked
+        // loses the token dim in the middle of layer 0 and turns every later layer static.
+        case GGML_OP_SQR:
+        case GGML_OP_SQRT:
+        case GGML_OP_ADD1:
+        case GGML_OP_ROLL:
             m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[0]];
             break;
         case GGML_OP_SUM_ROWS:
@@ -2155,6 +2157,10 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
             break;
         }
         default:
+            // Leave the node untracked rather than falling through: operator[] would
+            // default-construct 0 here, which claims ggml dim 0 is the dynamic one and
+            // propagates that to every consumer.
+            m_node_dynamic_dims[node] = -1;
             GGML_LOG_DEBUG("ggml-openvino: compute_node_dynamic_dims: unhandled op %s for node '%s'\n",
                            ggml_op_name(node->op), node->name);
             break;

@@ -311,6 +311,25 @@ static enum ggml_status ggml_backend_openvino_buffer_init_tensor(ggml_backend_bu
     if (tensor->view_src != nullptr) {
         GGML_ASSERT(tensor->view_src->buffer->buft == buffer->buft);
         if (tensor->view_src->extra != nullptr) {
+            // The cached ov::Tensor carries the shape it was built with, so sharing view_src's
+            // extra hands out the wrong shape for a reshaping view (e.g. Vcur reshaped from
+            // [n_embd, n_tokens] to [head_size, n_heads_kv, n_tokens]). When such a view is a
+            // graph input, binding it fails the shape check. Give it its own extra instead;
+            // ggml_openvino_create_tensor_extra reads ne and data off the view, so the offset is
+            // handled too. Only safe for a contiguous view - the ov::Tensor assumes dense strides.
+            if (!ggml_are_same_shape(tensor, tensor->view_src) && ggml_is_contiguous(tensor) &&
+                !ggml_is_quantized(tensor->type) && tensor->data != nullptr) {
+                if (ggml_openvino_tensor_extra * extra =
+                        ggml_openvino_create_tensor_extra(tensor, ctx->is_remote)) {
+                    auto it = ctx->tensor_extras.find(tensor);
+                    if (it != ctx->tensor_extras.end()) {
+                        delete it->second;
+                    }
+                    ctx->tensor_extras[tensor] = extra;
+                    tensor->extra = extra;
+                    return GGML_STATUS_SUCCESS;
+                }
+            }
             tensor->extra = tensor->view_src->extra;
         }
         return GGML_STATUS_SUCCESS;
@@ -1050,6 +1069,28 @@ static bool tensor_view_fits_src_buffer(const ggml_tensor * tensor) {
     return tensor_nbytes <= src_nbytes - tensor->view_offs;
 }
 
+// A conv-state writeback destination is one feature sub-block inside each of ne[2] consecutive
+// cache slots, so it is non-contiguous whenever the block is narrower than a slot (i.e. as soon as
+// more than one sequence is active). translate_cpy op_case 2 expresses exactly that shape - it
+// slices the slot range on axis 2 and the feature range on axis 3 - so accept it here rather than
+// letting the generic contiguity rule reject it. The destination is pre-allocated in the OpenVINO
+// buffer, so returning false does not fall back to CPU: the scheduler aborts.
+static bool cpy_slot_strided_view_is_supported(const ggml_tensor * op) {
+    if (!GgmlOvDecoder::is_conv_state_writeback(op) || op->ne[3] != 1) {
+        return false;
+    }
+
+    const size_t type_size = ggml_type_size(op->type);
+    if (op->nb[0] != type_size || op->nb[1] != type_size * op->ne[0]) {
+        return false;
+    }
+
+    // One slot stride on axis 2, and the block has to stay inside a single slot.
+    const size_t slot_stride = op->view_src->nb[1];
+    const size_t block_nbytes = type_size * op->ne[0] * op->ne[1];
+    return slot_stride > 0 && op->nb[2] == slot_stride && op->view_offs % slot_stride + block_nbytes <= slot_stride;
+}
+
 static bool cpy_output_view_is_supported(const ggml_tensor * op) {
     if (op->view_src == nullptr) {
         return true;
@@ -1059,7 +1100,7 @@ static bool cpy_output_view_is_supported(const ggml_tensor * op) {
         return false;
     }
 
-    return ggml_nbytes(op) == 0 || ggml_is_contiguous(op);
+    return ggml_nbytes(op) == 0 || ggml_is_contiguous(op) || cpy_slot_strided_view_is_supported(op);
 }
 
 static bool mul_mat_id_requires_large_tmp(const ggml_tensor * op) {
