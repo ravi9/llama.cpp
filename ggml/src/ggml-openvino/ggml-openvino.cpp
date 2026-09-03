@@ -1069,6 +1069,28 @@ static bool tensor_view_fits_src_buffer(const ggml_tensor * tensor) {
     return tensor_nbytes <= src_nbytes - tensor->view_offs;
 }
 
+// A conv-state writeback destination is one feature sub-block inside each of ne[2] consecutive
+// cache slots, so it is non-contiguous whenever the block is narrower than a slot (i.e. as soon as
+// more than one sequence is active). translate_cpy op_case 2 expresses exactly that shape - it
+// slices the slot range on axis 2 and the feature range on axis 3 - so accept it here rather than
+// letting the generic contiguity rule reject it. The destination is pre-allocated in the OpenVINO
+// buffer, so returning false does not fall back to CPU: the scheduler aborts.
+static bool cpy_slot_strided_view_is_supported(const ggml_tensor * op) {
+    if (!GgmlOvDecoder::is_conv_state_writeback(op) || op->ne[3] != 1) {
+        return false;
+    }
+
+    const size_t type_size = ggml_type_size(op->type);
+    if (op->nb[0] != type_size || op->nb[1] != type_size * op->ne[0]) {
+        return false;
+    }
+
+    // One slot stride on axis 2, and the block has to stay inside a single slot.
+    const size_t slot_stride = op->view_src->nb[1];
+    const size_t block_nbytes = type_size * op->ne[0] * op->ne[1];
+    return slot_stride > 0 && op->nb[2] == slot_stride && op->view_offs % slot_stride + block_nbytes <= slot_stride;
+}
+
 static bool cpy_output_view_is_supported(const ggml_tensor * op) {
     if (op->view_src == nullptr) {
         return true;
@@ -1078,7 +1100,7 @@ static bool cpy_output_view_is_supported(const ggml_tensor * op) {
         return false;
     }
 
-    return ggml_nbytes(op) == 0 || ggml_is_contiguous(op);
+    return ggml_nbytes(op) == 0 || ggml_is_contiguous(op) || cpy_slot_strided_view_is_supported(op);
 }
 
 static bool mul_mat_id_requires_large_tmp(const ggml_tensor * op) {

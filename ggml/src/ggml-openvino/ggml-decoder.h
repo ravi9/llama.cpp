@@ -389,6 +389,16 @@ public:
         return op->op == GGML_OP_SET_ROWS && op->src[1] == tensor;
     }
 
+    // CPY writing the tail of conv_input (the concat of the previous conv state and the new tokens)
+    // back into a slot block of the recurrent state cache. Detected structurally because the rollback
+    // variant (cparams.n_rs_seq > 0) emits one such CPY per snapshot slot without naming them.
+    inline static bool is_conv_state_writeback(const ggml_tensor * node) {
+        return node->op == GGML_OP_CPY && node->view_src != nullptr && is_kvcache(node->view_src, nullptr) &&
+               node->src[0] != nullptr && node->src[0]->op == GGML_OP_VIEW && node->src[0]->src[0] != nullptr &&
+               node->src[0]->src[0]->op == GGML_OP_CONCAT && node->src[1] != nullptr &&
+               node->src[1]->op == GGML_OP_VIEW && node->src[1]->view_src == node->view_src;
+    }
+
     bool is_swa_mask(const ggml_tensor * tensor) const {
         return m_model_params.swa_mask != nullptr && tensor == m_model_params.swa_mask;
     }
