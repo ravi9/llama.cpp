@@ -2110,6 +2110,12 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
         case GGML_OP_DIV:
         case GGML_OP_CLAMP:
         case GGML_OP_PAD:
+        // SQR appears in the ReLU^2 feed-forward (arcee, olmo2); leaving it untracked
+        // loses the token dim in the middle of layer 0 and turns every later layer static.
+        case GGML_OP_SQR:
+        case GGML_OP_SQRT:
+        case GGML_OP_ADD1:
+        case GGML_OP_ROLL:
             m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[0]];
             break;
         case GGML_OP_SUM_ROWS:
@@ -2155,6 +2161,10 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
             break;
         }
         default:
+            // Leave the node untracked rather than falling through: operator[] would
+            // default-construct 0 here, which claims ggml dim 0 is the dynamic one and
+            // propagates that to every consumer.
+            m_node_dynamic_dims[node] = -1;
             GGML_LOG_DEBUG("ggml-openvino: compute_node_dynamic_dims: unhandled op %s for node '%s'\n",
                            ggml_op_name(node->op), node->name);
             break;
