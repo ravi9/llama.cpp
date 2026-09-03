@@ -861,8 +861,14 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
             model_params.state_size = node->src[0]->ne[0];
         }
         if (node->op == GGML_OP_SCALE && node->view_src != nullptr && is_kvcache(node->view_src, nullptr)) {
-            compute_params.cache_rs_reset_len = ggml_nelements(node) / node->view_src->ne[0];
-            compute_params.cache_rs_reset_idx = node->src[0]->view_offs / node->view_src->ne[0];
+            // A recurrent state cache can have a zero-length row: minimax-01's linear attention
+            // carries no conv state, so cache_r is allocated with ne[0] == 0. The reset then covers
+            // nothing, so leave the params unset (-1) - add_extra_inputs skips them and the SCALE
+            // keeps its plain lowering. Dividing here instead raises SIGFPE.
+            if (node->view_src->ne[0] > 0) {
+                compute_params.cache_rs_reset_len = ggml_nelements(node) / node->view_src->ne[0];
+                compute_params.cache_rs_reset_idx = node->src[0]->view_offs / node->view_src->ne[0];
+            }
         }
         // Capture the destination slot block of every recurrent state cache writeback, plus the
         // conv_input window the conv state writeback copies. The active sequences occupy a
