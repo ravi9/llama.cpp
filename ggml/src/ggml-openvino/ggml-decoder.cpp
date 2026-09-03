@@ -1209,7 +1209,7 @@ void GgmlOvDecoder::compute_model_outputs() {
             if (flagged_node->op == GGML_OP_SET_ROWS && flagged_node->view_src != nullptr) {
                 flagged_node = flagged_node->view_src;
             }
-            std::string flagged_name(flagged_node->name);
+            std::string flagged_name = get_tensor_ov_name(m_cgraph, flagged_node);
             if (m_model_outputs.find(flagged_name) == m_model_outputs.end()) {
                 m_model_outputs[flagged_name] = flagged_node;
                 m_model_output_names.push_back(flagged_name);
@@ -1907,17 +1907,6 @@ const std::string & GgmlOvDecoder::get_op_type() const {
     return unknown_op;
 }
 
-namespace {
-bool is_same_shape(const ggml_tensor * a, const ggml_tensor * b) {
-    for (int i = 0; i < GGML_MAX_DIMS; i++) {
-        if (a->ne[i] != b->ne[i]) {
-            return false;
-        }
-    }
-    return true;
-}
-}  // namespace
-
 void GgmlOvDecoder::compute_node_dynamic_dims() {
     auto visit_node = [&](auto && self, ggml_tensor * node) -> void {
         if (!node) {
@@ -2097,19 +2086,6 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
             }
             break;
         }
-        case GGML_OP_CONCAT:
-            // The concatenated axis is the one whose extent changed.
-            for (int i = 0; i < GGML_MAX_DIMS; i++) {
-                if (node->src[0]->ne[i] != node->ne[i]) {
-                    m_node_dynamic_dims[node] = i;
-                    break;
-                }
-            }
-            break;
-        case GGML_OP_SSM_CONV:
-        case GGML_OP_GATED_DELTA_NET:
-            m_node_dynamic_dims[node] = 1;
-            break;
         case GGML_OP_CONT:
             m_node_dynamic_dims[node] = -1;
             if (m_node_dynamic_dims[node->src[0]] != -1) {
