@@ -314,6 +314,21 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
         if (asym64_all) {
             return ExtraQuantType::Q4_1_64;
         }
+        // TODO: temporary workaround for a known OpenVINO GPU-plugin bug -- remove once the
+        // plugin computes grouped 8-bit GatherMatmulCompressed correctly. This costs accuracy
+        // (5/8-bit -> 4-bit) on any model it applies to, so it must not outlive the bug.
+        //
+        // On GPU these would otherwise stay in their native *grouped 8-bit* layout, which the GPU
+        // plugin's GatherMatmulCompressed computes incorrectly -- gemma-4 26B-A4B (whose down
+        // projection is Q5_1) produces garbage, while the same graph is correct on CPU. It is
+        // specific to grouped 8 bit: the gate/up experts are grouped u4 *with* a zero point and
+        // are fine, and Qwen3.5 / granite are fine because their Q5_K/Q6_K down projections
+        // already requantize to per-channel Q8_0_C (grouped=0). Sending these to grouped 4 bit
+        // avoids the broken layout and restores correct output.
+        // Opt out with GGML_OPENVINO_REQUANT_KQUANT=native.
+        if (ggml_openvino_get_device_name() == "GPU" && !is_opt("native")) {
+            return ExtraQuantType::Q4_0_64;
+        }
     }
     switch (tensor->type) {
     case GGML_TYPE_Q6_K:
