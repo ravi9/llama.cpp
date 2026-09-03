@@ -279,11 +279,12 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
             cache_hit = it != r_ctx->decoder_cache.end();
             if (cache_hit) {
                 entry = it->second;
+                r_ctx->touch_locked(key);
             } else {
-                r_ctx->clear_caches_locked();
                 auto mutex = std::make_shared<std::mutex>();
                 entry = std::make_shared<decoder_runtime_ctx>(mutex);
                 r_ctx->decoder_cache[key] = entry;
+                r_ctx->admit_locked(key);
             }
         } else {
             auto mutex = std::make_shared<std::mutex>();
@@ -759,11 +760,12 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
         cache_hit = it != r_ctx->decoder_cache.end();
         if (cache_hit) {
             entry = it->second;
+            r_ctx->touch_locked(key);
         } else {
-            r_ctx->clear_caches_locked();
             auto mutex = std::make_shared<std::mutex>();
             entry = std::make_shared<decoder_runtime_ctx>(mutex);
             r_ctx->decoder_cache[key] = entry;
+            r_ctx->admit_locked(key);
         }
     } else {
         auto mutex = std::make_shared<std::mutex>();
