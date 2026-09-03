@@ -311,6 +311,25 @@ static enum ggml_status ggml_backend_openvino_buffer_init_tensor(ggml_backend_bu
     if (tensor->view_src != nullptr) {
         GGML_ASSERT(tensor->view_src->buffer->buft == buffer->buft);
         if (tensor->view_src->extra != nullptr) {
+            // The cached ov::Tensor carries the shape it was built with, so sharing view_src's
+            // extra hands out the wrong shape for a reshaping view (e.g. Vcur reshaped from
+            // [n_embd, n_tokens] to [head_size, n_heads_kv, n_tokens]). When such a view is a
+            // graph input, binding it fails the shape check. Give it its own extra instead;
+            // ggml_openvino_create_tensor_extra reads ne and data off the view, so the offset is
+            // handled too. Only safe for a contiguous view - the ov::Tensor assumes dense strides.
+            if (!ggml_are_same_shape(tensor, tensor->view_src) && ggml_is_contiguous(tensor) &&
+                !ggml_is_quantized(tensor->type) && tensor->data != nullptr) {
+                if (ggml_openvino_tensor_extra * extra =
+                        ggml_openvino_create_tensor_extra(tensor, ctx->is_remote)) {
+                    auto it = ctx->tensor_extras.find(tensor);
+                    if (it != ctx->tensor_extras.end()) {
+                        delete it->second;
+                    }
+                    ctx->tensor_extras[tensor] = extra;
+                    tensor->extra = extra;
+                    return GGML_STATUS_SUCCESS;
+                }
+            }
             tensor->extra = tensor->view_src->extra;
         }
         return GGML_STATUS_SUCCESS;
