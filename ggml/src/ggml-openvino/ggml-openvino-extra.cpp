@@ -145,6 +145,7 @@ void ggml_openvino_device_config::init() {
         // Build the precise (but O(n_nodes)) graph cache key. Needed by op tests.
         "GGML_OPENVINO_FULL_GRAPH_KEY",
         "GGML_OPENVINO_LOG_SUPPORTS_OP",
+        "GGML_OPENVINO_DIAG_GRAPH_IO",
     };
 
     for (const char * const & env_var : env_var_names) {
