@@ -1,6 +1,9 @@
 #pragma once
 
 #include "node_context.h"
+#include "op_support.h"
+
+#include <utility>
 
 namespace ov {
 namespace frontend {
@@ -60,7 +63,22 @@ GGML_OP_CONVERTER(translate_roll);
 
 }  // namespace op
 
-std::unordered_map<std::string, CreatorFunction> get_supported_ops();
+// One entry per op: how to translate it, and when it may be used. Both members are
+// required, so a translator cannot be registered without a support rule - that is what
+// keeps the gate from drifting away from what the translators actually accept.
+struct OpEntry {
+    CreatorFunction  translate;
+    SupportsFunction supports;
+
+    // Both arguments are required on purpose. Without this constructor OpEntry would be
+    // an aggregate, and {translate_foo} would compile with supports silently null - so
+    // the one guarantee this type exists to provide would not hold.
+    OpEntry(CreatorFunction translate, SupportsFunction supports) :
+        translate(std::move(translate)),
+        supports(supports) {}
+};
+
+std::unordered_map<std::string, OpEntry> get_supported_ops();
 
 }  // namespace ggml
 }  // namespace frontend
