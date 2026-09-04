@@ -385,6 +385,13 @@ public:
                (op != nullptr && op->op == GGML_OP_SET_ROWS && op->src[2] == tensor);
     }
 
+    inline static bool is_conv_state_writeback(const ggml_tensor * node) {
+        return node->op == GGML_OP_CPY && node->view_src != nullptr && is_kvcache(node->view_src, nullptr) &&
+               node->src[0] != nullptr && node->src[0]->op == GGML_OP_VIEW && node->src[0]->src[0] != nullptr &&
+               node->src[0]->src[0]->op == GGML_OP_CONCAT && node->src[1] != nullptr &&
+               node->src[1]->op == GGML_OP_VIEW && node->src[1]->view_src == node->view_src;
+    }
+
     inline static bool is_kv_idx(const ggml_tensor * tensor, const ggml_tensor * op) {
         return op->op == GGML_OP_SET_ROWS && op->src[1] == tensor;
     }
