@@ -638,7 +638,20 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
         for (size_t i = 0; i < ov_input_names.size(); i++) {
             auto param_name = ov_input_names[i];
             auto input_tensor = get_ov_input_tensor(ggml_decoder, param_name);
-            infer_request->set_input_tensor(i, input_tensor);
+            try {
+                infer_request->set_input_tensor(i, input_tensor);
+            } catch (const std::exception & e) {
+                if (ggml_openvino_getenv_int("GGML_OPENVINO_DIAG_GRAPH_IO")) {
+                    auto port = infer_request->get_compiled_model().input(i);
+                    GGML_LOG_WARN(
+                        "ggml-openvino: DIAG set_input_tensor[%zu] '%s' threw for n_nodes=%d first=%s last=%s: %s\n"
+                        "  model_shape=%s bound_shape=%s\n",
+                        i, param_name.c_str(), key.n_nodes, key.first_node_name.c_str(), key.last_node_name.c_str(),
+                        e.what(), port.get_partial_shape().to_string().c_str(),
+                        input_tensor.get_shape().to_string().c_str());
+                }
+                throw;
+            }
 
             if (ggml_openvino_getenv_int("GGML_OPENVINO_DEBUG_INPUT")) {
                 print_input_tensor_info(param_name, input_tensor);
@@ -661,11 +674,39 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
                 continue;
             }
             auto output_tensor = create_ov_output_tensor(ggml_decoder, infer_request, i, ggml_tensor);
-            infer_request->set_output_tensor(i, output_tensor);
+            try {
+                infer_request->set_output_tensor(i, output_tensor);
+            } catch (const std::exception & e) {
+                if (ggml_openvino_getenv_int("GGML_OPENVINO_DIAG_GRAPH_IO")) {
+                    auto port = infer_request->get_compiled_model().output(i);
+                    GGML_LOG_WARN(
+                        "ggml-openvino: DIAG set_output_tensor[%zu] '%s' threw for n_nodes=%d first=%s last=%s: %s\n"
+                        "  model_shape=%s bound_shape=%s\n",
+                        i, ov_output_names[i].c_str(), key.n_nodes, key.first_node_name.c_str(),
+                        key.last_node_name.c_str(), e.what(), port.get_partial_shape().to_string().c_str(),
+                        output_tensor.get_shape().to_string().c_str());
+                }
+                throw;
+            }
         }
 
         ov_raw_infer_start = ggml_time_us();
-        infer_request->infer();
+        try {
+            infer_request->infer();
+        } catch (const std::exception & e) {
+            if (ggml_openvino_getenv_int("GGML_OPENVINO_DIAG_GRAPH_IO")) {
+                auto cm = infer_request->get_compiled_model();
+                GGML_LOG_WARN("ggml-openvino: DIAG infer() threw for n_nodes=%d first=%s last=%s: %s\n", key.n_nodes,
+                              key.first_node_name.c_str(), key.last_node_name.c_str(), e.what());
+                for (size_t i = 0; i < ov_input_names.size(); i++) {
+                    auto port = cm.input(i);
+                    GGML_LOG_WARN("  param[%zu] name=%s model_shape=%s bound_shape=%s\n", i,
+                                  ov_input_names[i].c_str(), port.get_partial_shape().to_string().c_str(),
+                                  infer_request->get_input_tensor(i).get_shape().to_string().c_str());
+                }
+            }
+            throw;
+        }
         infer_end_time = ggml_time_us();
 
         if (ggml_openvino_getenv_int("GGML_OPENVINO_DEBUG_OUTPUT") ||
