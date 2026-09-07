@@ -35,6 +35,24 @@
 #include <unordered_map>
 #include <vector>
 
+static std::set<std::string> collect_graph_output_names(const ggml_cgraph * cgraph) {
+    std::set<std::string> outputs;
+    for (int node_n = 0; node_n < cgraph->n_nodes; node_n++) {
+        auto * node = cgraph->nodes[node_n];
+        if (node->flags & GGML_TENSOR_FLAG_OUTPUT) {
+            outputs.insert(node->name);
+        }
+    }
+    return outputs;
+}
+
+bool GgmlOvDecoder::has_same_graph_io(const ggml_cgraph * cgraph) const {
+    if (m_built_output_names.empty()) {
+        return true;  // no snapshot (naive / test decoders): nothing to compare against
+    }
+    return collect_graph_output_names(cgraph) == m_built_output_names;
+}
+
 GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph,
                              ModelParams & model_params,
                              ComputeParams & compute_params,
@@ -64,6 +82,8 @@ GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph,
 
     validate_cgraph();
 
+    m_built_output_names = collect_graph_output_names(cgraph);
+
     set_input_output();
     compute_node_dynamic_dims();
     compute_model_inputs();
@@ -79,6 +99,7 @@ GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph,
 
 void GgmlOvDecoder::update_io(ggml_cgraph * cgraph) {
     m_cgraph = cgraph;
+    m_built_output_names = collect_graph_output_names(cgraph);
     m_model_inputs.clear();
     m_model_outputs.clear();
     m_node_info_list.clear();
@@ -973,7 +994,7 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
     } else {
         input_shape = ov::PartialShape{get_shape(input)};
     }
-    if (dynamic_dim_index != -1 && m_model_is_splitted) {
+    if (dynamic_dim_index != -1) {
         input_shape[3 - dynamic_dim_index] = -1;
     }
     if (op->op == GGML_OP_SOFT_MAX && op->src[1] != nullptr && op->src[1]->op == GGML_OP_NONE &&
@@ -1161,6 +1182,30 @@ void GgmlOvDecoder::compute_model_outputs() {
         if (cur_node->op == GGML_OP_NONE || cur_node->op == GGML_OP_VIEW || cur_node->op == GGML_OP_RESHAPE) {
             continue;
         }
+        // A node explicitly marked by ggml_set_output() must be a model output even when it is
+        // fully consumed inside the graph, because the host reads it back afterwards. The
+        // use-count analysis below cannot see that: it only asks whether anything still in the
+        // graph needs the value.
+        //
+        // Mid-graph taps break that assumption. A model that exposes its residual stream at a few
+        // layers (llm_graph_result marks each such tensor with ggml_set_output()) has tensors that
+        // are read by the host AND feed the next layer, so use-count logic dropped them, the OV
+        // model never produced them, and the host read an unwritten buffer -- whatever consumes
+        // those features saw zeros. This affects any consumer of a mid-graph tensor, not one
+        // particular feature.
+        if (cur_node->flags & GGML_TENSOR_FLAG_OUTPUT) {
+            // in-place ops publish their result through view_src, as in the use_count == 0 path
+            auto * flagged_node = cur_node;
+            if (flagged_node->op == GGML_OP_SET_ROWS && flagged_node->view_src != nullptr) {
+                flagged_node = flagged_node->view_src;
+            }
+            std::string flagged_name = get_tensor_ov_name(m_cgraph, flagged_node);
+            if (m_model_outputs.find(flagged_name) == m_model_outputs.end()) {
+                m_model_outputs[flagged_name] = flagged_node;
+                m_model_output_names.push_back(flagged_name);
+            }
+            continue;
+        }
         auto cur_node_use_count = m_cgraph->use_counts[ggml_hash_find(&m_cgraph->visited_hash_set, cur_node)];
         if (cur_node_use_count == 0) {
             // The output of in-place ops is the view_src tensor, which is updated in place. We should use the view_src name as the output name to make sure it can be correctly matched with the later ops that use the view_src.
@@ -1183,8 +1228,10 @@ void GgmlOvDecoder::compute_model_outputs() {
         }
         if (cur_node != nullptr) {
             std::string cur_node_name = get_tensor_ov_name(m_cgraph, cur_node);
+            if (m_model_outputs.find(cur_node_name) == m_model_outputs.end()) {
+                m_model_output_names.push_back(cur_node_name);
+            }
             m_model_outputs[cur_node_name] = cur_node;
-            m_model_output_names.insert(cur_node_name);
         }
     }
 }
@@ -1889,6 +1936,10 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
                     m_node_dynamic_dims[src] = 1;
                     continue;
                 }
+                if (is_inp_embd_2d(src, node)) {
+                    m_node_dynamic_dims[src] = 1;
+                    continue;
+                }
                 self(self, src);
             }
         }
@@ -1944,6 +1995,11 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
             }
             break;
         case GGML_OP_VIEW: {
+            // A VIEW that does not change the shape is a pass-through for dynamic-dim purposes.
+            if (is_same_shape(node->src[0], node)) {
+                m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[0]];
+                break;
+            }
             // Use stride-based matching: the stride of a VIEW dimension directly
             // encodes which source dimension it indexes into, so it uniquely
             // identifies the dynamic dim even when two dims share the same size.
