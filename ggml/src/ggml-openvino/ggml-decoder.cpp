@@ -808,7 +808,10 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
                 compute_params.attention_size = mask->ne[0];
             }
             if (is_static) {
-                compute_params.attention_size = model_params.ctx_per_seq;
+                const bool slice_prefill = ggml_openvino_npu_kv_slice_enabled() && compute_params.input_len > 1;
+                if (!slice_prefill) {
+                    compute_params.attention_size = model_params.ctx_per_seq;
+                }
                 compute_params.attention_size_swa = model_params.ctx_per_seq_swa;
                 compute_params.token_len_per_seq = 1;
             }
@@ -826,7 +829,7 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
         if (node->op == GGML_OP_TRANSPOSE && node->src[0]->op == GGML_OP_PERMUTE &&
             node->src[0]->src[0]->op == GGML_OP_VIEW) {
             compute_params.attention_size = node->ne[0];
-            if (is_static) {
+            if (is_static && !(ggml_openvino_npu_kv_slice_enabled() && compute_params.input_len > 1)) {
                 compute_params.attention_size = model_params.ctx_per_seq;
             }
         }
@@ -924,7 +927,12 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
     } else if (is_inp_mask(input, op)) {
         // mask
         if (m_is_static) {
-            input_shape = ov::PartialShape{1, 1, m_is_prefill ? m_prefill_chunk_size : 1, m_model_params.ctx};
+            int attention_size = m_model_params.ctx;
+            if (m_is_prefill && ggml_openvino_npu_kv_slice_enabled()) {
+                attention_size = name.find("swa") != std::string::npos ? m_compute_params.attention_size_swa :
+                                                                         m_compute_params.attention_size;
+            }
+            input_shape = ov::PartialShape{1, 1, m_is_prefill ? m_prefill_chunk_size : 1, attention_size};
         } else if (m_is_stateful) {
             input_shape = ov::PartialShape{1, 1, -1, -1};
         } else {
@@ -941,6 +949,13 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
         if (!m_is_static && !is_flat_kv) {
             // do not fix ctx size to make llama-bench work across test params
             input_shape[2] = -1;
+        } else if (m_is_prefill && ggml_openvino_npu_kv_slice_enabled()) {
+            const auto layer = extract_layer_from_name(name);
+            if (layer.has_value() && !is_swa_layer(*layer) && m_compute_params.attention_size > 0 &&
+                m_compute_params.attention_size < input_shape[2].get_length()) {
+                const int attention_size = m_compute_params.attention_size;
+                input_shape[2] = attention_size;
+            }
         }
         if (is_stateful() && !is_flat_kv) {
             // Convert stateless KV cache layout [1, 1, seq, n_heads_kv * head_size]

@@ -107,6 +107,12 @@ bool ggml_openvino_release_weights_enabled(const std::string & device);
 // Check if running on NPU
 bool ggml_openvino_is_npu();
 
+// NPU-only opt-in performance toggles (all default off). Centralized here so each
+// env-var name lives in one place; see docs/backend/OPENVINO.md for semantics.
+bool ggml_openvino_npu_kv_slice_enabled();
+bool ggml_openvino_npu_fast_mask_enabled();
+bool ggml_openvino_npu_l0_host_tensors_enabled();
+
 // Host weight-buffer release (GGML_OPENVINO_RELEASE_WEIGHTS, GPU only).
 // register: record a host weight buffer (idempotent per data pointer).
 // release:  madvise(MADV_DONTNEED) all registered buffers, dropping their RSS.
@@ -117,6 +123,7 @@ bool ggml_openvino_weight_buffers_released();
 
 // Get requantization type for a tensor type (returns nullopt if no requant needed)
 std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor * tensor, bool no_requant = false);
+ExtraQuantType ggml_openvino_get_npu_requant_type();
 
 // =====================================================
 // OpenVINO Tensor Extra Types
