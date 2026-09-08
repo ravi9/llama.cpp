@@ -61,6 +61,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_REQUANT_KQUANT",
         "GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT",
         "GGML_OPENVINO_NPU_KV_SLICE",
+        "GGML_OPENVINO_NPU_L0_HOST_TENSORS",
     };
 
     for (const char * const & env_var : env_var_names) {
@@ -212,6 +213,10 @@ bool ggml_openvino_is_npu() {
 
 bool ggml_openvino_npu_kv_slice_enabled() {
     return ggml_openvino_getenv_int("GGML_OPENVINO_NPU_KV_SLICE") != 0;
+}
+
+bool ggml_openvino_npu_l0_host_tensors_enabled() {
+    return ggml_openvino_getenv_int("GGML_OPENVINO_NPU_L0_HOST_TENSORS") != 0;
 }
 
 // Get the remote context for the current device (returns empty optional for CPU)

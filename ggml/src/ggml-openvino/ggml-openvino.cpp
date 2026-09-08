@@ -77,6 +77,10 @@ struct ggml_backend_openvino_buffer_context {
     void * spill_mapping = nullptr;
     size_t spill_size = 0;
 
+    // Set when ov_buffer owns Level Zero host memory (GGML_OPENVINO_NPU_L0_HOST_TENSORS); the
+    // tensor frees it, so the destructor must not call ggml_aligned_free.
+    bool data_owned_by_ov = false;
+
     // Wrapping of the buffer
     std::shared_ptr<ov::Tensor> ov_buffer;
 
@@ -111,8 +115,25 @@ struct ggml_backend_openvino_buffer_context {
             data = usm_tensor.get();
             ov_buffer = std::make_shared<ov::intel_gpu::ocl::USMTensor>(std::move(usm_tensor));
         } else {
+            // Prefer importable Level Zero host memory on NPU: the plugin imports it without an
+            // extra host-to-device copy each infer.
+            if (device_name == "NPU" && ggml_openvino_npu_l0_host_tensors_enabled()) {
+                try {
+                    auto npu_context = ov_singleton_core().get_default_context("NPU");
+                    auto host_tensor = npu_context.create_host_tensor(ov::element::u8, ov::Shape{size});
+                    data = host_tensor.data();
+                    memset(data, 0, size);
+                    ov_buffer = std::make_shared<ov::Tensor>(std::move(host_tensor));
+                    data_owned_by_ov = true;
+                } catch (const std::exception & e) {
+                    GGML_LOG_WARN("%s: L0 host tensor allocation of %zu bytes failed (%s); using aligned malloc\n",
+                                  __func__, size, e.what());
+                    data = nullptr;
+                }
+            }
 #ifndef _WIN32
-            if (const char * spill_dir = ggml_openvino_getenv_str("GGML_OPENVINO_SPILL_DIR")) {
+            const char * spill_dir = data == nullptr ? ggml_openvino_getenv_str("GGML_OPENVINO_SPILL_DIR") : nullptr;
+            if (spill_dir) {
                 // Disk-backed weight buffer: back the repacked weights with a temp file via MAP_SHARED
                 // instead of anonymous memory. Anonymous pages can only be evicted to swap, so the
                 // repacked buffer stays pinned alongside the mmap'd source and both are resident at once
@@ -148,14 +169,13 @@ struct ggml_backend_openvino_buffer_context {
                 GGML_LOG_INFO("%s: weight buffer spilled to %s (%zu MB, file-backed)\n", __func__, spill_dir,
                               size / 1024 / 1024);
                 ov_buffer = std::make_shared<ov::Tensor>(ov::element::u8, ov::Shape{size}, data);
-            } else
+            }
+#else
+            if (data == nullptr && ggml_openvino_getenv_str("GGML_OPENVINO_SPILL_DIR")) {
+                GGML_LOG_WARN("%s: GGML_OPENVINO_SPILL_DIR is not supported on Windows, ignoring\n", __func__);
+            }
 #endif
-            {
-#ifdef _WIN32
-                if (ggml_openvino_getenv_str("GGML_OPENVINO_SPILL_DIR")) {
-                    GGML_LOG_WARN("%s: GGML_OPENVINO_SPILL_DIR is not supported on Windows, ignoring\n", __func__);
-                }
-#endif
+            if (data == nullptr) {
                 data = ggml_aligned_malloc(size);
                 GGML_ASSERT(data);
                 memset(data, 0, size);
@@ -188,7 +208,7 @@ struct ggml_backend_openvino_buffer_context {
             munmap(spill_mapping, spill_size);
         } else
 #endif
-        if (!is_remote && data != nullptr) {
+        if (!is_remote && !data_owned_by_ov && data != nullptr) {
             ggml_aligned_free(data, size);
         }
     }
