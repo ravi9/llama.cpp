@@ -71,8 +71,8 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_TOKEN_EMBD_I4",
         "GGML_OPENVINO_NPU_KEEP_Q4_0",
         "GGML_OPENVINO_NPU_FAST_MASK",
-        "GGML_OPENVINO_NPU_KV_SLICE",
         "GGML_OPENVINO_NPU_L0_HOST_TENSORS",
+        "GGML_OPENVINO_NPU_KV_SLICE",
     };
 
     for (const char * const & env_var : env_var_names) {
