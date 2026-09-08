@@ -60,6 +60,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_LOG_SWA_LAYERS",
         "GGML_OPENVINO_REQUANT_KQUANT",
         "GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT",
+        "GGML_OPENVINO_NPU_KV_SLICE",
     };
 
     for (const char * const & env_var : env_var_names) {
@@ -207,6 +208,10 @@ bool ggml_openvino_release_weights_enabled(const std::string & device) {
 // Check if running on NPU
 bool ggml_openvino_is_npu() {
     return ggml_openvino_get_device_config().is_npu;
+}
+
+bool ggml_openvino_npu_kv_slice_enabled() {
+    return ggml_openvino_getenv_int("GGML_OPENVINO_NPU_KV_SLICE") != 0;
 }
 
 // Get the remote context for the current device (returns empty optional for CPU)
