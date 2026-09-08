@@ -883,8 +883,41 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
             }
         }
     }
+    if (model_params.n_heads_kv == -1) {
+        for (int i = 0; i < cgraph->n_nodes; i++) {
+            const auto * node = cgraph->nodes[i];
+            const ggml_tensor * mask = nullptr;
+            if (node->op == GGML_OP_SOFT_MAX) {
+                mask = node->src[1];
+            } else if (node->op == GGML_OP_FLASH_ATTN_EXT) {
+                mask = node->src[3];
+            } else {
+                continue;
+            }
+            if (mask == nullptr || mask->op != GGML_OP_NONE || !(mask->flags & GGML_TENSOR_FLAG_INPUT) ||
+                node->src[0] == nullptr) {
+                continue;
+            }
+            model_params.is_cacheless_attn = true;
+            model_params.n_seq = 1;
+            model_params.ctx_per_seq = mask->ne[0];
+            compute_params.input_len = node->src[0]->ne[1];
+            compute_params.token_len_per_seq = compute_params.input_len;
+            break;
+        }
+    }
+
     auto * output_tensor = cgraph->nodes[cgraph->n_nodes - 1];
     compute_params.output_len = output_tensor->ne[1];
+    if (model_params.is_cacheless_attn) {
+        for (int i = 0; i < cgraph->n_nodes; i++) {
+            const auto * node = cgraph->nodes[i];
+            if (node->op == GGML_OP_GET_ROWS && is_output_idx(node->src[1], node)) {
+                compute_params.output_len = node->src[1]->ne[0];
+                break;
+            }
+        }
+    }
     // for NPU, output_len is always 1 except for llama-perplexity
     if (is_static && compute_params.output_len == 0) {
         compute_params.output_len = 1;
@@ -920,6 +953,10 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
     } else if (is_output_idx(input, op)) {
         // output index
         input_shape = ov::PartialShape{1, 1, 1, m_is_static ? m_compute_params.output_len : -1};
+
+    } else if (is_inp_mean(input, op)) {
+        input_shape = m_is_static ? ov::PartialShape{1, 1, input->ne[1], m_prefill_chunk_size} :
+                                    ov::PartialShape{1, 1, -1, -1};
 
     } else if (is_inp_mask(input, op)) {
         // mask
@@ -979,8 +1016,14 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
     if (op->op == GGML_OP_SOFT_MAX && op->src[1] != nullptr && op->src[1]->op == GGML_OP_NONE &&
         op->src[1]->flags & GGML_TENSOR_FLAG_INPUT && op->src[1] == input) {
         // for softmax input mask, the shape is [1, 1, seq_active, seq_active], where seq_active is determined by the input active sequence length instead of the kv cache sequence length
-        input_shape[2] = -1;
-        input_shape[3] = -1;
+        if (m_is_static) {
+            const int64_t seq_active = m_is_prefill ? m_prefill_chunk_size : 1;
+            input_shape[2] = seq_active;
+            input_shape[3] = seq_active;
+        } else {
+            input_shape[2] = -1;
+            input_shape[3] = -1;
+        }
     }
     return input_shape;
 }

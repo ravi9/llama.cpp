@@ -992,6 +992,10 @@ static bool is_supported_flash_attn_pattern(const ggml_tensor * op) {
             if (src->src[0] == nullptr || src->src[0]->view_src != nullptr) {
                 return false;
             }
+        } else if (src->op == GGML_OP_CPY) {
+            if (src->src[0] == nullptr || src->src[0]->op != GGML_OP_PERMUTE || src->src[0]->src[0] == nullptr) {
+                return false;
+            }
         } else {
             return false;
         }
@@ -1357,8 +1361,21 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         if (op->type != GGML_TYPE_F32 && op->type != GGML_TYPE_F16) {
             return {false, "ROPE with type " + std::string(ggml_type_name(op->type)) + " is not supported"};
         }
-        if (op->view_src != nullptr && !ggml_is_contiguous(op->src[0])) {
-            return {false, "ROPE on VIEW / non-contiguous input is not supported"};
+        if (op->src[0]->op == GGML_OP_VIEW) {
+            const struct ggml_tensor * view = op->src[0];
+            const struct ggml_tensor * view_src = view->view_src;
+            const bool same_shape = view_src->ne[1] == view->ne[1] && view_src->ne[2] == view->ne[2] &&
+                                    view_src->ne[3] == view->ne[3];
+            const bool packed_qkv = view_src->ne[1] == view->ne[2] && view_src->ne[2] == view->ne[3];
+            if (!same_shape && !packed_qkv) {
+                return {false, "ROPE with view_src->ne [" + std::to_string(view_src->ne[1]) + ", " +
+                               std::to_string(view_src->ne[2]) + ", " + std::to_string(view_src->ne[3]) +
+                               "] != view->ne [" + std::to_string(view->ne[1]) + ", " +
+                               std::to_string(view->ne[2]) + ", " + std::to_string(view->ne[3]) +
+                               "] is not supported"};
+            }
+                    } else if (!ggml_is_contiguous(op->src[0])) {
+                        return {false, "ROPE on non-contiguous input is not supported"};
         }
         float freq_scale;
         float ext_factor;
