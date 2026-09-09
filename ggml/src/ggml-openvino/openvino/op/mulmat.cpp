@@ -33,7 +33,7 @@ OutputVector translate_mulmat(const NodeContext & context) {
     ov::Output<ov::Node> A = process_view_input_new(context, 1);
 
     if (A.get_element_type() != B.get_element_type()) {
-        B = std::make_shared<ov::op::v0::Convert>(A, context.get_input_type(1));
+        B = std::make_shared<ov::op::v0::Convert>(B, context.get_input_type(1));
     }
 
     auto B_shape = context.get_input_shape(0).to_shape();
