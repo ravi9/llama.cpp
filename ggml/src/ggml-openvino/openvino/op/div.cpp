@@ -4,6 +4,7 @@
 #include "ggml.h"
 
 #include <memory>
+#include <openvino/core/type.hpp>
 #include <openvino/op/constant.hpp>
 #include <openvino/op/convert.hpp>
 #include <openvino/op/divide.hpp>
@@ -36,7 +37,7 @@ bool is_silu_div_pattern(const ov::Output<ov::Node> & numerator,
 
     const auto denom_node = denominator.get_node_shared_ptr();
 
-    if (auto swish = std::dynamic_pointer_cast<ov::op::v4::Swish>(numerator.get_node_shared_ptr())) {
+    if (auto swish = ov::as_type_ptr<ov::op::v4::Swish>(numerator.get_node_shared_ptr())) {
         return swish->input_value(0).get_node_shared_ptr() == denom_node;
     }
     return false;
