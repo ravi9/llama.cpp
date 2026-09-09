@@ -299,13 +299,22 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
             return ov::OutputVector{};
         }
 
+        const auto & node_output_names = decoder->get_output_names(node_idx);
+        if (operation_type == "GGML_OP_VIEW" && decoder->get_op_case(node_idx) == 2 && node_output_names.size() == 1) {
+            auto direct_output = tensor_map->find(node_output_names[0]);
+            if (direct_output != tensor_map->end()) {
+                // GDN publishes its native attention/state outputs under the two GGML VIEW names.
+                // Keep those mappings instead of rebuilding slices of a packed temporary.
+                return ov::OutputVector{direct_output->second};
+            }
+        }
+
         auto it = m_translator_map.find(operation_type);
         FRONT_END_OP_CONVERSION_CHECK(it != m_translator_map.end(), "Translation for operation type ", operation_type,
                                       " is not implemented.");
         NodeContext node_context(decoder, tensor_map, node_idx, this);
         ov::OutputVector converted_outputs = it->second(node_context);
 
-        const auto & node_output_names = decoder->get_output_names(node_idx);
         FRONT_END_OP_CONVERSION_CHECK(node_output_names.size() == converted_outputs.size(), "Number of ",
                                       operation_type, " outputs greater than number of converted outputs, which are ",
                                       node_output_names.size(), " and ", converted_outputs.size(), " respectively.");

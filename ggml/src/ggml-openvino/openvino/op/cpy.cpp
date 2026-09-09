@@ -90,10 +90,16 @@ OutputVector translate_cpy(const NodeContext & context) {
             return {context.get_input(1)};
         }
     }
-    // op_case 7/8/9 are the single-slot variants; the active state replaces the full cache and
-    // the defrag remainder is a no-op.
+    // op_case 7/8/9 are the single-slot variants; op_case 10 writes native GDN state into a
+    // multi-slot cache without rollback snapshots.
     const bool single_slot_assign = op_case >= 7 && op_case <= 9;
-    const int writeback_case = single_slot_assign ? op_case - 6 : op_case;
+    const bool direct_gdn_state = op_case == 7 || op_case == 10;
+    int writeback_case = op_case;
+    if (op_case == 10) {
+        writeback_case = 1;
+    } else if (single_slot_assign) {
+        writeback_case = op_case - 6;
+    }
     const std::string slot_begin_name = "rs_slot_begin_" + context.get_name();
     const bool slice_assign = !context.is_stateful() && writeback_case >= 1 && writeback_case <= 3 &&
                               (single_slot_assign || context.has_input(slot_begin_name));
@@ -117,24 +123,18 @@ OutputVector translate_cpy(const NodeContext & context) {
         }
         auto base = context.get_input(1);
         if (writeback_case == 1) {
-            ov::Output<ov::Node> state_begin;
-            const std::string src_begin_name = "rs_src_begin_" + context.get_name();
-            if (context.has_input(src_begin_name)) {
-                state_begin = context.get_input(src_begin_name);
+            if (direct_gdn_state) {
+                // Non-rollback GDN publishes state directly as [active_slots, heads, value_dim,
+                // key_dim]. Flatten each active slot before replacing or updating the cache.
+                src = std::make_shared<ov::op::v1::Reshape>(context.get_input(0), feature, false);
             } else {
-                auto ssm_state_size = context.get_ssm_state_size();
-                if (context.has_input("s_copy_active_slot_len")) {
-                    auto len = context.get_input("s_copy_active_slot_len");
-                    auto state_rows = std::make_shared<ov::op::v1::Multiply>(
-                        ov::op::v0::Constant::create(ov::element::i64, {1}, {ssm_state_size}), len);
-                    state_begin = std::make_shared<ov::op::v0::Negative>(state_rows);
-                } else {
-                    state_begin = ov::op::v0::Constant::create(ov::element::i64, {1}, {-ssm_state_size});
-                }
+                // Multi-slot rollback still consumes GGML's packed [attention | state snapshots]
+                // layout. Slice the state block using the runtime source offset.
+                auto src_begin = context.get_input("rs_src_begin_" + context.get_name());
+                auto state_part =
+                    std::make_shared<ov::op::v8::Slice>(context.get_input(0), src_begin, int_max, one, axis);
+                src = std::make_shared<ov::op::v1::Reshape>(state_part, feature, false);
             }
-            auto state_part =
-                std::make_shared<ov::op::v8::Slice>(context.get_input(0), state_begin, int_max, one, axis);
-            src = std::make_shared<ov::op::v1::Reshape>(state_part, feature, false);
         } else if (writeback_case == 2) {
             // conv_input is [previous conv state | new tokens]; the snapshot is the conv_kernel_size - 1
             // columns ending at the last *valid* token. Gather (rather than Slice) keeps the output

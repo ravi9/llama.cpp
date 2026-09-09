@@ -376,6 +376,12 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         break;
     }
     case GGML_OP_VIEW: {
+        if (!m_model_params.has_rs_rollback && node->src[0] != nullptr &&
+            node->src[0]->op == GGML_OP_GATED_DELTA_NET) {
+            // The GDN translator publishes native attention/state outputs under these VIEW names.
+            op_case = 2;
+            break;
+        }
         if (m_is_static && node->src[0] != nullptr &&
             (node->src[0]->op == GGML_OP_GATED_DELTA_NET || node->src[0]->op == GGML_OP_CONCAT)) {
             // VIEW slicing a GATED_DELTA_NET combined [attn|state] output, or the conv_input
@@ -433,6 +439,10 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         if (node->src[0]->op == GGML_OP_VIEW) {
             if (is_same_shape(node->src[0]->src[0], node->src[0])) {
                 op_case = 1;
+            } else if (!m_model_params.has_rs_rollback &&
+                       node->src[0]->src[0]->op == GGML_OP_GATED_DELTA_NET) {
+                // GDN attention is routed directly to this VIEW by get_output_names().
+                op_case = 3;
             } else if (node->src[0]->src[0]->op == GGML_OP_GATED_DELTA_NET) {
                 op_case = 2;
             }
@@ -459,7 +469,13 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
     case GGML_OP_CPY: {
         if (node->src[0]->op == GGML_OP_VIEW) {
             if (node->src[0]->src[0]->op == GGML_OP_GATED_DELTA_NET) {
-                op_case = is_full_single_slot_writeback(node) ? 7 : 1;
+                if (!m_model_params.has_rs_rollback) {
+                    // op_case 7 replaces a single-slot cache; op_case 10 writes native GDN state
+                    // into an active range of a larger non-rollback cache.
+                    op_case = is_full_single_slot_writeback(node) ? 7 : 10;
+                } else {
+                    op_case = 1;
+                }
             } else if (is_conv_state_writeback(node)) {
                 op_case = is_full_single_slot_writeback(node) ? 8 : 2;
                 break;
@@ -511,7 +527,7 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
     }
     case GGML_OP_SCALE: {
         if (node->view_src && node->buffer->usage == GGML_BACKEND_BUFFER_USAGE_ANY) {
-            op_case = 1;
+            op_case = node->view_src->ne[1] == 1 ? 2 : 1;
         }
         break;
     }
@@ -868,12 +884,17 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
             model_params.state_size = node->src[0]->ne[0];
         }
         if (node->op == GGML_OP_SCALE && node->view_src != nullptr && is_kvcache(node->view_src, nullptr)) {
+            if (model_params.n_rs_slots == -1) {
+                model_params.n_rs_slots = node->view_src->ne[1];
+            } else {
+                GGML_ASSERT(model_params.n_rs_slots == node->view_src->ne[1]);
+            }
             compute_params.cache_rs_reset_len = ggml_nelements(node) / node->view_src->ne[0];
             compute_params.cache_rs_reset_idx = node->src[0]->view_offs / node->view_src->ne[0];
         }
         // Capture the destination slot block of every recurrent state cache writeback, plus the
-        // conv_input window the conv state writeback copies. The active sequences occupy a
-        // contiguous slot block [begin, begin + n_seqs) of the cache; the block and the window move
+        // source window needed by conv state and packed GDN rollback writes. The active sequences
+        // occupy a contiguous slot block [begin, begin + n_seqs) of the cache; these offsets move
         // with the batch, so they are fed to the cached model as runtime inputs.
         if (node->op == GGML_OP_CPY && node->view_src != nullptr && is_kvcache(node->view_src, nullptr) &&
             node->src[1] != nullptr && node->src[1]->op == GGML_OP_VIEW && node->src[1]->view_src == node->view_src) {
@@ -881,16 +902,24 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
             const bool is_gdn = node->src[0]->op == GGML_OP_VIEW && node->src[0]->src[0] != nullptr &&
                                 node->src[0]->src[0]->op == GGML_OP_GATED_DELTA_NET;
             const bool is_extra = node->src[0]->op == GGML_OP_GET_ROWS;
+            const bool is_gdn_rollback = is_gdn && is_same_shape(node->src[0], node->src[1]);
 
             const ggml_tensor * dest_view = node->src[1];
             const ggml_tensor * cache = node->view_src;
             const size_t row_bytes = cache->ne[0] * ggml_type_size(cache->type);
-            if (row_bytes > 0 && (is_conv || is_gdn || is_extra)) {
+            if (is_gdn_rollback) {
+                // Rollback GDN exposes an already-flattened [state, seq, snapshot] VIEW and copies
+                // it to an identically-shaped cache VIEW. Non-rollback copies native 4-D state
+                // [value, key, head, seq] into flattened cache rows, so the shapes differ. This
+                // signature is local to the CPY and still works when fallback splits the graph.
+                model_params.has_rs_rollback = true;
+            }
+            if (row_bytes > 0 && (is_conv || is_gdn || is_extra) && !is_full_single_slot_writeback(node)) {
                 ComputeParams::RsWriteback writeback;
                 writeback.slot_begin = (int) (dest_view->view_offs / row_bytes);
                 if (is_conv) {
                     writeback.src_begin = (int) (node->src[0]->view_offs / node->src[0]->view_src->nb[0]);
-                } else if (is_gdn) {
+                } else if (is_gdn_rollback) {
                     writeback.src_begin = (int) (node->src[0]->view_offs / node->src[0]->view_src->nb[1]);
                 }
                 compute_params.rs_writebacks[get_tensor_ov_name(cgraph, node)] = writeback;
@@ -1062,7 +1091,7 @@ void GgmlOvDecoder::add_extra_inputs() {
     }
     // create_1d_input("token_len", m_compute_params.token_len_per_seq * m_compute_params.n_seq_active);
 
-    if (m_compute_params.cache_rs_reset_idx != -1) {
+    if (m_compute_params.cache_rs_reset_idx != -1 && m_model_params.n_rs_slots != 1) {
         // Whether/which cache slot to reset varies per compute call (e.g. a new sequence starting
         // vs. continued decoding). can_reuse_statically() does not invalidate the cached static
         // model on ComputeParams changes, so these must stay runtime Parameters even when static
@@ -1086,7 +1115,7 @@ void GgmlOvDecoder::add_extra_inputs() {
 
     for (const auto & [node_name, writeback] : m_compute_params.rs_writebacks) {
         create_1d_input("rs_slot_begin_" + node_name, writeback.slot_begin);
-        if (!m_is_static) {
+        if (!m_is_static && writeback.src_begin >= 0) {
             create_1d_input("rs_src_begin_" + node_name, writeback.src_begin);
         }
     }
@@ -1176,6 +1205,9 @@ void GgmlOvDecoder::compute_model_outputs() {
         auto * cur_node = m_cgraph->nodes[node_n];
         // if the node op is NONE means this node is not used at all, we can skip it directly without adding to model outputs.
         if (cur_node->op == GGML_OP_NONE || cur_node->op == GGML_OP_VIEW || cur_node->op == GGML_OP_RESHAPE) {
+            continue;
+        }
+        if (::is_inplace_op(cur_node) && ggml_nbytes(cur_node) == 0) {
             continue;
         }
         auto cur_node_use_count = m_cgraph->use_counts[ggml_hash_find(&m_cgraph->visited_hash_set, cur_node)];
@@ -1785,6 +1817,27 @@ std::vector<size_t> GgmlOvDecoder::get_output_stride(int node_idx) const {
 }
 
 std::vector<std::string> GgmlOvDecoder::get_output_names(int node_idx) const {
+    auto * node = m_node_info_list[node_idx].node;
+    if (node->op == GGML_OP_GATED_DELTA_NET && !m_model_params.has_rs_rollback) {
+        std::string attn_name;
+        std::string state_name;
+        for (int i = node_idx + 1; i < m_cgraph->n_nodes; i++) {
+            auto * consumer = m_cgraph->nodes[i];
+            if (consumer->op != GGML_OP_VIEW || consumer->src[0] != node) {
+                continue;
+            }
+            // GGML packs [attention | state]. The attention VIEW starts at offset 0 and the
+            // state VIEW starts after the token-dependent attention segment.
+            auto & name = consumer->view_offs == 0 ? attn_name : state_name;
+            if (!name.empty()) {
+                return {m_node_info_list[node_idx].node_name};
+            }
+            name = get_tensor_ov_name(m_cgraph, consumer);
+        }
+        if (!attn_name.empty() && !state_name.empty()) {
+            return {attn_name, state_name};
+        }
+    }
     return {m_node_info_list[node_idx].node_name};
 }
 

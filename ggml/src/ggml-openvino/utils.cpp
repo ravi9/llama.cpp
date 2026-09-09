@@ -34,6 +34,7 @@
 #include <openvino/runtime/properties.hpp>
 #include <openvino/runtime/tensor.hpp>
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -199,6 +200,33 @@ static void dump_ov_profiling_info(const ov::InferRequest & infer_request) {
 
     GGML_LOG_INFO("ggml-openvino: profile %s: %zu executed nodes, %.3f ms device, %.3f ms CPU\n", path.c_str(),
                   executed_count, total_real_time / 1000.0, total_cpu_time / 1000.0);
+}
+
+static bool is_recurrent_cache(const ggml_tensor * tensor) {
+    return tensor != nullptr && (strncmp(tensor->name, "cache_r_l", strlen("cache_r_l")) == 0 ||
+                                 strncmp(tensor->name, "cache_s_l", strlen("cache_s_l")) == 0 ||
+                                 strncmp(tensor->name, "cache_ple_r_l", strlen("cache_ple_r_l")) == 0);
+}
+
+static void reset_single_slot_recurrent_cache(ggml_cgraph * cgraph,
+                                              const ModelParams & model_params,
+                                              const ComputeParams & compute_params) {
+    if (model_params.n_rs_slots != 1 || compute_params.cache_rs_reset_len == 0) {
+        return;
+    }
+    GGML_ASSERT(compute_params.cache_rs_reset_idx == 0 && compute_params.cache_rs_reset_len == 1);
+
+    std::set<ggml_backend_buffer_t> buffers;
+    for (int i = 0; i < cgraph->n_nodes; i++) {
+        auto * node = cgraph->nodes[i];
+        if (node->op == GGML_OP_SCALE && is_recurrent_cache(node->view_src) && node->view_src->ne[1] == 1 &&
+            node->view_src->buffer != nullptr) {
+            buffers.insert(node->view_src->buffer);
+        }
+    }
+    for (auto * buffer : buffers) {
+        ggml_backend_buffer_clear(buffer, 0);
+    }
 }
 
 ov::Tensor create_ov_output_tensor(std::shared_ptr<GgmlOvDecoder> ggml_decoder,
@@ -671,6 +699,8 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
             }
         }
 
+        reset_single_slot_recurrent_cache(cgraph, m_params, c_params);
+
         for (size_t i = 0; i < ov_input_names.size(); i++) {
             auto param_name = ov_input_names[i];
             auto input_tensor = get_ov_input_tensor(ggml_decoder, param_name);
@@ -934,6 +964,8 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
             r_ctx->ov_output_names_cache[key] = ov_output_names_local;
         }
     }
+
+    reset_single_slot_recurrent_cache(cgraph, m_params, c_params);
 
     if (is_prefill) {
         auto inp_len = get_inp_pos_n_tokens(cgraph, inp_pos);

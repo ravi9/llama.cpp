@@ -28,7 +28,9 @@ struct ModelParams {
     std::map<int, int> n_heads_kv_per_layer;
     int head_size = -1;
     int state_size = -1;  // for SSM molels, eg qwen35
-    int32_t rope_params[15];
+    int n_rs_slots = -1;
+    bool has_rs_rollback = false;
+    int32_t rope_params[15] = {0};
     bool mixed_rope_params = false;
     std::vector<int> swa_layers;
     // The sliding-window mask tensor, identified in compute_llm_params() by grouping attention
@@ -44,9 +46,15 @@ struct ModelParams {
                memcmp(rope_params, other.rope_params, sizeof(int32_t) * 15) == 0;
     }
 
-    bool can_reuse_dynamically(const ModelParams & other) const { return same_rope_params(other); }
+    bool can_reuse_dynamically(const ModelParams & other) const {
+        return same_rope_params(other) && n_rs_slots == other.n_rs_slots &&
+               has_rs_rollback == other.has_rs_rollback;
+    }
 
-    bool can_reuse_statically(const ModelParams & other) const { return same_rope_params(other) && ctx == other.ctx; }
+    bool can_reuse_statically(const ModelParams & other) const {
+        return same_rope_params(other) && ctx == other.ctx && n_rs_slots == other.n_rs_slots &&
+               has_rs_rollback == other.has_rs_rollback;
+    }
 
     bool kv_buffer_changed(const ModelParams & other) const { return kv_buffer_ctx_id != other.kv_buffer_ctx_id; }
 };
@@ -99,7 +107,7 @@ struct ComputeParams {
 
     struct RsWriteback {
         int slot_begin = 0;  // first cache slot written by the CPY
-        int src_begin = 0;   // first source row or column copied by the CPY
+        int src_begin = -1;  // first source column copied by a conv-state CPY
     };
 
     std::map<std::string, RsWriteback> rs_writebacks;
