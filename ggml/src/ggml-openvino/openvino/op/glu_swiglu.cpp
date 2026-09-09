@@ -10,8 +10,8 @@
 #include <openvino/op/clamp.hpp>
 #include <openvino/op/constant.hpp>
 #include <openvino/op/multiply.hpp>
-#include <openvino/op/sigmoid.hpp>
 #include <openvino/op/slice.hpp>
+#include <openvino/op/swish.hpp>
 
 namespace ov {
 namespace frontend {
@@ -61,8 +61,7 @@ static std::pair<ov::Output<ov::Node>, ov::Output<ov::Node>> get_glu_inputs(cons
 OutputVector translate_glu_swiglu(const NodeContext & context) {
     auto [src0, src1] = get_glu_inputs(context);
 
-    auto sigmoid = std::make_shared<ov::op::v0::Sigmoid>(src0);
-    auto silu = std::make_shared<ov::op::v1::Multiply>(src0, sigmoid);
+    auto silu = std::make_shared<ov::op::v4::Swish>(src0);
     auto res = std::make_shared<ov::op::v1::Multiply>(silu, src1);
 
     return rename_outputs_with_suffix({res}, context.get_name());
@@ -77,9 +76,7 @@ OutputVector translate_glu_swiglu_oai(const NodeContext & context) {
 
     auto gate = std::make_shared<ov::op::v0::Clamp>(src0, -std::numeric_limits<float>::infinity(), limit);
     auto alpha_const = ov::op::v0::Constant::create(ov::element::f32, {}, {alpha});
-    auto scaled_gate = std::make_shared<ov::op::v1::Multiply>(gate, alpha_const);
-    auto sigmoid = std::make_shared<ov::op::v0::Sigmoid>(scaled_gate);
-    auto out_glu = std::make_shared<ov::op::v1::Multiply>(gate, sigmoid);
+    auto out_glu = std::make_shared<ov::op::v4::Swish>(gate, alpha_const);
 
     auto up = std::make_shared<ov::op::v0::Clamp>(src1, -limit, limit);
     auto one = ov::op::v0::Constant::create(ov::element::f32, {}, {1.0f});
@@ -96,8 +93,7 @@ OutputVector translate_glu_swiglu_clamp(const NodeContext & context) {
     const float limit = reinterpret_cast<const float *>(params)[3];
 
     auto gate = std::make_shared<ov::op::v0::Clamp>(src0, -std::numeric_limits<float>::infinity(), limit);
-    auto sigmoid = std::make_shared<ov::op::v0::Sigmoid>(gate);
-    auto silu = std::make_shared<ov::op::v1::Multiply>(gate, sigmoid);
+    auto silu = std::make_shared<ov::op::v4::Swish>(gate);
     auto up = std::make_shared<ov::op::v0::Clamp>(src1, -limit, limit);
     auto res = std::make_shared<ov::op::v1::Multiply>(silu, up);
 
