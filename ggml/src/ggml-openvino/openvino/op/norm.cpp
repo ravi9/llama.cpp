@@ -2,6 +2,7 @@
 #include "../op_table.h"
 #include "../utils.h"
 
+#include <cstring>
 #include <memory>
 #include <openvino/op/constant.hpp>
 #include <openvino/op/mvn.hpp>
