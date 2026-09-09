@@ -25,8 +25,12 @@ OutputVector translate_rms_norm(const NodeContext & context) {
     auto op_case = context.get_op_case();
 
     ov::Output<ov::Node> input_node;
-    if (op_case == 1) {
-        input_node = process_view_input_new(context, 0);
+    if (op_case == 1 || op_case == 3) {
+        input_node = context.get_input(0);
+        if (op_case == 1) {
+            input_node = process_view_input_new(context, 0);
+        }
+        // op_case 3 is the native GDN attention output already mapped to the GGML VIEW.
     } else if (op_case == 2) {
         auto ssm_state_size = context.get_ssm_state_size();
         // The GDN op packs [attn | new_state] along the row axis; the state occupies the last
