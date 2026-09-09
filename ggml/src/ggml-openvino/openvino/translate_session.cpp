@@ -21,6 +21,7 @@
 #include <openvino/core/node.hpp>
 #include <openvino/core/preprocess/pre_post_process.hpp>
 #include <openvino/core/shape.hpp>
+#include <openvino/core/type.hpp>
 #include <openvino/core/type/element_type.hpp>
 #include <openvino/op/add.hpp>
 #include <openvino/op/broadcast.hpp>
@@ -272,7 +273,7 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
     auto tensor_map = std::make_shared<TensorMap>();
     std::shared_ptr<Model> resulting_model;
 
-    const auto & ggml_model = std::dynamic_pointer_cast<InputModel>(input_model);
+    const auto & ggml_model = ov::as_type_ptr<InputModel>(input_model);
     std::shared_ptr<GgmlDecoder> ggml_model_decoder = ggml_model->get_model_decoder();
 
     for (const auto & it : ggml_model_decoder->get_model_inputs()) {
@@ -284,7 +285,7 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
     for (const auto & it : ggml_model_decoder->get_model_extra_inputs()) {
         auto input_node = create_extra_input(it.first, it.second);
         if (it.second.is_parameter) {
-            params.push_back(std::dynamic_pointer_cast<ov::op::v0::Parameter>(input_node));
+            params.push_back(ov::as_type_ptr<ov::op::v0::Parameter>(input_node));
         }
         (*tensor_map)[it.first] = input_node;
     }
@@ -455,7 +456,7 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
 }
 
 std::shared_ptr<Model> TranslateSession::apply_transformations(std::shared_ptr<Model> model) {
-    auto ggml_model_decoder = std::dynamic_pointer_cast<InputModel>(m_input_model)->get_model_decoder();
+    auto ggml_model_decoder = ov::as_type_ptr<InputModel>(m_input_model)->get_model_decoder();
     {
         ov::pass::Manager manager;
         manager.set_per_pass_validation(true);

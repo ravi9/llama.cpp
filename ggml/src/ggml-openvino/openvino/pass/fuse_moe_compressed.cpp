@@ -10,9 +10,9 @@
 #include <openvino/op/multiply.hpp>
 #include <openvino/op/reduce_sum.hpp>
 #include <openvino/op/reshape.hpp>
-#include <openvino/op/sigmoid.hpp>
 #include <openvino/op/squeeze.hpp>
 #include <openvino/op/subtract.hpp>
+#include <openvino/op/swish.hpp>
 #include <openvino/op/transpose.hpp>
 #include <openvino/op/unsqueeze.hpp>
 #include <openvino/pass/constant_folding.hpp>
@@ -113,9 +113,7 @@ FuseMoeCompressed::FuseMoeCompressed() {
     auto gate_u_m = optional<ov::op::v0::Convert>({ wrap_type<ov::op::v0::Unsqueeze>(
         { wrap_type<ov::op::v1::Transpose>({ bgm_gate_m, any_input() }), any_input() }) });
 
-    // ggml spells SiLU as x * sigmoid(x)
-    auto sigmoid_m = wrap_type<ov::op::v0::Sigmoid>({ gate_u_m });
-    auto silu_m = wrap_type<ov::op::v1::Multiply>({ gate_u_m, sigmoid_m });
+    auto silu_m = wrap_type<ov::op::v4::Swish>({ gate_u_m });
 
     auto bgm_up_m = wrap_type<ov::op::internal::GatherMatmul>({ a_up_m, up_w_m, ids_up_m, any_input() });
     auto up_u_m = optional<ov::op::v0::Convert>({ wrap_type<ov::op::v0::Unsqueeze>(

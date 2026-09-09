@@ -320,9 +320,7 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         break;
     }
     case GGML_OP_MUL_MAT: {
-        if (node->src[0]->op == GGML_OP_VIEW && node->src[1]->op == GGML_OP_VIEW) {
-            op_case = 3;
-        } else if (node->src[1]->op == GGML_OP_SOFT_MAX) {
+        if (node->src[1]->op == GGML_OP_SOFT_MAX) {
             // In the case of `-fa off`, softmax is used, v_trans=true, the dynamic dim is ne[0] for cache_v
             op_case = 2;
         }
