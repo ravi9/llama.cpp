@@ -675,9 +675,7 @@ GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_openvino_buffer_type(in
 
 static const char * ggml_backend_openvino_host_buffer_type_get_name(ggml_backend_buffer_type_t buft) {
     ggml_backend_openvino_buffer_type_context * ctx = (ggml_backend_openvino_buffer_type_context *) buft->context;
-    static std::string name;
-    name = ctx->name + "_HOST";
-    return name.c_str();
+    return ctx->name.c_str();
 }
 
 static bool ggml_backend_openvino_host_buffer_type_is_host(ggml_backend_buffer_type_t buft) {
@@ -710,7 +708,7 @@ GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_openvino_host_buffer_ty
 
         for (int i = 0; i < device_count; i++) {
             buffer_type_contexts[i].device = i;
-            buffer_type_contexts[i].name = std::string(GGML_OPENVINO_NAME) + std::to_string(i);
+            buffer_type_contexts[i].name = std::string(GGML_OPENVINO_NAME) + std::to_string(i) + "_HOST";
 
             buffer_types[i] = ggml_backend_buffer_type{
                 /* .iface   = */ ggml_backend_openvino_host_buffer_type_interface,
@@ -775,13 +773,16 @@ static void ggml_backend_openvino_free(ggml_backend_t backend) {
 
     if (ctx->runtime_context) {
         auto r_ctx = std::static_pointer_cast<ov_runtime_context>(ctx->runtime_context);
-        if (--r_ctx->backend_count == 0) {
+        auto cache = r_ctx->compiled_cache;
+        r_ctx->clear_caches();
+        std::lock_guard<std::mutex> cache_lock(cache->mutex);
+        if (--cache->backend_count == 0) {
             // If host weight buffers were released (GGML_OPENVINO_RELEASE_WEIGHTS), the
             // dropped pages can never be repopulated, so a recompile is impossible. Keep
             // the compiled-model cache alive across backend teardown so the next context
             // reuses it instead of recompiling against zeroed weights.
             if (!ggml_openvino_weight_buffers_released()) {
-                r_ctx->clear_caches();
+                cache->graphs.clear();
             }
         }
     }
@@ -830,12 +831,14 @@ static ggml_guid_t ggml_backend_openvino_guid(void) {
 }
 
 static std::shared_ptr<ov_runtime_context> get_ov_runtime_context_ptr() {
-    static std::shared_ptr<ov_runtime_context> r_ctx = [] {
-        auto ctx = std::make_shared<ov_runtime_context>();
-        ctx->device = ggml_openvino_get_device_name();
-        ctx->stateful = is_stateful_enabled() && !ggml_openvino_is_npu();
-        return ctx;
-    }();
+    // Share compiled models, but give every backend its own requests and KV state.
+    static auto cache = std::make_shared<ov_compiled_model_cache>();
+    auto r_ctx = std::make_shared<ov_runtime_context>();
+    r_ctx->device = ggml_openvino_get_device_name();
+    r_ctx->stateful = is_stateful_enabled() && !ggml_openvino_is_npu();
+    r_ctx->compiled_cache = cache;
+    std::lock_guard<std::mutex> cache_lock(cache->mutex);
+    ++cache->backend_count;
     return r_ctx;
 }
 
@@ -858,9 +861,6 @@ GGML_BACKEND_API ggml_backend_t ggml_backend_openvino_init(int device) {
         delete ctx;
         return nullptr;
     }
-
-    std::shared_ptr<ov_runtime_context> r_ctx = std::static_pointer_cast<ov_runtime_context>(ctx->runtime_context);
-    r_ctx->backend_count++;
 
     ggml_backend_t openvino_backend = new ggml_backend{
         /* .guid      = */ ggml_backend_openvino_guid(),

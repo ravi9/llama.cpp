@@ -166,16 +166,28 @@ bool is_moe_expert_sum_add(const ggml_tensor * node) {
 }
 }  // namespace
 
-static std::string get_tensor_ov_name(const ggml_cgraph * cgraph, const ggml_tensor * tensor) {
+std::string GgmlOvDecoder::get_tensor_name(const ggml_cgraph * cgraph, const ggml_tensor * tensor) {
     if (tensor == nullptr) {
         return "";
     }
-    const size_t hash_pos = ggml_hash_find(&cgraph->visited_hash_set, tensor);
-    if (((tensor->flags & GGML_TENSOR_FLAG_COMPUTE) || GgmlOvDecoder::is_kvcache(tensor, nullptr)) &&
-        hash_pos != GGML_HASHSET_FULL && ggml_bitset_get(cgraph->visited_hash_set.used, hash_pos)) {
-        return std::string(tensor->name) + "#" + std::to_string(hash_pos);
+    if ((tensor->flags & GGML_TENSOR_FLAG_COMPUTE) || is_kvcache(tensor, nullptr)) {
+        // Hash-table slots depend on tensor addresses and differ between contexts.
+        // Graph ordinals disambiguate duplicate names while keeping compiled-model
+        // ports identical for equivalent graphs in different contexts.
+        const auto * node = std::find(cgraph->nodes, cgraph->nodes + cgraph->n_nodes, tensor);
+        if (node != cgraph->nodes + cgraph->n_nodes) {
+            return std::string(tensor->name) + "#n" + std::to_string(node - cgraph->nodes);
+        }
+        const auto * leaf = std::find(cgraph->leafs, cgraph->leafs + cgraph->n_leafs, tensor);
+        if (leaf != cgraph->leafs + cgraph->n_leafs) {
+            return std::string(tensor->name) + "#l" + std::to_string(leaf - cgraph->leafs);
+        }
     }
     return tensor->name;
+}
+
+static std::string get_tensor_ov_name(const ggml_cgraph * cgraph, const ggml_tensor * tensor) {
+    return GgmlOvDecoder::get_tensor_name(cgraph, tensor);
 }
 
 static std::string get_tensor_graph_input_ov_name(const GgmlOvDecoder * decoder,

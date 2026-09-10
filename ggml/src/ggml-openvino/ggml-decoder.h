@@ -116,6 +116,7 @@ std::optional<int> extract_layer_from_name(const std::string & name);
 
 class GgmlOvDecoder : public ov::frontend::ggml::GgmlDecoder {
 public:
+    static std::string get_tensor_name(const ggml_cgraph * cgraph, const ggml_tensor * tensor);
     struct NodeInfo {
         ggml_tensor * node;
         std::string node_name;
