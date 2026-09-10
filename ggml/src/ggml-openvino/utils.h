@@ -1,7 +1,6 @@
 #include "ggml-decoder.h"
 #include "ggml-impl.h"
 
-#include <ittnotify.h>
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
