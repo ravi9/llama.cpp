@@ -51,6 +51,7 @@
 #include <openvino/pass/make_stateful.hpp>
 #include <limits>
 #include <sstream>
+#include <unordered_set>
 
 namespace ov {
 namespace frontend {
@@ -304,6 +305,32 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
                                       " is not implemented.");
         NodeContext node_context(decoder, tensor_map, node_idx, this);
         ov::OutputVector converted_outputs = it->second(node_context);
+
+        std::vector<ov::Node *> queue;
+        std::unordered_set<ov::Node *> visited;
+        for (const auto & out : converted_outputs) {
+            if (auto node = out.get_node_shared_ptr()) {
+                queue.push_back(node.get());
+            }
+        }
+        while (!queue.empty()) {
+            ov::Node * node = queue.back();
+            queue.pop_back();
+            if (!node || !visited.insert(node).second) {
+                continue;
+            }
+            auto & rt = node->get_rt_info();
+            if (rt.find("ggml_op_type") != rt.end()) {
+                continue;
+            }
+            rt["ggml_op_type"] = operation_type;
+            rt["ggml_node_idx"] = std::to_string(node_idx);
+            for (size_t i = 0; i < node->get_input_size(); ++i) {
+                if (auto src_node = node->get_input_node_shared_ptr(i)) {
+                    queue.push_back(src_node.get());
+                }
+            }
+        }
 
         const auto & node_output_names = decoder->get_output_names(node_idx);
         FRONT_END_OP_CONVERSION_CHECK(node_output_names.size() == converted_outputs.size(), "Number of ",
