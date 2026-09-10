@@ -61,6 +61,8 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_DISABLE_REMOTE_OUTPUTS",
         "GGML_OPENVINO_REQUANT_KQUANT",
         "GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT",
+        // Build the precise (but O(n_nodes)) graph cache key. Needed by op tests.
+        "GGML_OPENVINO_FULL_GRAPH_KEY",
     };
 
     for (const char * const & env_var : env_var_names) {
