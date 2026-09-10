@@ -2,7 +2,6 @@
 #include "ggml-impl.h"
 #include "ggml-openvino-extra.h"
 
-#include <ittnotify.h>
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
