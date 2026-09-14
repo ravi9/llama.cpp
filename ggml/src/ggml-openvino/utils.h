@@ -41,7 +41,7 @@ struct graph_key {
         auto get_input_key_name = [](const ggml_cgraph * graph, const ggml_tensor * tensor) {
             std::string name = tensor->name;
             const size_t hash_pos = ggml_hash_find(&graph->visited_hash_set, tensor);
-            if (((tensor->flags & GGML_TENSOR_FLAG_COMPUTE) || GgmlOvDecoder::is_kvcache(tensor, nullptr)) &&
+            if (((tensor->flags & GGML_TENSOR_FLAG_COMPUTE) || GgmlOvDecoder::is_cache(tensor, nullptr)) &&
                 hash_pos != GGML_HASHSET_FULL && ggml_bitset_get(graph->visited_hash_set.used, hash_pos)) {
                 name += "#" + std::to_string(hash_pos);
             }

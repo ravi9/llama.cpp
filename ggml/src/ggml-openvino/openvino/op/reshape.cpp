@@ -30,8 +30,8 @@ OutputVector translate_reshape(const NodeContext & context) {
     std::shared_ptr<ov::Node> new_shape_node;
     if (op_case == 0) {
         new_shape_node = ov::op::v0::Constant::create(ov::element::i64, {4}, context.get_output_shape().to_shape());
-    } else if (op_case == 1) {
-        if (context.is_stateful()) {
+    } else if (op_case == 1 || op_case == 9) {
+        if (context.is_stateful() && op_case != 9) {
             new_shape_node = ov::op::v0::Constant::create(
                 ov::element::i64, {3}, std::vector<int64_t>{-1, (int64_t) output_shape[2], (int64_t) output_shape[3]});
         } else {
