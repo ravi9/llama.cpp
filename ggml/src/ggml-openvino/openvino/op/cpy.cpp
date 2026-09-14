@@ -101,7 +101,7 @@ OutputVector translate_cpy(const NodeContext & context) {
         writeback_case = op_case - 6;
     }
     const std::string slot_begin_name = "rs_slot_begin_" + context.get_name();
-    const bool slice_assign = !context.is_stateful() && writeback_case >= 1 && writeback_case <= 3 &&
+    const bool slice_assign = writeback_case >= 1 && writeback_case <= 3 &&
                               (single_slot_assign || context.has_input(slot_begin_name));
     if (slice_assign) {
         if (single_slot_assign && writeback_case == 3) {
