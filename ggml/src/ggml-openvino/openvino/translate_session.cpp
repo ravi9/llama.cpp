@@ -117,7 +117,7 @@ ov::pass::MakeStateful::ParamResPairs get_kv_param_res_pairs(
     return pairs;
 }
 
-void add_sliced_mask_stateful(TensorMap & tensor_map) {
+void add_sliced_mask_stateful(TensorMap & tensor_map, bool imrope) {
     auto create_sliced_mask = [&](const std::string & mask_name, const std::string & sliced_name) {
         if ((tensor_map.find(mask_name) != tensor_map.end()) &&
             (tensor_map.find("token_len_per_seq") != tensor_map.end()) &&
@@ -134,7 +134,12 @@ void add_sliced_mask_stateful(TensorMap & tensor_map) {
             auto axes = ov::op::v0::Constant::create(ov::element::i64, {1}, {-1});
 
             auto inp_pos = tensor_map.at("inp_pos").get_node_shared_ptr();
-            auto last_inp_pos = std::make_shared<ov::op::v8::Gather>(inp_pos, neg_one, three);
+            // IMROPE's fourth position plane is zero for text; use the token's first plane.
+            ov::Output<ov::Node> last_index = neg_one;
+            if (imrope) {
+                last_index = std::make_shared<ov::op::v1::Add>(token_len_per_seq, neg_one);
+            }
+            auto last_inp_pos = std::make_shared<ov::op::v8::Gather>(inp_pos, last_index, three);
             auto last_inp_pos_1d = std::make_shared<ov::op::v1::Reshape>(
                 last_inp_pos, ov::op::v0::Constant::create(ov::element::i64, {1}, {1}), false);
             auto last_inp_pos_cvt = std::make_shared<ov::op::v0::Convert>(last_inp_pos_1d, ov::element::i64);
@@ -242,7 +247,7 @@ void add_rope_sin_cos(TensorMap & tensor_map, GgmlDecoder & ggml_model_decoder) 
 // Create common patterns
 void preprocess(TensorMap & tensor_map, GgmlDecoder & ggml_model_decoder) {
     if (ggml_model_decoder.is_stateful()) {
-        add_sliced_mask_stateful(tensor_map);
+        add_sliced_mask_stateful(tensor_map, ggml_model_decoder.get_rope_params()[2] == GGML_ROPE_TYPE_IMROPE);
         add_position_mask_stateful_swa(tensor_map);
     }
     // This optimization is error-prone

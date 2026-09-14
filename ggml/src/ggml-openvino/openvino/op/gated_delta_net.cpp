@@ -53,7 +53,7 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
 
     auto q = context.get_input(0);
     auto k = context.get_input(1);
-    auto v = process_view_input(context, 2, H_v * S_v);
+    auto v = process_view_input(context, 2, H_v * S_v, 3);
     auto g = context.get_input(3);
     auto beta = context.get_input(4);
     auto state = context.get_input(5);
