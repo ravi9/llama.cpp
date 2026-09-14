@@ -395,9 +395,18 @@ public:
         return op->op == GGML_OP_ROPE && tensor == op->src[2];
     }
 
-    // also returns true for cache_s and cache_r in SSM/DeltaNet models
+    inline static bool is_recurrent_cache(const ggml_tensor * tensor) {
+        return tensor != nullptr && (strncmp(tensor->name, "cache_r_l", strlen("cache_r_l")) == 0 ||
+                                     strncmp(tensor->name, "cache_s_l", strlen("cache_s_l")) == 0 ||
+                                     strncmp(tensor->name, "cache_ple_r_l", strlen("cache_ple_r_l")) == 0);
+    }
+
+    inline static bool is_cache(const ggml_tensor * tensor, const ggml_tensor * op) {
+        return is_recurrent_cache(tensor) || is_kvcache(tensor, op);
+    }
+
     inline static bool is_kvcache(const ggml_tensor * tensor, const ggml_tensor * op) {
-        if (tensor == nullptr) {
+        if (tensor == nullptr || is_recurrent_cache(tensor)) {
             return false;
         }
         return (tensor->buffer != nullptr && tensor->buffer->usage == GGML_BACKEND_BUFFER_USAGE_ANY) ||
@@ -405,7 +414,7 @@ public:
     }
 
     inline static bool is_conv_state_writeback(const ggml_tensor * node) {
-        return node->op == GGML_OP_CPY && node->view_src != nullptr && is_kvcache(node->view_src, nullptr) &&
+        return node->op == GGML_OP_CPY && node->view_src != nullptr && is_recurrent_cache(node->view_src) &&
                node->src[0] != nullptr && node->src[0]->op == GGML_OP_VIEW && node->src[0]->src[0] != nullptr &&
                node->src[0]->src[0]->op == GGML_OP_CONCAT && node->src[1] != nullptr &&
                node->src[1]->op == GGML_OP_VIEW && node->src[1]->view_src == node->view_src;
