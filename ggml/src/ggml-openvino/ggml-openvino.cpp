@@ -1368,6 +1368,11 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         if (op->view_src != nullptr && !ggml_is_contiguous(op->src[0])) {
             return {false, "ROPE on VIEW / non-contiguous input is not supported"};
         }
+        if (op->src[0]->ne[3] > 1) {
+            // translate_rope's cos/sin tables cover one sequence only; ne[3] > 1 fails to broadcast.
+            return {false, "ROPE with multiple sequences (ne[3]=" + std::to_string(op->src[0]->ne[3]) +
+                           ") is not supported"};
+        }
         float freq_scale;
         float ext_factor;
         float attn_factor;
@@ -1486,6 +1491,10 @@ static ggml_openvino_op_support ggml_backend_openvino_device_supports_op_impl(gg
         }
         if (ggml_get_unary_op(op) == GGML_UNARY_OP_EXP && op->type == GGML_TYPE_F32) {
             return {false, "UNARY_EXP with F32 type is not supported"};
+        }
+        if (ggml_get_unary_op(op) == GGML_UNARY_OP_SOFTPLUS && ggml_openvino_get_device_name() == "GPU") {
+            // OpenVINO GPU's SoftPlus kernel overflows to inf for large inputs (CPU device is fine).
+            return {false, "UNARY_SOFTPLUS is not supported on GPU"};
         }
         break;
     }
