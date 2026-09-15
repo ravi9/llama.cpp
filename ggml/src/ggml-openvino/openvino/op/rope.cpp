@@ -84,7 +84,7 @@ OutputVector translate_rope(const NodeContext & context) {
                                   "ROPE expects non-negative even n_offs");
     FRONT_END_OP_CONVERSION_CHECK(n_dims > 0 && n_dims + n_offs <= head_dim && (n_dims % 2 == 0),
                                   "ROPE expects even n_dims in [1, head_dim - n_offs]");
-    
+
     // RoPEFusionFlux requires rank_equals(4) on x, t_cos and t_sin. The cos/sin
     // tables are already built rank-4 ([1, S, 1, head_size/2]) for both modes. In
     // stateful mode the data arrives rank-3 ([S, n_heads, head_size]), so lift it

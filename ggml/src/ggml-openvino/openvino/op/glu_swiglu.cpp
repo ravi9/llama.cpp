@@ -9,6 +9,7 @@
 #include <openvino/op/add.hpp>
 #include <openvino/op/clamp.hpp>
 #include <openvino/op/constant.hpp>
+#include <openvino/op/convert.hpp>
 #include <openvino/op/multiply.hpp>
 #include <openvino/op/slice.hpp>
 #include <openvino/op/swish.hpp>
@@ -92,10 +93,22 @@ OutputVector translate_glu_swiglu_clamp(const NodeContext & context) {
     const int32_t * params = context.get_output_op_params();
     const float limit = reinterpret_cast<const float *>(params)[3];
 
+    // Compute in f32: f16 Swish/Clamp rounding drifts past the 1e-7 test tolerance.
+    auto output_type = context.get_output_type();
+    if (src0.get_element_type() != ov::element::f32) {
+        src0 = std::make_shared<ov::op::v0::Convert>(src0, ov::element::f32);
+    }
+    if (src1.get_element_type() != ov::element::f32) {
+        src1 = std::make_shared<ov::op::v0::Convert>(src1, ov::element::f32);
+    }
+
     auto gate = std::make_shared<ov::op::v0::Clamp>(src0, -std::numeric_limits<float>::infinity(), limit);
     auto silu = std::make_shared<ov::op::v4::Swish>(gate);
     auto up = std::make_shared<ov::op::v0::Clamp>(src1, -limit, limit);
-    auto res = std::make_shared<ov::op::v1::Multiply>(silu, up);
+    ov::Output<ov::Node> res = std::make_shared<ov::op::v1::Multiply>(silu, up);
+    if (res.get_element_type() != output_type) {
+        res = std::make_shared<ov::op::v0::Convert>(res, output_type);
+    }
 
     return rename_outputs_with_suffix({res}, context.get_name());
 }
