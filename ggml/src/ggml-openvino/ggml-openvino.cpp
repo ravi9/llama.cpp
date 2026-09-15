@@ -1191,6 +1191,10 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         if (op->src[1]->op == GGML_OP_PERMUTE) {
             return {false, "ADD/MUL/SUB with PERMUTE src1 is not supported"};
         }
+        // >8-expert MoE ReduceSum drifts past the 1e-7 tolerance (f32 order vs CPU); intermittent.
+        if (op->op == GGML_OP_ADD && is_moe_expert_sum_add(op) && op->src[1]->src[0]->ne[1] > 8) {
+            return {false, "MoE expert-plane sum with more than 8 experts is not supported"};
+        }
         for (int i = 0; i < 4; i++) {
             if (op->src[0]->ne[i] != op->src[1]->ne[i] && (op->src[0]->ne[i] != 1 && op->src[1]->ne[i] != 1)) {
                 return {false, "ADD/MUL/SUB with incompatible broadcast shapes: src0->ne[" + std::to_string(i) + "]=" +
