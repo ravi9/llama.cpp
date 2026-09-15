@@ -606,7 +606,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
             std::unique_lock<std::mutex> compile_lock(shared_cache->mutex);
             auto weight_names = get_weight_names(cgraph);
             ggml_decoder = std::make_shared<GgmlOvDecoder>(cgraph, m_params, c_params, weight_names,
-                                                          is_static, stateful, model_is_splitted);
+                                                          is_static, r_ctx->stateful, model_is_splitted);
             const std::string shared_key = cache_enabled ? compiled_graph_key(cgraph, *ggml_decoder, device) : "";
             ov::CompiledModel shared_model;
             bool imported = false;
