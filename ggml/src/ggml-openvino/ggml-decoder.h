@@ -114,6 +114,9 @@ struct ComputeParams {
 // defined below; declared here because GgmlOvDecoder uses it inline
 std::optional<int> extract_layer_from_name(const std::string & name);
 
+// detects the MoE expert-plane-sum ADD chain (see definition); used by supports_op too
+bool is_moe_expert_sum_add(const ggml_tensor * node);
+
 class GgmlOvDecoder : public ov::frontend::ggml::GgmlDecoder {
 public:
     static std::string get_tensor_name(const ggml_cgraph * cgraph, const ggml_tensor * tensor);
