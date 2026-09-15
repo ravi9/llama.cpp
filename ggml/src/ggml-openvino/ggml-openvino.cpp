@@ -1313,6 +1313,11 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
             op->src[0]->ne[0] == 256 && op->src[1]->ne[0] == 256) {
             return {false, "MUL_MAT quantized benchmark test case on GPU is not supported"};
         }
+        if (ggml_openvino_get_device_name() == "GPU" && op->type == GGML_TYPE_F32 && op->ne[0] == 1 && op->ne[1] == 1) {
+            // GPU MatMul for a degenerate m=1,n=1 dot product loses precision past the test
+            // tolerance (likely an internal fp16 accumulation path for this tiny shape).
+            return {false, "MUL_MAT with m=1,n=1 (scalar dot product) on GPU is not supported"};
+        }
         if (op->src[0]->ne[3] != op->src[1]->ne[3] && op->src[0]->ne[3] != 1 && op->src[1]->ne[3] != 1) {
             return {false, "MUL_MAT with incompatible broadcast on ne[3]: src0->ne[3]=" + std::to_string(op->src[0]->ne[3]) +
                            ", src1->ne[3]=" + std::to_string(op->src[1]->ne[3])};
