@@ -75,6 +75,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_NPU_KV_SLICE",
         "GGML_OPENVINO_SELF_CONTAINED_BLOB",
         "GGML_OPENVINO_SELF_CONTAINED_MMAP",
+        "GGML_OPENVINO_SELF_CONTAINED_LAZY_IMPORT",
     };
 
     for (const char * const & env_var : env_var_names) {
