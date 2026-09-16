@@ -35,6 +35,7 @@
 #include <openvino/runtime/properties.hpp>
 #include <openvino/runtime/tensor.hpp>
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -134,27 +135,27 @@ static std::optional<ov::Tensor> try_make_kv_sliced_tensor(std::shared_ptr<GgmlO
     ov::Shape sliced_shape = full_shape;
     sliced_shape[2] = static_cast<size_t>(n_kv);
 
-    // Disabling for now as gpu has bug with in-place ScatterUpdate with remote tensors, can re-enable once CVS-186519 is fixed
-    // if (ggml_openvino_buffer_is_remote(ggml_tensor)) {
-    //     auto remote_context = ggml_openvino_get_remote_context();
-    //     auto gpu_context = remote_context->as<ov::intel_gpu::ocl::ClContext>();
-    //     return gpu_context.create_tensor(ggml_decoder->get_ov_type(ggml_tensor), sliced_shape, ggml_tensor->data);
-    // }
+    if (ggml_openvino_buffer_is_remote(ggml_tensor)) {
+        auto remote_context = ggml_openvino_get_remote_context();
+        auto gpu_context = remote_context->as<ov::intel_gpu::ocl::ClContext>();
+        return gpu_context.create_tensor(ggml_decoder->get_ov_type(ggml_tensor), sliced_shape, ggml_tensor->data);
+    }
 
     return ov::Tensor(ggml_decoder->get_ov_type(ggml_tensor), sliced_shape, ggml_tensor->data);
 }
 
-static uint64_t ggml_openvino_model_cache_extra_cfg(const std::string & device, bool stateful) {
+static uint64_t ggml_openvino_model_cache_extra_cfg(const std::string & device, bool stateful, bool recurrent) {
     const char * manual_gqa_env = ggml_openvino_getenv_str("GGML_OPENVINO_MANUAL_GQA_ATTN");
     const bool manual_gqa_enabled = manual_gqa_env != nullptr ?
                                         ggml_openvino_getenv_int("GGML_OPENVINO_MANUAL_GQA_ATTN") > 0 :
                                         device == "GPU";
 
     uint64_t extra_cfg = 1;  // Graph-ordinal port names (invalidate older disk-cache blobs).
-    extra_cfg = extra_cfg * 131 + (stateful ? 1u : 0u);
+    extra_cfg = extra_cfg * 131 + (stateful ? (recurrent ? 2u : 1u) : 0u);
     extra_cfg = extra_cfg * 131 + (ggml_openvino_reduce_compile_mem_enabled() ? 1u : 0u);
     extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_KV_SLICE") ? 1u : 0u);
     extra_cfg = extra_cfg * 131 + (manual_gqa_enabled ? 1u : 0u);
+    extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_PROFILING") >= 2 ? 1u : 0u);
     return extra_cfg;
 }
 
@@ -243,6 +244,77 @@ static std::string compiled_graph_key(const ggml_cgraph * graph, const GgmlOvDec
     return has_weight_buffer_id ? key : std::string{};
 }
 
+static std::string ov_profiling_csv_field(const std::string & value) {
+    std::string escaped = "\"";
+    for (char c : value) {
+        escaped += c;
+        if (c == '"') {
+            escaped += c;
+        }
+    }
+    escaped += '"';
+    return escaped;
+}
+
+static void dump_ov_profiling_info(const ov::InferRequest & infer_request) {
+    if (ggml_openvino_getenv_int("GGML_OPENVINO_PROFILING") < 2) {
+        return;
+    }
+
+    static std::atomic<uint64_t> inference_index{0};
+    const uint64_t index = inference_index.fetch_add(1);
+    const std::string path = "openvino_profile_" + std::to_string(index) + ".csv";
+    std::ofstream output(path, std::ios::trunc);
+    if (!output.is_open()) {
+        GGML_LOG_WARN("ggml-openvino: failed to write profiling data to %s\n", path.c_str());
+        return;
+    }
+
+    output << "status,real_time_us,cpu_time_us,start_time_us,node_type,node_name,exec_type\n";
+    int64_t total_real_time = 0;
+    int64_t total_cpu_time = 0;
+    size_t executed_count = 0;
+    for (const auto & info : infer_request.get_profiling_info()) {
+        const char * status = "NOT_RUN";
+        if (info.status == ov::ProfilingInfo::Status::EXECUTED) {
+            status = "EXECUTED";
+            total_real_time += info.real_time.count();
+            total_cpu_time += info.cpu_time.count();
+            executed_count++;
+        } else if (info.status == ov::ProfilingInfo::Status::OPTIMIZED_OUT) {
+            status = "OPTIMIZED_OUT";
+        }
+
+        output << status << ',' << info.real_time.count() << ',' << info.cpu_time.count() << ','
+               << info.start_time.count() << ',' << ov_profiling_csv_field(info.node_type) << ','
+               << ov_profiling_csv_field(info.node_name) << ',' << ov_profiling_csv_field(info.exec_type) << '\n';
+    }
+
+    GGML_LOG_INFO("ggml-openvino: profile %s: %zu executed nodes, %.3f ms device, %.3f ms CPU\n", path.c_str(),
+                  executed_count, total_real_time / 1000.0, total_cpu_time / 1000.0);
+}
+
+static void reset_single_slot_recurrent_cache(ggml_cgraph * cgraph,
+                                              const ModelParams & model_params,
+                                              const ComputeParams & compute_params) {
+    if (model_params.n_rs_slots != 1 || compute_params.cache_rs_reset_len == 0) {
+        return;
+    }
+    GGML_ASSERT(compute_params.cache_rs_reset_idx == 0 && compute_params.cache_rs_reset_len == 1);
+
+    std::set<ggml_backend_buffer_t> buffers;
+    for (int i = 0; i < cgraph->n_nodes; i++) {
+        auto * node = cgraph->nodes[i];
+        if (node->op == GGML_OP_SCALE && GgmlOvDecoder::is_recurrent_cache(node->view_src) &&
+            node->view_src->ne[1] == 1 && node->view_src->buffer != nullptr) {
+            buffers.insert(node->view_src->buffer);
+        }
+    }
+    for (auto * buffer : buffers) {
+        ggml_backend_buffer_clear(buffer, 0);
+    }
+}
+
 ov::Tensor create_ov_output_tensor(std::shared_ptr<GgmlOvDecoder> ggml_decoder,
                                    std::shared_ptr<ov::InferRequest> infer_request,
                                    int output_index,
@@ -250,15 +322,6 @@ ov::Tensor create_ov_output_tensor(std::shared_ptr<GgmlOvDecoder> ggml_decoder,
     if (auto sliced = try_make_kv_sliced_tensor(ggml_decoder, std::string(ggml_tensor->name), ggml_tensor)) {
         return *sliced;
     }
-
-    // Disabling for now as gpu has bug with in-place ScatterUpdate with remote tensors, can re-enable once CVS-186519 is fixed
-    // if (ggml_tensor->extra != nullptr && !ggml_decoder->is_splited_model()) {
-    //     auto * extra_base = static_cast<ggml_openvino_extra_base *>(ggml_tensor->extra);
-    //     if (extra_base->type == ggml_openvino_extra_base::Type::TENSOR) {
-    //         auto * tensor_extra = static_cast<ggml_openvino_tensor_extra *>(extra_base);
-    //         return *tensor_extra->tensor;
-    //     }
-    // }
 
     auto output_type = ggml_decoder->get_ov_type(ggml_tensor);
     ov::Shape output_shape;
@@ -279,6 +342,21 @@ ov::Tensor create_ov_output_tensor(std::shared_ptr<GgmlOvDecoder> ggml_decoder,
             output_shape = ggml_decoder->get_shape(ggml_tensor);
         }
     }
+
+    // The sliced path above covers eligible KV outputs. This also covers recurrent state and full-size KV fallbacks.
+    if (!ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_REMOTE_OUTPUTS") && !ggml_decoder->is_static() &&
+        !ggml_decoder->is_splited_model() && ggml_openvino_buffer_is_remote(ggml_tensor) &&
+        ggml_tensor->extra != nullptr) {
+        auto * extra_base = static_cast<ggml_openvino_extra_base *>(ggml_tensor->extra);
+        if (extra_base->type == ggml_openvino_extra_base::Type::TENSOR) {
+            auto * tensor_extra = static_cast<ggml_openvino_tensor_extra *>(extra_base);
+            if (tensor_extra->tensor != nullptr && tensor_extra->tensor->get_element_type() == output_type &&
+                tensor_extra->tensor->get_shape() == output_shape) {
+                return *tensor_extra->tensor;
+            }
+        }
+    }
+
     ov::Tensor output_tensor(output_type, output_shape, output_data);
     return output_tensor;
 }
@@ -307,24 +385,32 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
     auto & core = ov_singleton_core();
     const auto & config = ggml_openvino_get_compile_config();
     const auto & device = r_ctx->device;
-    const auto & stateful = r_ctx->stateful;
     static auto is_static = false;
 
     static const bool cache_disabled = ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_CACHE");
+
+    auto start_time = ggml_time_us();
 
     // is_model_splitted is O(n_nodes^2) plus a create_weight_nodes scan and takes ~20 ms
     // on a Llama-1B decode graph. It is called once per graph_compute invocation but the
     // graph shape is identical across all decode steps, so memoize by graph_key: compute
     // graph_key first (a few hundred us), and if the same key is already in decoder_cache
     // we know the graph is not splitted (only not-splitted graphs get inserted there).
+    const int64_t cache_key_start_time = ggml_time_us();
     graph_key key(cgraph);
+    const int64_t cache_key_compute_time = ggml_time_us() - cache_key_start_time;
+    int64_t cache_lookup_time = 0;
     bool key_seen = false;
     if (!cache_disabled) {
+        const int64_t cache_lookup_start_time = ggml_time_us();
         std::lock_guard<std::mutex> map_lock(r_ctx->ctx_mutex);
         key_seen = r_ctx->decoder_cache.find(key) != r_ctx->decoder_cache.end();
+        cache_lookup_time += ggml_time_us() - cache_lookup_start_time;
     }
 
+    const int64_t model_split_check_start_time = ggml_time_us();
     bool model_is_splitted = key_seen ? false : is_model_splitted(cgraph);
+    const int64_t model_split_check_time = ggml_time_us() - model_split_check_start_time;
 
     if (is_naive(cgraph)) {
         if (!model_is_splitted) {
@@ -332,15 +418,26 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
         }
     }
 
-    auto start_time = ggml_time_us();
-
     std::shared_ptr<GgmlOvDecoder> ggml_decoder;
     std::shared_ptr<ov::InferRequest> infer_request;
     ModelParams m_params;
     ComputeParams c_params;
+    const int64_t graph_param_compute_start_time = ggml_time_us();
     std::tie(m_params, c_params) = GgmlOvDecoder::compute_llm_params(cgraph, is_static);
+    const int64_t graph_param_compute_time = ggml_time_us() - graph_param_compute_start_time;
 
     const bool cache_enabled = !model_is_splitted && !cache_disabled;
+    const bool stateful_recurrent = r_ctx->stateful && m_params.state_size >= 0;
+    const bool stateful_kv_only = r_ctx->stateful && !stateful_recurrent;
+    if (r_ctx->stateful &&
+        (m_params.n_seq > 1 || c_params.n_seq_active > 1 || m_params.n_rs_slots > 1 || m_params.has_rs_rollback)) {
+        GGML_LOG_ERROR("OpenVINO stateful execution requires a single slot without recurrent rollback. Use -np 1.\n");
+        return GGML_STATUS_FAILED;
+    }
+    if (stateful_recurrent && !cache_enabled) {
+        GGML_LOG_ERROR("OpenVINO recurrent stateful execution requires an unsplit graph with model caching enabled.\n");
+        return GGML_STATUS_FAILED;
+    }
     bool cache_hit = false;
 
     int64_t decoder_end_time;
@@ -353,6 +450,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
         std::shared_ptr<decoder_runtime_ctx> entry;
         ModelParams old_m_params;
 
+        const int64_t cache_lookup_start_time = ggml_time_us();
         if (cache_enabled) {
             std::lock_guard<std::mutex> map_lock(r_ctx->ctx_mutex);
             auto it = r_ctx->decoder_cache.find(key);
@@ -370,6 +468,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
             entry = std::make_shared<decoder_runtime_ctx>(mutex);
             cache_hit = false;
         }
+        cache_lookup_time += ggml_time_us() - cache_lookup_start_time;
 
         std::lock_guard<std::mutex> lock(*(entry->mutex));
         cache_hit = cache_hit && entry->ptr && r_ctx->infer_request_cache.count(key) != 0;
@@ -400,7 +499,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
                 ov_output_names = r_ctx->ov_output_names_cache.at(key);
             }
 
-            if (stateful) {
+            if (stateful_kv_only) {
                 const auto * inp_pos = get_inp_pos_tensor(cgraph);
                 int32_t * pos_data = (int32_t *) inp_pos->data;
                 auto pos_shape = ggml_decoder->get_shape(inp_pos);
@@ -507,7 +606,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
             std::unique_lock<std::mutex> compile_lock(shared_cache->mutex);
             auto weight_names = get_weight_names(cgraph);
             ggml_decoder = std::make_shared<GgmlOvDecoder>(cgraph, m_params, c_params, weight_names,
-                                                          is_static, stateful, model_is_splitted);
+                                                          is_static, r_ctx->stateful, model_is_splitted);
             const std::string shared_key = cache_enabled ? compiled_graph_key(cgraph, *ggml_decoder, device) : "";
             ov::CompiledModel shared_model;
             bool imported = false;
@@ -554,7 +653,8 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
                 mc_config.erase("CACHE_MODE");
             }
             if (!imported && !model_cache_dir.empty() && !model_is_splitted) {
-                const uint64_t extra_cfg = ggml_openvino_model_cache_extra_cfg(device, stateful);
+                const uint64_t extra_cfg =
+                    ggml_openvino_model_cache_extra_cfg(device, r_ctx->stateful, stateful_recurrent);
                 model_fp = ggml_openvino_model_fingerprint(cgraph, device, /*fa=*/true, m_params.rope_params,
                                                            16, extra_cfg);
                 blob_path = ggml_openvino_model_cache_blob_path(model_cache_dir, model_fp);
@@ -580,7 +680,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
                             weight_names[n] = nullptr;
                         }
                         ggml_decoder = std::make_shared<GgmlOvDecoder>(cgraph, m_params, c_params, weight_names,
-                                                                       is_static, stateful, model_is_splitted);
+                                                                       is_static, r_ctx->stateful, model_is_splitted);
                         infer_request = std::make_shared<ov::InferRequest>(cm.create_infer_request());
                         shared_model = cm;
                         entry->ptr = ggml_decoder;
@@ -616,7 +716,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
                 auto model_weights = GgmlOvDecoder::create_weight_nodes(cgraph);
 
                 ggml_decoder = std::make_shared<GgmlOvDecoder>(cgraph, m_params, c_params, model_weights, is_static,
-                                                               stateful, model_is_splitted);
+                                                               r_ctx->stateful, model_is_splitted);
                 decoder_end_time = ggml_time_us();
 
                 auto input_model = std::make_shared<ov::frontend::ggml::InputModel>(ggml_decoder);
@@ -699,7 +799,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
                 r_ctx->ov_output_names_cache[key] = ov_output_names;
             }
 
-            if (stateful && cache_enabled) {
+            if (stateful_kv_only && cache_enabled) {
                 const auto * inp_pos = get_inp_pos_tensor(cgraph);
                 auto pos_shape = ggml_decoder->get_shape(inp_pos);
                 // A freshly compiled model starts with an empty state, so it can only serve a
@@ -720,6 +820,22 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
                     r_ctx->kv_state_input_name_map[pair.first + pair.second] = pair.first;
                 }
             }
+        }
+
+        if (stateful_recurrent) {
+            const auto * inp_pos = get_inp_pos_tensor(cgraph);
+            const int32_t pos_begin = static_cast<const int32_t *>(inp_pos->data)[0];
+            if (pos_begin == 0) {
+                infer_request->reset_state();
+            } else if (!cache_hit || old_m_params.kv_buffer_changed(m_params) || c_params.cache_rs_reset_len > 0 ||
+                       pos_begin < 0 || static_cast<size_t>(pos_begin) != r_ctx->stateful_kv_size) {
+                GGML_LOG_ERROR(
+                    "OpenVINO recurrent stateful execution cannot restore or rewind a sequence. Restart at position 0 "
+                    "or disable GGML_OPENVINO_STATEFUL_EXECUTION.\n");
+                return GGML_STATUS_FAILED;
+            }
+        } else {
+            reset_single_slot_recurrent_cache(cgraph, m_params, c_params);
         }
 
         for (size_t i = 0; i < ov_input_names.size(); i++) {
@@ -754,6 +870,12 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
         ov_raw_infer_start = ggml_time_us();
         infer_request->infer();
         infer_end_time = ggml_time_us();
+        if (stateful_recurrent) {
+            const auto * inp_pos = get_inp_pos_tensor(cgraph);
+            r_ctx->stateful_kv_size =
+                static_cast<const int32_t *>(inp_pos->data)[0] + get_inp_pos_n_tokens(cgraph, inp_pos);
+        }
+        dump_ov_profiling_info(*infer_request);
 
         if (ggml_openvino_getenv_int("GGML_OPENVINO_DEBUG_OUTPUT") ||
             ggml_openvino_getenv_str("GGML_OPENVINO_DEBUG_NODE")) {
@@ -766,13 +888,17 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
         if (ggml_openvino_getenv_int("GGML_OPENVINO_PROFILING")) {
             GGML_LOG_INFO("\nGGML OpenVINO Backend: \n");
             GGML_LOG_INFO("  - Graph decoder time: %.3f ms \n", (decoder_end_time - start_time) / 1000.0);
+            GGML_LOG_INFO("    - cache key compute time: %.3f ms \n", cache_key_compute_time / 1000.0);
+            GGML_LOG_INFO("    - model split check time: %.3f ms \n", model_split_check_time / 1000.0);
+            GGML_LOG_INFO("    - graph param compute time: %.3f ms \n", graph_param_compute_time / 1000.0);
+            GGML_LOG_INFO("    - cache lookup time: %.3f ms \n", cache_lookup_time / 1000.0);
             if (!cache_hit) {
                 GGML_LOG_INFO("  - Graph conversion time: %.3f ms \n",
                               (conversion_end_time - decoder_end_time) / 1000.0);
                 GGML_LOG_INFO("  - Graph compile time: %.3f ms \n", (compile_end_time - conversion_end_time) / 1000.0);
             }
             GGML_LOG_INFO("  - Graph inference time: %.3f ms \n", (infer_end_time - compile_end_time) / 1000.0);
-            GGML_LOG_INFO("  - OV raw infer time: %.3f ms \n", (infer_end_time - ov_raw_infer_start) / 1000.0);
+            GGML_LOG_INFO("    - OV raw infer time: %.3f ms \n", (infer_end_time - ov_raw_infer_start) / 1000.0);
         }
     }
 
@@ -1031,6 +1157,8 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, std::shared_ptr<o
         }
 
     }
+
+    reset_single_slot_recurrent_cache(cgraph, m_params, c_params);
 
     if (is_prefill) {
         auto inp_len = get_inp_pos_n_tokens(cgraph, inp_pos);
