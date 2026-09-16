@@ -12,6 +12,8 @@ The OpenVINO backend is implemented in `ggml/src/ggml-openvino` and provides a t
 - Compiles and caches the model for the target device.
 - Binds GGML tensor memory to OpenVINO inference tensors and runs inference.
 
+For guidance on contributing to the OpenVINO backend, see the [OpenVINO Backend Contributing Guide](https://github.com/ravi9/llamacpp-ov-dev-guide/blob/main/contributing-llamacpp-ov.md).
+
 ## Contents
 
 - [Supported Devices](#supported-devices)
@@ -96,7 +98,7 @@ Although, the validated models below were tested with `llama-cli` using the `Q4_
   - **SL** = Stateless (`GGML_OPENVINO_STATEFUL_EXECUTION=0`)
   - **SF** = Stateful (`GGML_OPENVINO_STATEFUL_EXECUTION=1`)
   - Note: The NPU operates in stateless mode only.
-- **Validation system:** Intel® Core™ Ultra 5 238V (Lunar Lake) | 32 GB RAM | Ubuntu 24.04 | Intel OpenCL GPU Driver 26.31.39395.13-0 | Intel NPU Driver 1.35.0.
+- **Validation system:** Intel® Core™ Ultra 5 238V (Lunar Lake) | 32 GB RAM | Ubuntu 24.04 | Intel Graphics Compiler 2.41.5 | Intel OpenCL GPU Driver 26.31.39395.13-0 | Intel NPU Driver 1.38.0.
 - See [Known Limitations](#known-limitations) for context on observed failures.
 
 | Model | CPU (SL / SF) | GPU (SL / SF) | NPU (SL) |
@@ -117,9 +119,9 @@ Although, the validated models below were tested with `llama-cli` using the `Q4_
 | [lmstudio-community/Qwen3.5-9B-Q4_K_M](https://huggingface.co/lmstudio-community/Qwen3.5-9B-GGUF) | ✓ / ✗ | ✓ / ✗ | ✗ |
 |  |  |  |  |
 | [unsloth/gemma-3-4b-it-Q4_K_M](https://huggingface.co/unsloth/gemma-3-4b-it-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
-| [bartowski/google_gemma-4-E2B-it-Q4_K_M](https://huggingface.co/bartowski/google_gemma-4-E2B-it-GGUF) | ✓ / ✗ | ✓ / ✗ | ✗ |
-| [bartowski/google_gemma-4-E4B-it-Q4_K_M](https://huggingface.co/bartowski/google_gemma-4-E4B-it-GGUF) | ✓ / ✗ | ✓ / ✗ | ✓ |
-| [bartowski/gemma-4-12B-it-Q4_K_M](https://huggingface.co/bartowski/gemma-4-12B-it-GGUF) | ✓ / ✗ | ✓ / ✗ | ✓ |
+| [bartowski/google_gemma-4-E2B-it-Q4_K_M](https://huggingface.co/bartowski/google_gemma-4-E2B-it-GGUF) | ✓ / ✓ | ✓ / ✓ | ✗ |
+| [bartowski/google_gemma-4-E4B-it-Q4_K_M](https://huggingface.co/bartowski/google_gemma-4-E4B-it-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
+| [bartowski/gemma-4-12B-it-Q4_K_M](https://huggingface.co/bartowski/gemma-4-12B-it-GGUF) | ✓ / ✓ | ✓ / ✓ | ✗ |
 |  |  |  |  |
 | [bartowski/Phi-3-mini-4k-instruct-Q4_K_M](https://huggingface.co/bartowski/Phi-3-mini-4k-instruct-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
 | [bartowski/Phi-3.5-mini-instruct-Q4_K_M](https://huggingface.co/bartowski/Phi-3.5-mini-instruct-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
@@ -132,9 +134,9 @@ Although, the validated models below were tested with `llama-cli` using the `Q4_
 | [bartowski/DeepSeek-R1-Distill-Llama-8B-Q4_K_M](https://huggingface.co/bartowski/DeepSeek-R1-Distill-Llama-8B-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
 | [bartowski/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M](https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
 |  |  |  |  |
-| [ibm-granite/granite-4.0-350m-Q4_K_M](https://huggingface.co/ibm-granite/granite-4.0-350m-GGUF) | ✓ / ✓ | ✗ / ✗ | ✓ |
+| [ibm-granite/granite-4.0-350m-Q4_K_M](https://huggingface.co/ibm-granite/granite-4.0-350m-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
 | [ibm-granite/granite-4.0-micro-Q4_K_M](https://huggingface.co/ibm-granite/granite-4.0-micro-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
-| [ibm-granite/granite-4.0-1b-Q4_K_M](https://huggingface.co/ibm-granite/granite-4.0-1b-GGUF) | ✓ / ✓ | ✗ / ✗ | ✗ |
+| [ibm-granite/granite-4.0-1b-Q4_K_M](https://huggingface.co/ibm-granite/granite-4.0-1b-GGUF) | ✓ / ✓ | ✓ / ✓ | ✗ |
 | [ibm-research/granite-3.2-8b-instruct-Q4_K_M](https://huggingface.co/ibm-research/granite-3.2-8b-instruct-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
 |  |  |  |  |
 | [HuggingFaceTB/smollm2-1.7b-instruct-q4_k_m](https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B-Instruct-GGUF) | ✓ / ✓ | ✓ / ✓ | ✓ |
