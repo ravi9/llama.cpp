@@ -293,14 +293,11 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
     // Q6_K/Q5_K are touched):
     //   q4_sym128      Q6_K/Q5_K -> Q4_0_128 (u4, group 128, symmetric)
     //   q4_sym128_all  and Q4_K too -- drops Q4_K's per-32 zero point, which costs some accuracy
-    //   q4_asym64_all  Q6_K/Q5_K and Q4_K -> Q4_1_64 (u4, group 64, asymmetric) -- most of the
-    //                  metadata saving while keeping a real zero point
+    //   q4_asym64      Q6_K/Q5_K -> Q4_1_64 (u4, group 64, asymmetric)
+    //   q4_asym64_all  Q6_K/Q5_K and Q4_K -> Q4_1_64 (u4, group 64, asymmetric)
     //   native         no requantization at all (keep Q6_K/Q5_K as they are)
     //
-    // The asymmetric target is only offered in its _all form: leaving Q4_K at its native group 32
-    // while Q6_K/Q5_K move to group 64 gives the Q/K/V projections different group counts, and the
-    // GPU plugin's FullyConnectedHorizontalFusion concatenates their scale constants, which then
-    // fails shape inference. Requantizing all three keeps the group size uniform.
+    // q4_asym64 leaves Q4_K at its native group 32. Use q4_asym64_all to keep the group size uniform.
     const char * rq = ggml_openvino_getenv_str("GGML_OPENVINO_REQUANT_KQUANT");
     auto is_opt = [rq](const char * name) {
         return rq && strcmp(rq, name) == 0;
@@ -308,6 +305,7 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
     const bool sym128 = is_opt("q4_sym128");
     const bool sym128_all = is_opt("q4_sym128_all");
     const bool asym64_all = is_opt("q4_asym64_all");
+    const bool asym64 = is_opt("q4_asym64");
 
     if (tensor->type == GGML_TYPE_Q4_K) {
         if (sym128_all) {
@@ -326,7 +324,7 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
         if (sym128 || sym128_all) {
             return ExtraQuantType::Q4_0_64;
         }
-        if (asym64_all) {
+        if (asym64 || asym64_all) {
             return ExtraQuantType::Q4_1_64;
         }
         // TODO: temporary workaround for a known OpenVINO GPU-plugin bug -- remove once the
@@ -351,7 +349,7 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
         if (sym128 || sym128_all) {
             return ExtraQuantType::Q4_0_128;
         }
-        if (asym64_all) {
+        if (asym64 || asym64_all) {
             return ExtraQuantType::Q4_1_64;
         }
         if (is_opt("native")) {
