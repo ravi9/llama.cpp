@@ -28,12 +28,7 @@
 #include <string>
 #include <vector>
 
-#ifndef _WIN32
-#    include <sys/mman.h>
-#    include <unistd.h>
-#endif
-
-#if defined(_WIN32)
+#ifdef _WIN32
 #    define WIN32_LEAN_AND_MEAN
 #    ifndef NOMINMAX
 #        define NOMINMAX
@@ -61,6 +56,7 @@
 // - CPU repack buffer: tensor->extra stores tensor_traits with repacked data
 // =====================================================
 
+namespace {
 // Buffer context that manages per-tensor allocations (no contiguous buffer for weights)
 struct ggml_backend_openvino_buffer_context {
     int device;
@@ -199,6 +195,7 @@ struct ggml_backend_openvino_buffer_type_context {
     int device;
     std::string name;
 };
+}  // namespace
 
 // =====================================================
 // Host weight-buffer release (GGML_OPENVINO_RELEASE_WEIGHTS)
