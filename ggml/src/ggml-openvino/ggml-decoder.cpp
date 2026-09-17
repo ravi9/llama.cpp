@@ -362,6 +362,14 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
             op_case = 2;
             break;
         }
+        case GGML_ROPE_TYPE_VISION: {
+            op_case = 3;
+            break;
+        }
+        case GGML_ROPE_TYPE_MROPE: {
+            op_case = 4;
+            break;
+        }
         default:
             op_case = 0;
             break;
@@ -441,6 +449,28 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         }
         case GGML_OP_POOL_AVG: {
             op_case = 2;
+            break;
+        }
+        default:
+            op_case = 0;
+            break;
+        }
+        break;
+    }
+    case GGML_OP_UPSCALE: {
+        const int32_t mode_flags = node->op_params[0];
+        const ggml_scale_mode scale_mode = static_cast<ggml_scale_mode>(mode_flags & 0xFF);
+        switch (scale_mode) {
+        case GGML_SCALE_MODE_NEAREST: {
+            op_case = 1;
+            break;
+        }
+        case GGML_SCALE_MODE_BILINEAR: {
+            op_case = 2;
+            break;
+        }
+        case GGML_SCALE_MODE_BICUBIC: {
+            op_case = 3;
             break;
         }
         default:
@@ -2150,6 +2180,11 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
         case GGML_OP_DIV:
         case GGML_OP_CLAMP:
         case GGML_OP_PAD:
+        case GGML_OP_UPSCALE:
+        case GGML_OP_SIN:
+        case GGML_OP_COS:
+        case GGML_OP_LOG:
+        case GGML_OP_ROLL:
             m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[0]];
             break;
         case GGML_OP_SUM_ROWS:
@@ -2164,6 +2199,8 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
             break;
         case GGML_OP_CPY:
         case GGML_OP_SET_ROWS:
+        case GGML_OP_SUM:
+        case GGML_OP_MEAN:
             m_node_dynamic_dims[node] = -1;
             break;
         case GGML_OP_IM2COL: {

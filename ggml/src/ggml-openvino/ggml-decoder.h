@@ -362,10 +362,11 @@ public:
         return op->op == GGML_OP_ROPE && tensor == op->src[1];
     }
 
-    // IMROPE packs 4 stacked position planes (t/h/w/e) into inp_pos, each of length
+    // IMROPE and VISION pack 4 stacked position planes (t/h/w/e) into inp_pos, each of length
     // n_tokens; other modes carry a single position per token.
     static int get_inp_pos_n_planes(const ggml_tensor * op) {
-        return op->op_params[2] == GGML_ROPE_TYPE_IMROPE ? 4 : 1;
+        const int mode = op->op_params[2];
+        return (mode == GGML_ROPE_TYPE_IMROPE || mode == GGML_ROPE_TYPE_VISION || (mode & GGML_ROPE_TYPE_MROPE)) ? 4 : 1;
     }
 
     static bool is_inp_emb(const ggml_tensor * tensor, const ggml_tensor * op) {
