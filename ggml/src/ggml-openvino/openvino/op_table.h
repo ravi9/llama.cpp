@@ -56,6 +56,17 @@ GGML_OP_CONVERTER(translate_tri);
 GGML_OP_CONVERTER(translate_solve_tri);
 GGML_OP_CONVERTER(translate_pool_2d);
 GGML_OP_CONVERTER(translate_roll);
+GGML_OP_CONVERTER(translate_upscale);
+GGML_OP_CONVERTER(translate_mean);
+GGML_OP_CONVERTER(translate_sum);
+GGML_OP_CONVERTER(translate_unary_gelu);
+GGML_OP_CONVERTER(translate_unary_gelu_erf);
+GGML_OP_CONVERTER(translate_unary_gelu_quick);
+GGML_OP_CONVERTER(translate_unary_elu);
+GGML_OP_CONVERTER(translate_unary_hardsigmoid);
+GGML_OP_CONVERTER(translate_unary_step);
+GGML_OP_CONVERTER(translate_unary_round);
+GGML_OP_CONVERTER(translate_unary_expm1);
 
 }  // namespace op
 
