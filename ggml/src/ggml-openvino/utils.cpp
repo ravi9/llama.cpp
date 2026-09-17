@@ -485,13 +485,18 @@ ov::Tensor convert_ggml_input_to_ov(const std::shared_ptr<GgmlOvDecoder> & ggml_
     if (auto sliced = try_make_kv_sliced_tensor(ggml_decoder, name, ggml_tensor)) {
         return *sliced;
     }
+    const auto expected_shape = GgmlOvDecoder::get_shape(ggml_tensor);
 
     if (ggml_tensor->extra != nullptr && !ggml_decoder->is_splited_model()) {
         auto * extra_base = static_cast<ggml_openvino_extra_base *>(ggml_tensor->extra);
         if (extra_base->type == ggml_openvino_extra_base::Type::TENSOR) {
             // GGML_LOG_DEBUG("Using ggml_tensor->extra as ov::Tensor for input: %s\n", name.c_str());
             auto * tensor_extra = static_cast<ggml_openvino_tensor_extra *>(extra_base);
-            return *tensor_extra->tensor;
+            if (tensor_extra->tensor &&
+                tensor_extra->tensor->get_shape() == expected_shape &&
+                tensor_extra->tensor->data() == ggml_tensor->data) {
+                return *tensor_extra->tensor;
+            }
         }
     }
 
@@ -502,10 +507,10 @@ ov::Tensor convert_ggml_input_to_ov(const std::shared_ptr<GgmlOvDecoder> & ggml_
         // This case is added to make test-backend-ops work
         input_shape = GgmlOvDecoder::get_shape(ggml_tensor->view_src);
     } else {
-        input_shape = GgmlOvDecoder::get_shape(ggml_tensor);
+        input_shape = expected_shape;
     }
 
-    if (ggml_decoder->is_splited_model() && !ggml_is_contiguous(ggml_tensor)) {
+    if (!ggml_is_contiguous(ggml_tensor)) {
         return make_contiguous_split_input_tensor(ggml_tensor, input_shape);
     }
 
