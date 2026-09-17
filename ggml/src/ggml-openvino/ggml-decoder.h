@@ -28,7 +28,7 @@ struct ModelParams {
     std::map<int, int> n_heads_kv_per_layer;
     int head_size = -1;
     int state_size = -1;  // for SSM molels, eg qwen35
-    int32_t rope_params[16];
+    int32_t rope_params[16] = {};
     int n_rs_slots = -1;
     bool has_rs_rollback = false;
     bool mixed_rope_params = false;

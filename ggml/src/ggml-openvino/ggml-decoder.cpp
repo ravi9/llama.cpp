@@ -282,6 +282,29 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
     case GGML_OP_RESHAPE: {
         auto name = std::string(node->name);
         auto * src = node->src[0];
+        // Identify recurrent sequence reshapes before size checks, which are ambiguous for one token.
+        bool recurrent_sequence = false;
+        for (int i = 0; i < m_cgraph->n_nodes && !recurrent_sequence; ++i) {
+            const auto * consumer = m_cgraph->nodes[i];
+            if (consumer->op == GGML_OP_MUL_MAT_ID && consumer->src[1] == node) {
+                return 1;
+            } else if (consumer->op == GGML_OP_SSM_CONV) {
+                const auto * concat = consumer->src[0];
+                if (concat->op == GGML_OP_CONCAT) {
+                    const auto * transposed = concat->src[1];
+                    recurrent_sequence = transposed->op == GGML_OP_TRANSPOSE && transposed->src[0] == node;
+                }
+            } else if (consumer->op == GGML_OP_UNARY && ggml_get_unary_op(consumer) == GGML_UNARY_OP_SOFTPLUS) {
+                const auto * biased = consumer->src[0];
+                recurrent_sequence = biased->op == GGML_OP_ADD && biased->src[0] == node;
+            }
+        }
+        if (recurrent_sequence && node->ne[0] == src->ne[0] && node->ne[3] == 1) {
+            return 6;
+        }
+        if (node->ne[0] == src->ne[0] && node->ne[2] == 1 && node->ne[3] == 1) {
+            return 5;
+        }
         if (src->op == GGML_OP_RESHAPE && src->src[0]->ne[0] == node->ne[0] && src->src[0]->ne[1] == node->ne[1]) {
             op_case = 4;
         } else if (node->ne[0] * node->ne[1] == src->ne[0]) {
