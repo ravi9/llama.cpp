@@ -2,8 +2,8 @@
 #include "ggml-impl.h"
 #include "ggml-openvino-extra.h"
 
-#include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -22,11 +22,13 @@
 // graphs that can share a node count and end names, and need the full key.
 struct graph_key {
     int n_nodes;
+    int n_leaves;
     std::string first_node_name;
     std::string last_node_name;
-    std::vector<std::string> input_src_names;
+    // Each entry: "<node_idx>:<src_idx>:<op_type>"
+    std::vector<std::string> input_srcs;
 
-    graph_key(const ggml_cgraph * cgraph, bool include_inputs = false) : n_nodes(cgraph->n_nodes) {
+    graph_key(const ggml_cgraph * cgraph, bool include_inputs = false) : n_nodes(cgraph->n_nodes), n_leaves(cgraph->n_leafs) {
         if (n_nodes > 0) {
             first_node_name = cgraph->nodes[0]->name;
             last_node_name = cgraph->nodes[n_nodes - 1]->name;
@@ -37,60 +39,43 @@ struct graph_key {
             return;
         }
 
-        std::unordered_map<const ggml_tensor *, std::string> names;
-        auto get_input_key_name = [&names](const ggml_cgraph * graph, const ggml_tensor * tensor) {
-            auto it = names.find(tensor);
-            if (it == names.end()) {
-                it = names.emplace(tensor, GgmlOvDecoder::get_tensor_name(graph, tensor)).first;
-            }
-            return it->second;
-        };
-
-        // A set, not a vector: the lookup below runs once per node per src slot, so a linear scan
-        // makes this key O(n_nodes^2). The key is rebuilt on every graph_compute call, which on a
-        // 41-layer model costs several ms per token.
-        std::unordered_set<std::string> node_names;
-        node_names.reserve(cgraph->n_nodes);
-        for (int node_idx = 0; node_idx < cgraph->n_nodes; node_idx++) {
-            node_names.emplace(cgraph->nodes[node_idx]->name);
+        std::unordered_set<const ggml_tensor *> node_set;
+        node_set.reserve(cgraph->n_nodes);
+        for (int i = 0; i < cgraph->n_nodes; i++) {
+            node_set.insert(cgraph->nodes[i]);
         }
 
         for (int node_idx = 0; node_idx < cgraph->n_nodes; node_idx++) {
             const ggml_tensor * node = cgraph->nodes[node_idx];
             for (int src_idx = 0; src_idx < GGML_MAX_SRC; src_idx++) {
                 const ggml_tensor * src = node->src[src_idx];
-                if (src == nullptr || src->name[0] == '\0') {
+                if (src == nullptr || src->buffer == nullptr || node_set.count(src) || src->buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS) {
                     continue;
                 }
 
-                const std::string src_name = get_input_key_name(cgraph, src);
-                if (node_names.count(src_name) != 0) {
-                    continue;
-                }
-                if (src_name.find("weight") != std::string::npos) {
-                    continue;
-                }
-
-                input_src_names.push_back(std::to_string(node_idx) + ":" + std::to_string(src_idx) + ":" + src_name);
+                input_srcs.push_back(std::to_string(node_idx) + ":" + std::to_string(src_idx) + ":" +
+                    GgmlOvDecoder::compute_op_type(node));
             }
         }
     }
 
     bool operator==(const graph_key & other) const {
-        return n_nodes == other.n_nodes && first_node_name == other.first_node_name &&
-               last_node_name == other.last_node_name && input_src_names == other.input_src_names;
+        return n_nodes == other.n_nodes && n_leaves == other.n_leaves &&
+               first_node_name == other.first_node_name &&
+               last_node_name == other.last_node_name && input_srcs == other.input_srcs;
     }
 };
 
 struct graph_key_hash {
     size_t operator()(const graph_key & key) const {
         size_t hash = std::hash<int>{}(key.n_nodes);
+        hash ^= std::hash<int>{}(key.n_leaves) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
         if (key.n_nodes > 0) {
             hash ^= std::hash<std::string>{}(key.first_node_name) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
             hash ^= std::hash<std::string>{}(key.last_node_name) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
         }
-        for (const auto & input_src_name : key.input_src_names) {
-            hash ^= std::hash<std::string>{}(input_src_name) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        for (const auto & s : key.input_srcs) {
+            hash ^= std::hash<std::string>{}(s) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
         }
         return hash;
     }
