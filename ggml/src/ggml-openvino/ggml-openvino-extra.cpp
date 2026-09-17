@@ -76,6 +76,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_SELF_CONTAINED_BLOB",
         "GGML_OPENVINO_SELF_CONTAINED_MMAP",
         "GGML_OPENVINO_SELF_CONTAINED_LAZY_IMPORT",
+        "GGML_OPENVINO_SELF_CONTAINED_RELEASE_MMAP_PAGES",
     };
 
     for (const char * const & env_var : env_var_names) {
