@@ -486,9 +486,10 @@ std::shared_ptr<Model> TranslateSession::apply_transformations(std::shared_ptr<M
         manager.register_pass<pass::FuseToConv>();
         manager.register_pass<pass::FuseArgsortTopK>();
 
-        // MOECompressed has no CPU plugin implementation, so keep the GatherMatmul path
-        // everywhere else. Opt-in while the fused path is being brought up.
-        if (ggml_openvino_get_device_name() == "GPU" && getenv("GGML_OPENVINO_MOE_OP")) {
+        // MOECompressed has no CPU plugin implementation, so enable it by default only on GPU.
+        // GGML_OPENVINO_MOE_OP=0 keeps the unfused GatherMatmul path for fallback/debugging.
+        if (ggml_openvino_get_device_name() == "GPU" &&
+            ggml_openvino_getenv_int("GGML_OPENVINO_MOE_OP", 1) != 0) {
             manager.register_pass<pass::FuseMoeRouter>();
             manager.register_pass<pass::FuseMoeCompressed>();
         }
