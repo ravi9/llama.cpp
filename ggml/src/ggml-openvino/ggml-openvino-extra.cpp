@@ -346,6 +346,8 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
     switch (tensor->type) {
     case GGML_TYPE_Q6_K:
     case GGML_TYPE_Q5_K:
+    case GGML_TYPE_Q5_1:
+    case GGML_TYPE_Q8_0:
         if (sym128 || sym128_all) {
             return ExtraQuantType::Q4_0_128;
         }
