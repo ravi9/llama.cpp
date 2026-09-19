@@ -78,6 +78,11 @@ std::unordered_map<std::string, CreatorFunction> get_supported_ops() {
         {"GGML_OP_SET",             op::translate_set                              },
         {"GGML_OP_POOL_2D",         op::translate_pool_2d                          },
         {"GGML_OP_ROLL",            op::translate_roll                             },
+        {"GGML_OP_CONV_2D",         op::translate_conv_2d                          },
+        {"GGML_OP_CONV_2D_DW",      op::translate_conv_2d_dw                       },
+        {"GGML_OP_CONV_TRANSPOSE_1D", op::translate_conv_transpose_1d             },
+        {"GGML_OP_CONV_TRANSPOSE_2D", op::translate_conv_transpose_2d             },
+        {"GGML_OP_CONV_3D",         op::translate_conv_3d                          },
         // solve_tri has accuracy issues on GPU
         // {"GGML_OP_SOLVE_TRI",       op::translate_solve_tri                        },
     };
