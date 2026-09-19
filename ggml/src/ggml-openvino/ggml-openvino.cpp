@@ -1440,6 +1440,63 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         }
         break;
     }
+    case GGML_OP_CONV_2D:
+    case GGML_OP_CONV_2D_DW: {
+        if (op->src[0]->op == GGML_OP_PERMUTE || op->src[1]->op == GGML_OP_PERMUTE) {
+            return {false, "CONV_2D with PERMUTE input is not supported"};
+        }
+        if (has_non_contiguous_view_input(op)) {
+            return {false, "CONV_2D with non-contiguous view input is not supported"};
+        }
+        const int32_t * params = op->op_params;
+        const int p0 = params[2];
+        const int p1 = params[3];
+        const int d0 = params[4];
+        const int d1 = params[5];
+        const int64_t dilated_kw = (int64_t) d0 * (op->src[0]->ne[0] - 1) + 1;
+        const int64_t dilated_kh = (int64_t) d1 * (op->src[0]->ne[1] - 1) + 1;
+        const int64_t padded_w   = op->src[1]->ne[0] + 2 * p0;
+        const int64_t padded_h   = op->src[1]->ne[1] + 2 * p1;
+        if (padded_w < dilated_kw || padded_h < dilated_kh) {
+            return {false, "CONV_2D padded input is smaller than kernel"};
+        }
+        break;
+    }
+    case GGML_OP_CONV_3D: {
+        if (op->src[0]->op == GGML_OP_PERMUTE || op->src[1]->op == GGML_OP_PERMUTE) {
+            return {false, "CONV_3D with PERMUTE input is not supported"};
+        }
+        if (has_non_contiguous_view_input(op)) {
+            return {false, "CONV_3D with non-contiguous view input is not supported"};
+        }
+        const int32_t * params = op->op_params;
+        const int p0 = params[3];
+        const int p1 = params[4];
+        const int p2 = params[5];
+        const int d0 = params[6];
+        const int d1 = params[7];
+        const int d2 = params[8];
+        const int64_t dilated_kw = (int64_t) d0 * (op->src[0]->ne[0] - 1) + 1;
+        const int64_t dilated_kh = (int64_t) d1 * (op->src[0]->ne[1] - 1) + 1;
+        const int64_t dilated_kd = (int64_t) d2 * (op->src[0]->ne[2] - 1) + 1;
+        const int64_t padded_w   = op->src[1]->ne[0] + 2 * p0;
+        const int64_t padded_h   = op->src[1]->ne[1] + 2 * p1;
+        const int64_t padded_d   = op->src[1]->ne[2] + 2 * p2;
+        if (padded_w < dilated_kw || padded_h < dilated_kh || padded_d < dilated_kd) {
+            return {false, "CONV_3D padded input is smaller than kernel"};
+        }
+        break;
+    }
+    case GGML_OP_CONV_TRANSPOSE_1D:
+    case GGML_OP_CONV_TRANSPOSE_2D: {
+        if (op->src[0]->op == GGML_OP_PERMUTE || op->src[1]->op == GGML_OP_PERMUTE) {
+            return {false, "CONV_TRANSPOSE with PERMUTE input is not supported"};
+        }
+        if (has_non_contiguous_view_input(op)) {
+            return {false, "CONV_TRANSPOSE with non-contiguous view input is not supported"};
+        }
+        break;
+    }
     default:
         break;
     }

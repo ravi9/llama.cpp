@@ -56,6 +56,11 @@ GGML_OP_CONVERTER(translate_tri);
 GGML_OP_CONVERTER(translate_solve_tri);
 GGML_OP_CONVERTER(translate_pool_2d);
 GGML_OP_CONVERTER(translate_roll);
+GGML_OP_CONVERTER(translate_conv_2d);
+GGML_OP_CONVERTER(translate_conv_2d_dw);
+GGML_OP_CONVERTER(translate_conv_transpose_1d);
+GGML_OP_CONVERTER(translate_conv_transpose_2d);
+GGML_OP_CONVERTER(translate_conv_3d);
 
 }  // namespace op
 
