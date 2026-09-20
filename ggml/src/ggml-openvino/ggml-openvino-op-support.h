@@ -58,6 +58,7 @@ bool ggml_openvino_device_supports_op_impl(ggml_backend_dev_t dev, const ggml_te
 |GGML_OP_FLASH_ATTN_EXT | sink path unsupported (src[4]==null required); strict q/k/v pattern; max_bias must be 0; logit_softcap must be 0; gemma3n direct pattern forced to CPU|
 |GGML_OP_CLAMP          | none beyond global gates|
 |GGML_OP_PAD            | none beyond global gates|
+|GGML_OP_POOL_2D        | GPU with padding and kernel size < 3 is unsupported|
 |GGML_OP_SSM_CONV       | currently no hard block in policy (comment notes potential numerical instability)|
 |GGML_OP_GATED_DELTA_NET| src2 PERMUTE unsupported; src3->ne[0] must be 1; K(op_params[0]) must be <= 1|
 |GGML_OP_REPEAT         | selected GPU BF16 path is unsupported|

@@ -10,7 +10,7 @@
 #include <openvino/core/type/float16.hpp>
 #include <openvino/core/type/float8_e8m0.hpp>
 
-void unpack_32_4(const uint8_t * data, uint8_t * dst) {
+static void unpack_32_4(const uint8_t * data, uint8_t * dst) {
     std::fill_n(dst, 16, 0);
     for (int j = 0; j < 16; ++j) {
         uint8_t x = (data[j] & 0x0F);
@@ -212,7 +212,7 @@ void extract_q8_0_data(const ggml_tensor * tensor,
     }
 }
 
-void unpack_256_4(const uint8_t * data, uint8_t * dst) {
+static void unpack_256_4(const uint8_t * data, uint8_t * dst) {
     std::fill_n(dst, 128, 0);
 
     for (size_t i = 0; i < 4; ++i) {

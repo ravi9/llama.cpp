@@ -12,8 +12,6 @@ namespace ov {
 namespace frontend {
 namespace ggml {
 
-std::string getCurrentTime();
-
 void num_inputs_check(const NodeContext & context, size_t min_inputs, size_t max_inputs);
 
 int non_cont_dim(std::vector<size_t> ne, std::vector<size_t> nb);

@@ -41,6 +41,40 @@ ov::Output<ov::Node> make_mxfp4_weights(ov::Tensor & weight, ov::Tensor & scales
 
 ov::Output<ov::Node> make_mxfp4_moe_packed_weights(ov::Tensor & weight);
 
+void extract_mxfp4_data(const ggml_tensor * tensor, ov::Tensor & weights_arr, ov::Tensor & scales_arr);
+void extract_q4_0_data(const ggml_tensor * tensor,
+                       ov::Tensor & weights_arr,
+                       ov::Tensor & scales_arr,
+                       ov::Tensor & zp_arr);
+void extract_q4_1_data(const ggml_tensor * tensor,
+                       ov::Tensor & weights_arr,
+                       ov::Tensor & scales_arr,
+                       ov::Tensor & zp_arr,
+                       bool use_bias = false);
+void extract_q5_1_data(const ggml_tensor * tensor,
+                       ov::Tensor & weights_arr,
+                       ov::Tensor & scales_arr,
+                       ov::Tensor & zp_arr,
+                       bool use_bias = false);
+void extract_q8_0_data(const ggml_tensor * tensor,
+                       ov::Tensor & weights_arr,
+                       ov::Tensor & scales_arr,
+                       ov::Tensor & zp_arr);
+void extract_q4_k_data(const ggml_tensor * tensor,
+                       ov::Tensor & weights_arr,
+                       ov::Tensor & scales_arr,
+                       ov::Tensor & zp_arr,
+                       bool use_bias = false);
+void extract_q6_k_data(const ggml_tensor * tensor,
+                       ov::Tensor & weights_arr,
+                       ov::Tensor & scales_arr,
+                       ov::Tensor & zp_arr);
+void extract_q5_k_data(const ggml_tensor * tensor,
+                       ov::Tensor & weights_arr,
+                       ov::Tensor & scales_arr,
+                       ov::Tensor & zp_arr,
+                       bool use_bias = false);
+
 // Extract quantized weights from tensor and create weight subgraph
 // If weights/scales/zp are provided (non-empty), uses them as output buffers
 // Otherwise allocates new ov::Tensors internally

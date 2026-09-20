@@ -12,6 +12,12 @@
 #include <openvino/op/util/attr_types.hpp>
 #include <openvino/runtime/tensor.hpp>
 
+namespace ov::op::util {
+bool get_single_value(const std::shared_ptr<ov::op::v0::Constant> & const_node,
+                      float & value,
+                      bool check_value_range = true);
+}  // namespace ov::op::util
+
 namespace {
 
 enum class ZeroPointMode { None, Integer, ExactBiasAsF16ZeroPoint };
