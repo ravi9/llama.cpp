@@ -8,7 +8,7 @@
 #include "ggml-openvino-weight-buffer-release.h"
 #include "ggml-openvino/quant/quantization.h"
 #include "ggml.h"
-#include "openvino/op_support.h"
+#include "openvino/op_table.h"
 #include "utils.h"
 
 #include <memory>

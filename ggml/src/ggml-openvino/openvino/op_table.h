@@ -1,13 +1,29 @@
 #pragma once
 
+#include "ggml-backend.h"
+#include "ggml.h"
 #include "node_context.h"
-#include "op_support.h"
 
+#include <string>
+#include <unordered_map>
 #include <utility>
+
+// Why the gate turned a node away. Default-constructed means supported.
+struct ggml_openvino_op_support {
+    bool is_supported = true;
+    std::string reason;
+
+    operator bool() const { return is_supported; }
+};
 
 namespace ov {
 namespace frontend {
 namespace ggml {
+
+// A rule is a pure function of one node. It must give the same answer every time it is
+// asked: the scheduler consults the gate again on every graph rebuild, and a rule that
+// changed its mind would move a node between backends mid-run.
+using SupportsFunction = ggml_openvino_op_support (*)(const ggml_tensor * op);
 
 namespace op {
 
@@ -77,7 +93,8 @@ struct OpEntry {
         supports(supports) {}
 };
 
-std::unordered_map<std::string, OpEntry> get_supported_ops();
+const std::unordered_map<std::string, OpEntry> & get_supported_ops();
+bool device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op);
 
 }  // namespace ggml
 }  // namespace frontend
