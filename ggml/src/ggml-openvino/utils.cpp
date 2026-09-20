@@ -1,10 +1,10 @@
 #include "utils.h"
 
+#include "ggml-decoder.h"
 #include "ggml-impl.h"
-#include "ggml-openvino.h"
+#include "ggml-openvino-extra.h"
 #include "ggml-openvino-weight-buffer-release.h"
-#include "ggml-openvino/ggml-decoder.h"
-#include "ggml-openvino/ggml-openvino-extra.h"
+#include "ggml-openvino.h"
 #include "ggml.h"
 #include "model-cache.h"
 #include "openvino/frontend.h"

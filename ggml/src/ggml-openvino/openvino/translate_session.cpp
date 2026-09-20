@@ -1,10 +1,9 @@
 #include "translate_session.h"
 
+#include "../ggml-openvino-extra.h"
 #include "ggml-impl.h"
-#include "ggml-openvino/ggml-openvino-extra.h"
-#include "ggml-openvino/openvino/node_context.h"
-#include "ggml-openvino/openvino/utils.h"
 #include "input_model.h"
+#include "node_context.h"
 #include "pass/fuse_moe_compressed.h"
 #include "pass/fuse_to_conv.h"
 #include "pass/kv_state_seq_axis.h"
@@ -12,6 +11,7 @@
 #include "pass/mark_dequantization_subgraph.h"
 #include "pass/squeeze_matmul.h"
 #include "rt_info/weightless_caching_attributes.hpp"
+#include "utils.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -471,7 +471,7 @@ std::shared_ptr<Model> TranslateSession::apply_transformations(std::shared_ptr<M
 
         // MOECompressed has no CPU plugin implementation, so keep the GatherMatmul path
         // everywhere else. Opt-in while the fused path is being brought up.
-        if (ggml_openvino_get_device_name() == "GPU" && getenv("GGML_OPENVINO_MOE_OP")) {
+        if (ggml_openvino_get_device_name() == "GPU") {
             manager.register_pass<pass::FuseMoeCompressed>();
         }
 

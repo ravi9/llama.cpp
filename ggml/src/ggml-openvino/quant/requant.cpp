@@ -2,7 +2,6 @@
 
 #include "../ggml-openvino-extra.h"
 #include "ggml-common.h"
-#include "ggml-impl.h"
 #include "ggml.h"
 
 #include <algorithm>
@@ -68,8 +67,8 @@ void quantize_q4_0(const float * x,
             for (int j = 0; j < qk / 2; ++j) {
                 const float x0 = x[i * qk + 2 * j] * id;
                 const float x1 = x[i * qk + 2 * j + 1] * id;
-                const uint8_t xi0 = MIN(15, (int8_t) (x0 + 8.5f));
-                const uint8_t xi1 = MIN(15, (int8_t) (x1 + 8.5f));
+                const uint8_t xi0 = static_cast<uint8_t>(std::min(15, (int) (x0 + 8.5f)));
+                const uint8_t xi1 = static_cast<uint8_t>(std::min(15, (int) (x1 + 8.5f)));
                 weights[i * qk / 2 + j] = xi0 | (xi1 << 4);
             }
         }

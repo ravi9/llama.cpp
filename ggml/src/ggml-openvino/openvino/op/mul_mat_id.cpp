@@ -1,8 +1,8 @@
+#include "../../ggml-openvino-extra.h"
 #include "../node_context.h"
 #include "../op_table.h"
 #include "../utils.h"
 #include "gather_matmul.hpp"
-#include "ggml-openvino/ggml-openvino-extra.h"
 
 #include <cstdint>
 #include <cstring>

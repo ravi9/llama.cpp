@@ -21,9 +21,9 @@ struct ggml_openvino_extracted_layout {
     size_t scales_size = 0;     // Size of scales in bytes
     size_t zp_offset = 0;       // Offset to zero points in buffer
     size_t zp_size = 0;         // Size of zero points in bytes (U4 or U8)
-    bool is_u4;                 // true for U4 weights, false for U8
-    int64_t weights_per_block;  // weights per scale/zp block
-    bool is_symmetric;          // true for symmetric quantization
+    bool is_u4 = false;         // true for U4 weights, false for U8
+    int64_t weights_per_block = 0;  // weights per scale/zp block
+    bool is_symmetric = false;  // true for symmetric quantization
 
     // Requantization info
     bool is_requant = false;                     // true if this tensor needs requantization

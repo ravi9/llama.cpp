@@ -3,6 +3,7 @@
 #include "node_context.h"
 
 #include <memory>
+#include <numeric>
 #include <openvino/core/node.hpp>
 #include <openvino/op/shape_of.hpp>
 #include <openvino/op/slice.hpp>
@@ -54,7 +55,7 @@ OutputVector rename_outputs_with_suffix(const OutputVector & outputs, const std:
 
 std::pair<ov::Output<Node>, ov::Output<Node>> make_sin_cos(int32_t * rope_params,
                                                            std::shared_ptr<ov::Node> inp_pos,
-                                                           std::shared_ptr<ov::Node> rope_freqs_weight = nullptr,
+                                                           const std::shared_ptr<ov::Node> & rope_freqs_weight = nullptr,
                                                            bool imrope = false,
                                                            bool stateful = false);
 

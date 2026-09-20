@@ -3,9 +3,9 @@
 #include "ggml-impl.h"
 #include "ggml-openvino-extra.h"
 #include "ggml-openvino.h"
-#include "quant/weights.h"
+#include "ggml-openvino/ggml-openvino-buffer.h"
 #include "ggml.h"
-#include "utils.h"
+#include "quant/weights.h"
 
 #include <algorithm>
 #include <cassert>

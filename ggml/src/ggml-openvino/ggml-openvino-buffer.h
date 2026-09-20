@@ -2,7 +2,6 @@
 
 #include "ggml-backend.h"
 #include "ggml-openvino-extra.h"
-#include "ggml-openvino.h"
 
 #include <cstddef>
 

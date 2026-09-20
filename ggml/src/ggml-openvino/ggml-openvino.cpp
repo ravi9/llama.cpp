@@ -6,6 +6,7 @@
 #include "ggml-openvino-buffer.h"
 #include "ggml-openvino-extra.h"
 #include "ggml-openvino-weight-buffer-release.h"
+#include "ggml-openvino/quant/quantization.h"
 #include "openvino/op_support.h"
 #include "utils.h"
 #include "ggml.h"
@@ -214,20 +215,20 @@ static enum ggml_status ggml_backend_openvino_graph_compute(ggml_backend_t backe
 static const ggml_backend_i ggml_backend_openvino_interface = {
     /* .get_name                = */ ggml_backend_openvino_get_name,
     /* .free                    = */ ggml_backend_openvino_free,
-    /* .set_tensor_async        = */ NULL,
-    /* .get_tensor_async        = */ NULL,
-    /* .set_tensor_2d_async     = */ NULL,
-    /* .get_tensor_2d_async     = */ NULL,
-    /* .cpy_tensor_async        = */ NULL,
-    /* .synchronize             = */ NULL,
-    /* .graph_plan_create       = */ NULL,
-    /* .graph_plan_free         = */ NULL,
-    /* .graph_plan_update       = */ NULL,
-    /* .graph_plan_compute      = */ NULL,
+    /* .set_tensor_async        = */ nullptr,
+    /* .get_tensor_async        = */ nullptr,
+    /* .set_tensor_2d_async     = */ nullptr,
+    /* .get_tensor_2d_async     = */ nullptr,
+    /* .cpy_tensor_async        = */ nullptr,
+    /* .synchronize             = */ nullptr,
+    /* .graph_plan_create       = */ nullptr,
+    /* .graph_plan_free         = */ nullptr,
+    /* .graph_plan_update       = */ nullptr,
+    /* .graph_plan_compute      = */ nullptr,
     /* .graph_compute           = */ ggml_backend_openvino_graph_compute,
-    /* .event_record            = */ NULL,
-    /* .event_wait              = */ NULL,
-    /* .graph_optimize          = */ NULL,
+    /* .event_record            = */ nullptr,
+    /* .event_wait              = */ nullptr,
+    /* .graph_optimize          = */ nullptr,
 };
 
 int ggml_backend_openvino_get_device_count() {
@@ -284,7 +285,7 @@ GGML_BACKEND_API ggml_backend_t ggml_backend_openvino_init(int device) {
 }
 
 GGML_BACKEND_API bool ggml_backend_is_openvino(ggml_backend_t backend) {
-    return backend != NULL && ggml_guid_matches(backend->guid, ggml_backend_openvino_guid());
+    return backend != nullptr && ggml_guid_matches(backend->guid, ggml_backend_openvino_guid());
 }
 
 static const char * ggml_backend_openvino_device_get_name(ggml_backend_dev_t dev) {
@@ -370,16 +371,14 @@ static const struct ggml_backend_device_i ggml_backend_openvino_device_interface
     /* .init_backend         = */ ggml_backend_openvino_device_init,
     /* .get_buffer_type      = */ ggml_backend_openvino_device_get_buffer_type,
     /* .get_host_buffer_type = */ ggml_backend_openvino_device_get_host_buffer_type,
-    /* .buffer_from_host_ptr = */ NULL,
+    /* .buffer_from_host_ptr = */ nullptr,
     /* .supports_op          = */ ggml_backend_openvino_device_supports_op,
     /* .supports_buft        = */ ggml_backend_openvino_device_supports_buft,
-    /* .offload_op           = */ NULL,
-    /* .event_new            = */ NULL,
-    /* .event_free           = */ NULL,
-    /* .event_synchronize    = */ NULL,
+    /* .offload_op           = */ nullptr,
+    /* .event_new            = */ nullptr,
+    /* .event_free           = */ nullptr,
+    /* .event_synchronize    = */ nullptr,
 };
-
-
 
 static const char * ggml_backend_openvino_reg_get_name(ggml_backend_reg_t reg) {
     GGML_UNUSED(reg);
@@ -401,7 +400,7 @@ static const struct ggml_backend_reg_i ggml_backend_openvino_reg_interface = {
     /* .get_name         = */ ggml_backend_openvino_reg_get_name,
     /* .get_device_count = */ ggml_backend_openvino_reg_get_device_count,
     /* .get_device       = */ ggml_backend_openvino_reg_get_device,
-    /* .get_proc_address = */ NULL,
+    /* .get_proc_address = */ nullptr,
 };
 
 static void ggml_openvino_init() {

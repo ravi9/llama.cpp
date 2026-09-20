@@ -7,9 +7,9 @@
 #include <utility>
 #include <vector>
 
-#if !defined(_WIN32)
-#    include <sys/mman.h>
-#    include <unistd.h>
+#ifndef _WIN32
+#include <sys/mman.h>
+#include <unistd.h>
 #endif
 
 // The OpenVINO weight Constants are zero-copy views into the host buffers
@@ -62,16 +62,18 @@ void ggml_openvino_release_weight_buffers() {
         return;
     }
     size_t total = 0;
-#if !defined(_WIN32)
+#ifndef _WIN32
     for (const auto & buffer : reg.buffers) {
-        const long page = sysconf(_SC_PAGESIZE);
-        uintptr_t start = reinterpret_cast<uintptr_t>(buffer.first);
-        uintptr_t end = start + buffer.second;
-        uintptr_t aligned_start = (start + page - 1) & ~(uintptr_t) (page - 1);
-        uintptr_t aligned_end = end & ~(uintptr_t) (page - 1);
-        if (aligned_end > aligned_start) {
-            if (madvise(reinterpret_cast<void *>(aligned_start), aligned_end - aligned_start, MADV_DONTNEED) == 0) {
-                total += aligned_end - aligned_start;
+        const size_t page = (size_t) sysconf(_SC_PAGESIZE);
+        const uintptr_t ustart = reinterpret_cast<uintptr_t>(buffer.first);
+        const size_t offset_to_page = (page - (ustart & (page - 1))) & (page - 1);
+        if (buffer.second > offset_to_page) {
+            const size_t aligned_len = (buffer.second - offset_to_page) & ~(page - 1);
+            if (aligned_len > 0) {
+                char * astart = static_cast<char *>(buffer.first) + offset_to_page;
+                if (madvise(astart, aligned_len, MADV_DONTNEED) == 0) {
+                    total += aligned_len;
+                }
             }
         }
     }

@@ -1,8 +1,6 @@
 #include "quantization.h"
 
 #include "../ggml-openvino-extra.h"
-
-#include "ggml-impl.h"
 #include "ggml.h"
 
 #include <algorithm>
@@ -11,7 +9,7 @@
 
 namespace {
 
-static constexpr size_t QUANT_LAYOUT_ALIGNMENT = 64;
+constexpr size_t QUANT_LAYOUT_ALIGNMENT = 64;
 
 struct QuantStoragePlan {
     size_t total_size = 0;
@@ -80,9 +78,6 @@ bool get_source_quant_format_spec(ggml_type type, QuantFormatSpec & spec) {
     spec = {};
     switch (type) {
     case GGML_TYPE_MXFP4:
-        spec.is_u4 = true;
-        spec.is_symmetric = true;
-        return true;
     case GGML_TYPE_Q4_0:
         spec.is_u4 = true;
         spec.is_symmetric = true;
