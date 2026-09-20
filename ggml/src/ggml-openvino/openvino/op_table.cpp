@@ -37,38 +37,10 @@
 #include <openvino/op/swish.hpp>
 #include <openvino/op/tanh.hpp>
 #include <string>
-#include <tuple>
-#include <unordered_set>
 
 namespace ov {
 namespace frontend {
 namespace ggml {
-
-// Forward declarations of support rules referenced in get_supported_ops()
-static ggml_openvino_op_support supports_add_id(const ggml_tensor * op);
-static ggml_openvino_op_support supports_add_mul_sub(const ggml_tensor * op);
-static ggml_openvino_op_support supports_argsort(const ggml_tensor * op);
-static ggml_openvino_op_support supports_concat(const ggml_tensor * op);
-static ggml_openvino_op_support supports_cpy(const ggml_tensor * op);
-static ggml_openvino_op_support supports_div(const ggml_tensor * op);
-static ggml_openvino_op_support supports_flash_attn_ext(const ggml_tensor * op);
-static ggml_openvino_op_support supports_gated_delta_net(const ggml_tensor * op);
-static ggml_openvino_op_support supports_get_rows_set_rows(const ggml_tensor * op);
-static ggml_openvino_op_support supports_mul_mat(const ggml_tensor * op);
-static ggml_openvino_op_support supports_mul_mat_id(const ggml_tensor * op);
-static ggml_openvino_op_support supports_pad(const ggml_tensor * op);
-static ggml_openvino_op_support supports_permute(const ggml_tensor * op);
-static ggml_openvino_op_support supports_pool_2d(const ggml_tensor * op);
-static ggml_openvino_op_support supports_repeat(const ggml_tensor * op);
-static ggml_openvino_op_support supports_reshape(const ggml_tensor * op);
-static ggml_openvino_op_support supports_rope(const ggml_tensor * op);
-static ggml_openvino_op_support supports_set(const ggml_tensor * op);
-static ggml_openvino_op_support supports_ssm_conv(const ggml_tensor * op);
-static ggml_openvino_op_support supports_sum_rows(const ggml_tensor * op);
-static ggml_openvino_op_support supports_transpose(const ggml_tensor * op);
-static ggml_openvino_op_support supports_tri(const ggml_tensor * op);
-static ggml_openvino_op_support supports_unconstrained(const ggml_tensor * op);
-static ggml_openvino_op_support supports_view(const ggml_tensor * op);
 
 const std::unordered_map<std::string, OpEntry> & get_supported_ops() {
     using namespace ov::op;
