@@ -2,10 +2,9 @@
 
 #include "ggml-backend-impl.h"
 #include "ggml-impl.h"
-#include "ggml-openvino-op-support.h"
 #include "ggml-openvino-weight-buffer-release.h"
 #include "ggml-openvino/utils.h"
-#include "ggml-openvino-quant-weights.h"
+#include "quant/weights.h"
 #include "ggml.h"
 
 #include <cerrno>
@@ -14,7 +13,6 @@
 #include <cstring>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <openvino/core/type/element_type.hpp>
 #include <openvino/runtime/intel_gpu/ocl/ocl.hpp>
 #include <openvino/runtime/tensor.hpp>

@@ -1,4 +1,4 @@
-#include "ggml-openvino-quant-weights.h"
+#include "weights.h"
 
 #include <algorithm>
 #include <cmath>

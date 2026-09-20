@@ -5,9 +5,9 @@
 #include "ggml-impl.h"
 #include "ggml-openvino-buffer.h"
 #include "ggml-openvino-extra.h"
-#include "ggml-openvino-op-support.h"
 #include "ggml-openvino-weight-buffer-release.h"
-#include "ggml-openvino/utils.h"
+#include "openvino/op_support.h"
+#include "utils.h"
 #include "ggml.h"
 
 #include <memory>
@@ -32,6 +32,19 @@ struct ggml_backend_openvino_buffer_type_context {
     int device;
     std::string name;
     bool is_host;
+};
+struct ggml_backend_openvino_reg_context {
+    std::vector<ggml_backend_dev_t> devices;
+};
+struct ggml_backend_openvino_device_context {
+    int device;
+    std::string name;
+    std::string description;
+};
+struct ggml_backend_openvino_buffer_type_state {
+    std::mutex mutex;
+    std::vector<ggml_backend_buffer_type> buffer_types;
+    std::vector<ggml_backend_openvino_buffer_type_context> buffer_type_contexts;
 };
 }  // namespace
 
@@ -105,12 +118,6 @@ static const ggml_backend_buffer_type_i ggml_backend_openvino_host_buffer_type_i
     /* .get_max_size     = */ ggml_backend_openvino_buffer_type_get_max_size,
     /* .get_alloc_size   = */ ggml_backend_openvino_buffer_type_get_alloc_size,
     /* .is_host          = */ ggml_backend_openvino_host_buffer_type_is_host,
-};
-
-struct ggml_backend_openvino_buffer_type_state {
-    std::mutex mutex;
-    std::vector<ggml_backend_buffer_type> buffer_types;
-    std::vector<ggml_backend_openvino_buffer_type_context> buffer_type_contexts;
 };
 
 static ggml_backend_buffer_type_t ggml_backend_openvino_get_buffer_type(
@@ -280,14 +287,6 @@ GGML_BACKEND_API bool ggml_backend_is_openvino(ggml_backend_t backend) {
     return backend != NULL && ggml_guid_matches(backend->guid, ggml_backend_openvino_guid());
 }
 
-namespace {
-struct ggml_backend_openvino_device_context {
-    int device;
-    std::string name;
-    std::string description;
-};
-}
-
 static const char * ggml_backend_openvino_device_get_name(ggml_backend_dev_t dev) {
     ggml_backend_openvino_device_context * ctx = (ggml_backend_openvino_device_context *) dev->context;
     return ctx->name.c_str();
@@ -354,7 +353,7 @@ static ggml_backend_buffer_type_t ggml_backend_openvino_device_get_host_buffer_t
 }
 
 static bool ggml_backend_openvino_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
-    return ggml_openvino_device_supports_op_impl(dev, op);
+    return ov::frontend::ggml::device_supports_op(dev, op);
 }
 
 static bool ggml_backend_openvino_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
@@ -380,11 +379,7 @@ static const struct ggml_backend_device_i ggml_backend_openvino_device_interface
     /* .event_synchronize    = */ NULL,
 };
 
-namespace {
-struct ggml_backend_openvino_reg_context {
-    std::vector<ggml_backend_dev_t> devices;
-};
-}
+
 
 static const char * ggml_backend_openvino_reg_get_name(ggml_backend_reg_t reg) {
     GGML_UNUSED(reg);

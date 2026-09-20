@@ -1,6 +1,6 @@
 #pragma once
 #include "ggml.h"
-#include "ggml-openvino-quantization.h"
+#include "quantization.h"
 
 #include <cstdint>
 #include <openvino/core/node_output.hpp>

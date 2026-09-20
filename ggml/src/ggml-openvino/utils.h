@@ -1,3 +1,5 @@
+#pragma once
+
 #include "ggml-decoder.h"
 #include "ggml-impl.h"
 

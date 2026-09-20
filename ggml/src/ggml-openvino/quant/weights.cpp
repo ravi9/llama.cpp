@@ -1,8 +1,6 @@
-#include "ggml-openvino-quant-weights.h"
+#include "weights.h"
 
 #include "ggml-common.h"
-#include "ggml-impl.h"
-#include "ggml-openvino-extra.h"
 #include "ggml.h"
 
 #include <cstddef>

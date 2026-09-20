@@ -1,6 +1,6 @@
-#include "ggml-openvino-quantization.h"
+#include "quantization.h"
 
-#include "ggml-openvino-extra.h"
+#include "../ggml-openvino-extra.h"
 
 #include "ggml-impl.h"
 #include "ggml.h"

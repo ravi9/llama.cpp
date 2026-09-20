@@ -1,7 +1,7 @@
 #pragma once
 
 #include "ggml.h"
-#include "ggml-openvino-quantization.h"
+#include "quant/quantization.h"
 #include "openvino/runtime/core.hpp"
 
 #define CL_TARGET_OPENCL_VERSION 300
