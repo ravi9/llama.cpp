@@ -32,7 +32,7 @@ ov::Output<ov::Node> make_integer_weights(ov::Tensor & weight,
                                           ov::element::Type unsigned_type) {
     ov::Shape orig_shape = weight.get_shape();
     bool is_signed = (weight.get_element_type() == signed_type);  // Symmetric: signed weights, no ZP
-    const ZeroPointMode zp_mode = is_signed ? ZeroPointMode::None :
+    const ZeroPointMode zp_mode = is_signed                       ? ZeroPointMode::None :
                                   (use_bias && zp.get_size() > 0) ? ZeroPointMode::ExactBiasAsF16ZeroPoint :
                                                                     ZeroPointMode::Integer;
 

@@ -1,8 +1,7 @@
-#include "weights.h"
-
 #include "../ggml-openvino-extra.h"
 #include "ggml-common.h"
 #include "ggml.h"
+#include "weights.h"
 
 #include <algorithm>
 #include <cassert>
@@ -274,7 +273,7 @@ std::shared_ptr<ov::Node> requantize_to_buffers(const ggml_tensor * tensor,
                                                 ov::Tensor & scales,
                                                 ov::Tensor & zp) {
     int64_t n_elements = ggml_nelements(tensor);
-    const int64_t ne0 = tensor->ne[0];                 // elements per row
+    const int64_t ne0 = tensor->ne[0];  // elements per row
     const int64_t n_rows = n_elements / ne0;
     const auto * type_traits = ggml_get_type_traits(tensor->type);
     const size_t src_row_bytes = ggml_row_size(tensor->type, ne0);
@@ -294,8 +293,8 @@ std::shared_ptr<ov::Node> requantize_to_buffers(const ggml_tensor * tensor,
     // weights per byte with running zp ORs that assume a single whole-array call, so it is
     // never streamed. When the flag is off, behavior is identical to the original
     // full-materialization path.
-    const bool stream_requant = ggml_openvino_reduce_compile_mem_enabled() && !is_u4 &&
-                                !(block_size > 0 && ne0 % block_size != 0);
+    const bool stream_requant =
+        ggml_openvino_reduce_compile_mem_enabled() && !is_u4 && !(block_size > 0 && ne0 % block_size != 0);
 
     if (!stream_requant) {
         // Full materialization (original behavior): dequantize the whole tensor to F32,

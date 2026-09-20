@@ -8,8 +8,8 @@
 #include <vector>
 
 #ifndef _WIN32
-#include <sys/mman.h>
-#include <unistd.h>
+#    include <sys/mman.h>
+#    include <unistd.h>
 #endif
 
 // The OpenVINO weight Constants are zero-copy views into the host buffers

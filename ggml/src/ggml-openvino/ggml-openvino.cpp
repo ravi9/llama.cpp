@@ -7,9 +7,9 @@
 #include "ggml-openvino-extra.h"
 #include "ggml-openvino-weight-buffer-release.h"
 #include "ggml-openvino/quant/quantization.h"
+#include "ggml.h"
 #include "openvino/op_support.h"
 #include "utils.h"
-#include "ggml.h"
 
 #include <memory>
 #include <mutex>
@@ -34,14 +34,17 @@ struct ggml_backend_openvino_buffer_type_context {
     std::string name;
     bool is_host;
 };
+
 struct ggml_backend_openvino_reg_context {
     std::vector<ggml_backend_dev_t> devices;
 };
+
 struct ggml_backend_openvino_device_context {
     int device;
     std::string name;
     std::string description;
 };
+
 struct ggml_backend_openvino_buffer_type_state {
     std::mutex mutex;
     std::vector<ggml_backend_buffer_type> buffer_types;
@@ -121,11 +124,10 @@ static const ggml_backend_buffer_type_i ggml_backend_openvino_host_buffer_type_i
     /* .is_host          = */ ggml_backend_openvino_host_buffer_type_is_host,
 };
 
-static ggml_backend_buffer_type_t ggml_backend_openvino_get_buffer_type(
-    ggml_backend_openvino_buffer_type_state & state,
-    const ggml_backend_buffer_type_i & iface,
-    int device,
-    bool is_host) {
+static ggml_backend_buffer_type_t ggml_backend_openvino_get_buffer_type(ggml_backend_openvino_buffer_type_state & state,
+                                                                        const ggml_backend_buffer_type_i & iface,
+                                                                        int device,
+                                                                        bool is_host) {
     GGML_ASSERT(device >= 0 && device < ggml_backend_openvino_get_device_count());
 
     std::lock_guard<std::mutex> lock(state.mutex);

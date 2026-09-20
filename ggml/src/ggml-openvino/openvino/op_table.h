@@ -66,7 +66,7 @@ GGML_OP_CONVERTER(translate_roll);
 // required, so a translator cannot be registered without a support rule - that is what
 // keeps the gate from drifting away from what the translators actually accept.
 struct OpEntry {
-    CreatorFunction  translate;
+    CreatorFunction translate;
     SupportsFunction supports;
 
     // Both arguments are required on purpose. Without this constructor OpEntry would be

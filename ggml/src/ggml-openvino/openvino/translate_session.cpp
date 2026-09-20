@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <map>
 #include <memory>
 #include <openvino/core/node.hpp>
@@ -50,7 +51,6 @@
 #include <openvino/op/unsqueeze.hpp>
 #include <openvino/pass/constant_folding.hpp>
 #include <openvino/pass/make_stateful.hpp>
-#include <limits>
 #include <sstream>
 
 namespace ov {

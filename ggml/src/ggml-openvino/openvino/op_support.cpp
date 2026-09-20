@@ -208,10 +208,10 @@ ggml_openvino_op_support supports_set(const ggml_tensor * op) {
     // OpenVINO SET translation currently supports dst layouts that match src0 strides.
     if (op->src[0] == nullptr || nb1 != op->src[0]->nb[1] || nb2 != op->src[0]->nb[2] || nb3 != op->src[0]->nb[3]) {
         return {false, "SET op with dst nb1=" + std::to_string(nb1) + ", nb2=" + std::to_string(nb2) +
-                       ", nb3=" + std::to_string(nb3) + " that does not match src0 strides nb[1]=" +
-                       (op->src[0] != nullptr ? std::to_string(op->src[0]->nb[1]) : "null") +
-                       ", nb[2]=" + (op->src[0] != nullptr ? std::to_string(op->src[0]->nb[2]) : "null") +
-                       ", nb[3]=" + (op->src[0] != nullptr ? std::to_string(op->src[0]->nb[3]) : "null")};
+                           ", nb3=" + std::to_string(nb3) + " that does not match src0 strides nb[1]=" +
+                           (op->src[0] != nullptr ? std::to_string(op->src[0]->nb[1]) : "null") +
+                           ", nb[2]=" + (op->src[0] != nullptr ? std::to_string(op->src[0]->nb[2]) : "null") +
+                           ", nb[3]=" + (op->src[0] != nullptr ? std::to_string(op->src[0]->nb[3]) : "null")};
     }
     return {};
 }
@@ -221,8 +221,8 @@ ggml_openvino_op_support supports_get_rows_set_rows(const ggml_tensor * op) {
     if (op->ne[3] != 1) {
         return {false, "GET_ROWS/SET_ROWS with ne[3] != 1 (ne[3]=" + std::to_string(op->ne[3]) + ") is not supported"};
     }
-    if (op->op == GGML_OP_GET_ROWS && ggml_is_quantized(op->src[0]->type) &&
-        op->src[0]->view_src != nullptr && op->src[0]->view_offs != 0) {
+    if (op->op == GGML_OP_GET_ROWS && ggml_is_quantized(op->src[0]->type) && op->src[0]->view_src != nullptr &&
+        op->src[0]->view_offs != 0) {
         return {false, "GET_ROWS with a nonzero quantized src0 view offset is not supported"};
     }
     // device quirk
@@ -238,7 +238,8 @@ ggml_openvino_op_support supports_get_rows_set_rows(const ggml_tensor * op) {
         // Convert/Subtract/Multiply chain fusable into GatherMatmulCompressed/FullyConnectedCompressed
         // for the shared non-test code paths).
         return {false, "GET_ROWS/SET_ROWS with ne[0] == 256 and type " + std::string(ggml_type_name(op->src[0]->type)) +
-                       " rejected due to f16-arithmetic dequant rounding errors that intermittently exceed 1e-7 NMSE threshold"};
+                           " rejected due to f16-arithmetic dequant rounding errors that intermittently exceed 1e-7 "
+                           "NMSE threshold"};
     }
     return {};
 }
@@ -263,9 +264,9 @@ ggml_openvino_op_support supports_add_mul_sub(const ggml_tensor * op) {
     }
     for (int i = 0; i < 4; i++) {
         if (op->src[0]->ne[i] != op->src[1]->ne[i] && (op->src[0]->ne[i] != 1 && op->src[1]->ne[i] != 1)) {
-            return {false, "ADD/MUL/SUB with incompatible broadcast shapes: src0->ne[" + std::to_string(i) + "]=" +
-                           std::to_string(op->src[0]->ne[i]) + ", src1->ne[" + std::to_string(i) + "]=" +
-                           std::to_string(op->src[1]->ne[i])};
+            return {false, "ADD/MUL/SUB with incompatible broadcast shapes: src0->ne[" + std::to_string(i) +
+                               "]=" + std::to_string(op->src[0]->ne[i]) + ", src1->ne[" + std::to_string(i) +
+                               "]=" + std::to_string(op->src[1]->ne[i])};
         }
     }
     return {};
@@ -286,8 +287,8 @@ ggml_openvino_op_support supports_div(const ggml_tensor * op) {
     // device quirk. The GPU plugin can fuse broadcast DIV into the preceding FFN GEMM path
     // and produce infs for per-channel scale vectors. Keep those DIVs on CPU until the fused
     // GPU kernel is reliable. (failed case llama-arch-test mpt)
-    if (on_gpu() && op->src[1]->ne[0] == op->ne[0] &&
-        op->src[1]->ne[1] == 1 && op->src[1]->ne[2] == 1 && op->src[1]->ne[3] == 1) {
+    if (on_gpu() && op->src[1]->ne[0] == op->ne[0] && op->src[1]->ne[1] == 1 && op->src[1]->ne[2] == 1 &&
+        op->src[1]->ne[3] == 1) {
         return {false, "DIV per-channel scale broadcast is not supported on GPU"};
     }
     return {};
@@ -342,7 +343,8 @@ ggml_openvino_op_support supports_flash_attn_ext(const ggml_tensor * op) {
         return {false, "FLASH_ATTN_EXT with max_bias > 0 (max_bias=" + std::to_string(max_bias) + ") is not supported"};
     }
     if (logit_softcap != 0) {
-        return {false, "FLASH_ATTN_EXT with logit_softcap != 0 (logit_softcap=" + std::to_string(logit_softcap) + ") is not supported"};
+        return {false, "FLASH_ATTN_EXT with logit_softcap != 0 (logit_softcap=" + std::to_string(logit_softcap) +
+                           ") is not supported"};
     }
     return {};
 }
@@ -370,16 +372,17 @@ ggml_openvino_op_support supports_cpy(const ggml_tensor * op) {
         return {false, "CPY to quantized destination (e.g. f32 -> q4_0) is numerically unstable"};
     }
     if (ggml_nelements(op->src[0]) != ggml_nelements(op->src[1])) {
-        return {false, "CPY with mismatched element counts is not supported: src0=" + std::to_string(ggml_nelements(op->src[0])) +
-                       " != src1=" + std::to_string(ggml_nelements(op->src[1]))};
+        return {false, "CPY with mismatched element counts is not supported: src0=" +
+                           std::to_string(ggml_nelements(op->src[0])) +
+                           " != src1=" + std::to_string(ggml_nelements(op->src[1]))};
     }
     // op test case with non-contiguous src or dst
     if ((op->ne[0] == 3 && op->ne[1] == 4 && op->ne[2] == 3 && op->ne[3] == 2) ||
         (op->ne[0] == 1 && op->ne[1] == 4 && op->ne[2] == 3 && op->ne[3] == 2) ||
         (op->ne[0] == 2 && op->ne[1] == 4 && op->ne[2] == 3 && op->ne[3] == 2)) {
         return {false, "CPY with non-contiguous shape [" + std::to_string(op->ne[0]) + ", " +
-                       std::to_string(op->ne[1]) + ", " + std::to_string(op->ne[2]) + ", " +
-                       std::to_string(op->ne[3]) + "] is not supported"};
+                           std::to_string(op->ne[1]) + ", " + std::to_string(op->ne[2]) + ", " +
+                           std::to_string(op->ne[3]) + "] is not supported"};
     }
     if (!cpy_output_view_is_supported(op)) {
         return {false, "CPY with non-contiguous output view is not supported"};
@@ -390,10 +393,9 @@ ggml_openvino_op_support supports_cpy(const ggml_tensor * op) {
 // serves: GGML_OP_MUL_MAT
 ggml_openvino_op_support supports_mul_mat(const ggml_tensor * op) {
     // test-shape
-    if (on_gpu() && op->src[0] != nullptr && op->src[1] != nullptr &&
-        ggml_is_quantized(op->src[0]->type) && strcmp(op->src[0]->name, "a") == 0 &&
-        strcmp(op->src[1]->name, "b") == 0 && op->src[0]->ne[1] == 1 && op->src[1]->ne[1] == 64 &&
-        op->src[0]->ne[0] == 256 && op->src[1]->ne[0] == 256) {
+    if (on_gpu() && op->src[0] != nullptr && op->src[1] != nullptr && ggml_is_quantized(op->src[0]->type) &&
+        strcmp(op->src[0]->name, "a") == 0 && strcmp(op->src[1]->name, "b") == 0 && op->src[0]->ne[1] == 1 &&
+        op->src[1]->ne[1] == 64 && op->src[0]->ne[0] == 256 && op->src[1]->ne[0] == 256) {
         return {false, "MUL_MAT quantized benchmark test case on GPU is not supported"};
     }
     // device quirk
@@ -402,8 +404,8 @@ ggml_openvino_op_support supports_mul_mat(const ggml_tensor * op) {
         return {false, "MUL_MAT scalar dot product with non-weight src[0] on GPU is not supported"};
     }
     if (op->src[0]->ne[3] != op->src[1]->ne[3] && op->src[0]->ne[3] != 1 && op->src[1]->ne[3] != 1) {
-        return {false, "MUL_MAT with incompatible broadcast on ne[3]: src0->ne[3]=" + std::to_string(op->src[0]->ne[3]) +
-                       ", src1->ne[3]=" + std::to_string(op->src[1]->ne[3])};
+        return {false, "MUL_MAT with incompatible broadcast on ne[3]: src0->ne[3]=" +
+                           std::to_string(op->src[0]->ne[3]) + ", src1->ne[3]=" + std::to_string(op->src[1]->ne[3])};
     }
     if (op->src[0]->op == GGML_OP_VIEW && op->src[1]->op == GGML_OP_VIEW) {
         return {false, "MUL_MAT with both inputs as VIEW is not supported"};
@@ -416,8 +418,8 @@ ggml_openvino_op_support supports_mul_mat_id(const ggml_tensor * op) {
     // Single-expert (or empty) MUL_MAT_ID is a degenerate shape that stresses GatherMatmul edge
     // cases and never occurs in real MoE; let it fall back to CPU.
     if (op->src[0] != nullptr && op->src[0]->ne[2] <= 1) {
-        return {false, "MUL_MAT_ID with single-expert or empty ne[2] <= 1 (ne[2]=" +
-                       std::to_string(op->src[0]->ne[2]) + ") is not supported"};
+        return {false, "MUL_MAT_ID with single-expert or empty ne[2] <= 1 (ne[2]=" + std::to_string(op->src[0]->ne[2]) +
+                           ") is not supported"};
     }
     // device quirk
     if (on_gpu() && op->src[0] != nullptr && !ggml_is_quantized(op->src[0]->type)) {
@@ -435,8 +437,7 @@ ggml_openvino_op_support supports_mul_mat_id(const ggml_tensor * op) {
     }
     // device quirk. Only MXFP4 still needs the large-temporary guard; every other quantized
     // type goes through GatherMatmul, which never materializes the selected expert weights.
-    if (on_gpu() && op->src[0] != nullptr && op->src[0]->type == GGML_TYPE_MXFP4 &&
-        mul_mat_id_requires_large_tmp(op)) {
+    if (on_gpu() && op->src[0] != nullptr && op->src[0]->type == GGML_TYPE_MXFP4 && mul_mat_id_requires_large_tmp(op)) {
         return {false, "MUL_MAT_ID with MXFP4 weights requires large temporary on GPU"};
     }
     return {};
@@ -458,7 +459,7 @@ ggml_openvino_op_support supports_rope(const ggml_tensor * op) {
     const int64_t rope_dims = n_dims == 0 ? head_dim : n_dims;
     if (rope_dims <= 0 || rope_dims + n_offs > head_dim || (rope_dims % 2) != 0) {
         return {false, "ROPE with n_dims=" + std::to_string(n_dims) + ", n_offs=" + std::to_string(n_offs) +
-                       ", head_dim=" + std::to_string(head_dim) + " is not supported"};
+                           ", head_dim=" + std::to_string(head_dim) + " is not supported"};
     }
     if (op->type != GGML_TYPE_F32 && op->type != GGML_TYPE_F16) {
         return {false, "ROPE with type " + std::string(ggml_type_name(op->type)) + " is not supported"};
@@ -468,14 +469,14 @@ ggml_openvino_op_support supports_rope(const ggml_tensor * op) {
     }
     if (op->src[0]->ne[3] > 1) {
         // translate_rope's cos/sin tables cover one sequence only; ne[3] > 1 fails to broadcast.
-        return {false, "ROPE with multiple sequences (ne[3]=" + std::to_string(op->src[0]->ne[3]) +
-                       ") is not supported"};
+        return {false,
+                "ROPE with multiple sequences (ne[3]=" + std::to_string(op->src[0]->ne[3]) + ") is not supported"};
     }
     float freq_scale;
     float ext_factor;
     float attn_factor;
-    memcpy(&freq_scale,  op_params + 6, sizeof(float));
-    memcpy(&ext_factor,  op_params + 7, sizeof(float));
+    memcpy(&freq_scale, op_params + 6, sizeof(float));
+    memcpy(&ext_factor, op_params + 7, sizeof(float));
     memcpy(&attn_factor, op_params + 8, sizeof(float));
     if (mode == GGML_ROPE_TYPE_IMROPE &&
         (op->src[2] != nullptr || freq_scale != 1.0f || ext_factor != 0.0f || attn_factor != 1.0f)) {
@@ -610,15 +611,15 @@ static const OpEntry * openvino_op_entry(const ggml_tensor * op) {
 
     std::string key;
     switch (op->op) {
-        case GGML_OP_UNARY:
-            key = std::string("GGML_UNARY_OP_") + ggml_unary_op_name(ggml_get_unary_op(op));
-            break;
-        case GGML_OP_GLU:
-            key = std::string("GGML_GLU_OP_") + ggml_glu_op_name(ggml_get_glu_op(op));
-            break;
-        default:
-            key = std::string("GGML_OP_") + ggml_op_name(op->op);
-            break;
+    case GGML_OP_UNARY:
+        key = std::string("GGML_UNARY_OP_") + ggml_unary_op_name(ggml_get_unary_op(op));
+        break;
+    case GGML_OP_GLU:
+        key = std::string("GGML_GLU_OP_") + ggml_glu_op_name(ggml_get_glu_op(op));
+        break;
+    default:
+        key = std::string("GGML_OP_") + ggml_op_name(op->op);
+        break;
     }
 
     const auto it = table.find(key);
@@ -629,9 +630,8 @@ static ggml_openvino_op_support device_supports_op_check(ggml_backend_dev_t dev,
     GGML_ASSERT(dev->reg != nullptr);
 
     static std::unordered_set<ggml_type> supported_types{
-        GGML_TYPE_F32,  GGML_TYPE_F16,  GGML_TYPE_BF16, GGML_TYPE_I64,  GGML_TYPE_I32,  GGML_TYPE_Q4_0,
-        GGML_TYPE_Q4_1, GGML_TYPE_Q4_K, GGML_TYPE_Q5_1, GGML_TYPE_Q5_K, GGML_TYPE_Q8_0, GGML_TYPE_Q6_K,
-        GGML_TYPE_MXFP4};
+        GGML_TYPE_F32,  GGML_TYPE_F16,  GGML_TYPE_BF16, GGML_TYPE_I64,  GGML_TYPE_I32,  GGML_TYPE_Q4_0, GGML_TYPE_Q4_1,
+        GGML_TYPE_Q4_K, GGML_TYPE_Q5_1, GGML_TYPE_Q5_K, GGML_TYPE_Q8_0, GGML_TYPE_Q6_K, GGML_TYPE_MXFP4};
 
     static const auto build_supported_sets = [] {
         const auto & table = get_supported_ops();
@@ -670,7 +670,8 @@ static ggml_openvino_op_support device_supports_op_check(ggml_backend_dev_t dev,
     case GGML_OP_UNARY: {
         auto supported = supported_unary_ops.find(ggml_get_unary_op(op)) != supported_unary_ops.end();
         if (!supported) {
-            return {false, "unary op " + std::string(ggml_unary_op_name(ggml_get_unary_op(op))) + " has no op translator"};
+            return {false,
+                    "unary op " + std::string(ggml_unary_op_name(ggml_get_unary_op(op))) + " has no op translator"};
         }
         if (ggml_get_unary_op(op) == GGML_UNARY_OP_EXP && op->type == GGML_TYPE_F32) {
             return {false, "UNARY_EXP with F32 type is not supported"};
@@ -704,7 +705,8 @@ static ggml_openvino_op_support device_supports_op_check(ggml_backend_dev_t dev,
             break;
         }
         if (supported_types.find(src->type) == supported_types.end()) {
-            return {false, "src[" + std::to_string(i) + "] type " + std::string(ggml_type_name(src->type)) + " is not supported"};
+            return {false, "src[" + std::to_string(i) + "] type " + std::string(ggml_type_name(src->type)) +
+                               " is not supported"};
         }
         const bool is_supported_3d_moe_expert =
             op->op == GGML_OP_MUL_MAT_ID && i == 0 && (src->type == GGML_TYPE_MXFP4 || src->ne[3] == 1);
@@ -733,8 +735,8 @@ bool device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
     if (!res.is_supported) {
         static const bool log_unsupported = ggml_openvino_getenv_int("GGML_OPENVINO_LOG_UNSUPPORTED_OPS") != 0;
         if (log_unsupported) {
-            GGML_LOG_WARN("OpenVINO op unsupported: op '%s' (%s), type %s: %s\n",
-                          op->name, ggml_op_name(op->op), ggml_type_name(op->type), res.reason.c_str());
+            GGML_LOG_WARN("OpenVINO op unsupported: op '%s' (%s), type %s: %s\n", op->name, ggml_op_name(op->op),
+                          ggml_type_name(op->type), res.reason.c_str());
         }
     }
     return res.is_supported;

@@ -22,7 +22,7 @@
 static ov::Shape make_weight_shape(const ggml_tensor * tensor) {
     return (tensor->ne[2] > 1) ? ov::Shape{static_cast<size_t>(tensor->ne[2]), static_cast<size_t>(tensor->ne[1]),
                                            static_cast<size_t>(tensor->ne[0])} :
-                                  ov::Shape{static_cast<size_t>(tensor->ne[1]), static_cast<size_t>(tensor->ne[0])};
+                                 ov::Shape{static_cast<size_t>(tensor->ne[1]), static_cast<size_t>(tensor->ne[0])};
 }
 
 static ov::Shape make_mxfp4_weight_shape(const ggml_tensor * tensor) {
@@ -38,21 +38,20 @@ static ov::Shape make_mxfp4_weight_shape(const ggml_tensor * tensor) {
 }
 
 static ov::Shape make_packed_mxfp4_moe_shape(const ggml_tensor * tensor) {
-    return {static_cast<size_t>(tensor->ne[3]),
-            static_cast<size_t>(tensor->ne[2]),
-            static_cast<size_t>(tensor->ne[1]),
-            static_cast<size_t>(tensor->ne[0] / MXFP4_BLOCK_SIZE),
-            MXFP4_BLOCK_BYTES};
+    return {static_cast<size_t>(tensor->ne[3]), static_cast<size_t>(tensor->ne[2]), static_cast<size_t>(tensor->ne[1]),
+            static_cast<size_t>(tensor->ne[0] / MXFP4_BLOCK_SIZE), MXFP4_BLOCK_BYTES};
 }
-std::shared_ptr<ov::Node> extract_quantized_weights(const ggml_tensor * tensor,
-                                                    const void * data,  // Source data pointer (may differ from tensor->data)
-                                                    ov::Tensor & weights,
-                                                    ov::Tensor & scales,
-                                                    ov::Tensor & zp,
-                                                    // Use an exact f16 zero point (vs. a rounded integer one); always
-                                                    // used for for_gather_matmul (3D MoE expert) weights regardless of
-                                                    // this flag, and also settable explicitly for test-backend-ops.
-                                                    bool use_bias) {
+
+std::shared_ptr<ov::Node> extract_quantized_weights(
+    const ggml_tensor * tensor,
+    const void * data,  // Source data pointer (may differ from tensor->data)
+    ov::Tensor & weights,
+    ov::Tensor & scales,
+    ov::Tensor & zp,
+    // Use an exact f16 zero point (vs. a rounded integer one); always
+    // used for for_gather_matmul (3D MoE expert) weights regardless of
+    // this flag, and also settable explicitly for test-backend-ops.
+    bool use_bias) {
     // Create a temporary tensor for extraction functions that read from tensor->data
     ggml_tensor temp_tensor = *tensor;
     temp_tensor.data = const_cast<void *>(data);

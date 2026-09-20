@@ -19,8 +19,8 @@
 #include <openvino/runtime/tensor.hpp>
 
 #ifndef _WIN32
-#include <sys/mman.h>
-#include <unistd.h>
+#    include <sys/mman.h>
+#    include <unistd.h>
 #endif
 
 namespace {
@@ -35,8 +35,7 @@ public:
 
 class ggml_openvino_host_buffer_storage : public ggml_openvino_buffer_storage {
 public:
-    explicit ggml_openvino_host_buffer_storage(size_t size) :
-        size_(size) {
+    explicit ggml_openvino_host_buffer_storage(size_t size) : size_(size) {
         if (size_ == 0) {
             return;
         }
@@ -95,13 +94,9 @@ public:
         }
     }
 
-    void * data() const noexcept override {
-        return data_;
-    }
+    void * data() const noexcept override { return data_; }
 
-    size_t size() const noexcept override {
-        return size_;
-    }
+    size_t size() const noexcept override { return size_; }
 
 private:
     void * data_ = nullptr;
@@ -115,8 +110,7 @@ private:
 
 class ggml_openvino_remote_buffer_storage : public ggml_openvino_buffer_storage {
 public:
-    explicit ggml_openvino_remote_buffer_storage(size_t size) :
-        size_(size) {
+    explicit ggml_openvino_remote_buffer_storage(size_t size) : size_(size) {
         if (size_ == 0) {
             return;
         }
@@ -130,13 +124,9 @@ public:
         ov_buffer_ = std::make_shared<ov::intel_gpu::ocl::USMTensor>(std::move(usm_tensor));
     }
 
-    void * data() const noexcept override {
-        return data_;
-    }
+    void * data() const noexcept override { return data_; }
 
-    size_t size() const noexcept override {
-        return size_;
-    }
+    size_t size() const noexcept override { return size_; }
 
 private:
     void * data_ = nullptr;
@@ -189,17 +179,11 @@ struct ggml_backend_openvino_buffer_context {
         }
     }
 
-    void * data() const noexcept {
-        return storage != nullptr ? storage->data() : nullptr;
-    }
+    void * data() const noexcept { return storage != nullptr ? storage->data() : nullptr; }
 
-    size_t size() const noexcept {
-        return storage != nullptr ? storage->size() : 0;
-    }
+    size_t size() const noexcept { return storage != nullptr ? storage->size() : 0; }
 
-    ~ggml_backend_openvino_buffer_context() {
-        tensor_extras.clear();
-    }
+    ~ggml_backend_openvino_buffer_context() { tensor_extras.clear(); }
 };
 
 void ggml_backend_openvino_buffer_free_buffer(ggml_backend_buffer_t buffer) {
@@ -249,10 +233,10 @@ enum ggml_status ggml_backend_openvino_buffer_init_tensor(ggml_backend_buffer_t 
 }
 
 void ggml_backend_openvino_buffer_memset_tensor(ggml_backend_buffer_t buffer,
-                                                       ggml_tensor * tensor,
-                                                       uint8_t value,
-                                                       size_t offset,
-                                                       size_t size) {
+                                                ggml_tensor * tensor,
+                                                uint8_t value,
+                                                size_t offset,
+                                                size_t size) {
     GGML_ASSERT(tensor != nullptr && tensor->data != nullptr);
     ggml_backend_openvino_buffer_context * ctx = (ggml_backend_openvino_buffer_context *) buffer->context;
 
@@ -276,10 +260,10 @@ void ggml_backend_openvino_buffer_memset_tensor(ggml_backend_buffer_t buffer,
 }
 
 void ggml_backend_openvino_buffer_set_tensor(ggml_backend_buffer_t buffer,
-                                                    ggml_tensor * tensor,
-                                                    const void * data,
-                                                    size_t offset,
-                                                    size_t size) {
+                                             ggml_tensor * tensor,
+                                             const void * data,
+                                             size_t offset,
+                                             size_t size) {
     GGML_ASSERT(tensor != nullptr && tensor->data != nullptr);
     ggml_backend_openvino_buffer_context * ctx = (ggml_backend_openvino_buffer_context *) buffer->context;
 
@@ -347,10 +331,10 @@ void ggml_backend_openvino_buffer_set_tensor(ggml_backend_buffer_t buffer,
 }
 
 void ggml_backend_openvino_buffer_get_tensor(ggml_backend_buffer_t buffer,
-                                                    const ggml_tensor * tensor,
-                                                    void * data,
-                                                    size_t offset,
-                                                    size_t size) {
+                                             const ggml_tensor * tensor,
+                                             void * data,
+                                             size_t offset,
+                                             size_t size) {
     GGML_ASSERT(tensor != nullptr && tensor->data != nullptr);
     ggml_backend_openvino_buffer_context * ctx = (ggml_backend_openvino_buffer_context *) buffer->context;
 
@@ -371,9 +355,7 @@ void ggml_backend_openvino_buffer_get_tensor(ggml_backend_buffer_t buffer,
     }
 }
 
-bool ggml_backend_openvino_buffer_cpy_tensor(ggml_backend_buffer_t buffer,
-                                                    const ggml_tensor * src,
-                                                    ggml_tensor * dst) {
+bool ggml_backend_openvino_buffer_cpy_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * src, ggml_tensor * dst) {
     GGML_ASSERT(src != nullptr && dst != nullptr);
     ggml_backend_openvino_buffer_context * ctx = (ggml_backend_openvino_buffer_context *) buffer->context;
 
@@ -450,7 +432,8 @@ const ggml_backend_buffer_i ggml_backend_openvino_buffer_interface = {
     /* .reset           = */ nullptr,
 };
 
-} // namespace
+}  // namespace
+
 ggml_backend_buffer_t ggml_backend_openvino_buffer_alloc(ggml_backend_buffer_type_t buft, int device, size_t size) {
     ggml_backend_openvino_buffer_context * ctx = new ggml_backend_openvino_buffer_context(device, size);
 

@@ -15,7 +15,7 @@
 
 // Why the gate turned a node away. Default-constructed means supported.
 struct ggml_openvino_op_support {
-    bool        is_supported = true;
+    bool is_supported = true;
     std::string reason;
 
     operator bool() const { return is_supported; }
