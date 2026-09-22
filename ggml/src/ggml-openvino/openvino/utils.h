@@ -3,6 +3,7 @@
 #include "node_context.h"
 
 #include <memory>
+#include <numeric>
 #include <openvino/core/node.hpp>
 #include <openvino/op/shape_of.hpp>
 #include <openvino/op/slice.hpp>
@@ -11,8 +12,6 @@
 namespace ov {
 namespace frontend {
 namespace ggml {
-
-std::string getCurrentTime();
 
 void num_inputs_check(const NodeContext & context, size_t min_inputs, size_t max_inputs);
 
@@ -54,11 +53,12 @@ std::shared_ptr<ov::Node> get_dimensions(const std::shared_ptr<ov::Node> & node,
 
 OutputVector rename_outputs_with_suffix(const OutputVector & outputs, const std::string & suffix);
 
-std::pair<ov::Output<Node>, ov::Output<Node>> make_sin_cos(int32_t * rope_params,
-                                                           std::shared_ptr<ov::Node> inp_pos,
-                                                           std::shared_ptr<ov::Node> rope_freqs_weight = nullptr,
-                                                           bool imrope = false,
-                                                           bool stateful = false);
+std::pair<ov::Output<Node>, ov::Output<Node>> make_sin_cos(
+    int32_t * rope_params,
+    std::shared_ptr<ov::Node> inp_pos,
+    const std::shared_ptr<ov::Node> & rope_freqs_weight = nullptr,
+    bool imrope = false,
+    bool stateful = false);
 
 ov::Output<ov::Node> process_view_input(const NodeContext & context, int input_index, int slice_len = 0, int axis = -1);
 

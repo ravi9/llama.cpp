@@ -1,3 +1,5 @@
+#pragma once
+
 #include "ggml-decoder.h"
 #include "ggml-impl.h"
 
@@ -141,6 +143,8 @@ struct ov_runtime_context {
 };
 
 enum ggml_status ov_graph_compute(struct ggml_cgraph * cgraph, ggml_backend_t backend);
+
+bool ggml_openvino_is_stateful_enabled();
 
 size_t checksum(const void * data, size_t size);
 

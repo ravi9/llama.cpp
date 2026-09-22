@@ -3,15 +3,16 @@
 #include "ggml-impl.h"
 #include "ggml-openvino-extra.h"
 #include "ggml-openvino.h"
-#include "ggml-quants.h"
+#include "ggml-openvino/ggml-openvino-buffer.h"
 #include "ggml.h"
-#include "utils.h"
+#include "quant/weights.h"
 
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <map>
@@ -31,7 +32,6 @@
 #include <set>
 #include <stdexcept>
 #include <string>
-#include <cstring>
 #include <unordered_map>
 #include <vector>
 

@@ -1,10 +1,9 @@
 #include "translate_session.h"
 
+#include "../ggml-openvino-extra.h"
 #include "ggml-impl.h"
-#include "ggml-openvino/ggml-openvino-extra.h"
-#include "ggml-openvino/openvino/node_context.h"
-#include "ggml-openvino/openvino/utils.h"
 #include "input_model.h"
+#include "node_context.h"
 #include "pass/fuse_moe_compressed.h"
 #include "pass/fuse_to_conv.h"
 #include "pass/kv_state_seq_axis.h"
@@ -12,10 +11,12 @@
 #include "pass/mark_dequantization_subgraph.h"
 #include "pass/squeeze_matmul.h"
 #include "rt_info/weightless_caching_attributes.hpp"
+#include "utils.h"
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <map>
 #include <memory>
 #include <openvino/core/node.hpp>
@@ -50,7 +51,6 @@
 #include <openvino/op/unsqueeze.hpp>
 #include <openvino/pass/constant_folding.hpp>
 #include <openvino/pass/make_stateful.hpp>
-#include <limits>
 #include <sstream>
 
 namespace ov {
@@ -252,7 +252,7 @@ void preprocess(TensorMap & tensor_map, GgmlDecoder & ggml_model_decoder) {
 }  // namespace
 
 TranslateSession::TranslateSession(const frontend::InputModel::Ptr & input_model,
-                                   const std::unordered_map<std::string, CreatorFunction> & translator_map,
+                                   const std::unordered_map<std::string, OpEntry> & translator_map,
                                    bool naive) :
     m_input_model(input_model),
     m_translator_map(translator_map),
@@ -304,7 +304,7 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
         FRONT_END_OP_CONVERSION_CHECK(it != m_translator_map.end(), "Translation for operation type ", operation_type,
                                       " is not implemented.");
         NodeContext node_context(decoder, tensor_map, node_idx, this);
-        ov::OutputVector converted_outputs = it->second(node_context);
+        ov::OutputVector converted_outputs = it->second.translate(node_context);
 
         const auto & node_output_names = decoder->get_output_names(node_idx);
         FRONT_END_OP_CONVERSION_CHECK(node_output_names.size() == converted_outputs.size(), "Number of ",
@@ -471,7 +471,7 @@ std::shared_ptr<Model> TranslateSession::apply_transformations(std::shared_ptr<M
 
         // MOECompressed has no CPU plugin implementation, so keep the GatherMatmul path
         // everywhere else. Opt-in while the fused path is being brought up.
-        if (ggml_openvino_get_device_name() == "GPU" && getenv("GGML_OPENVINO_MOE_OP")) {
+        if (ggml_openvino_get_device_name() == "GPU") {
             manager.register_pass<pass::FuseMoeCompressed>();
         }
 
