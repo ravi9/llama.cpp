@@ -209,6 +209,18 @@ void ggml_openvino_device_config::init() {
             return;
         }
 
+        cl_platform_id cl_platform;
+        err = clGetDeviceInfo(cl_device, CL_DEVICE_PLATFORM, sizeof(cl_platform), &cl_platform, nullptr);
+        if (err != CL_SUCCESS) {
+            GGML_LOG_ERROR("Failed to get OpenCL platform: %d\n", err);
+            return;
+        }
+
+        cl_mem_fill_fn =
+            (clEnqueueMemFillINTEL_fn) clGetExtensionFunctionAddressForPlatform(cl_platform, "clEnqueueMemFillINTEL");
+        cl_mem_cpy_fn =
+            (clEnqueueMemcpyINTEL_fn) clGetExtensionFunctionAddressForPlatform(cl_platform, "clEnqueueMemcpyINTEL");
+
         cl_ulong device_max_alloc = 0;
         err = clGetDeviceInfo(cl_device, CL_DEVICE_MAX_MEM_ALLOC_SIZE, sizeof(device_max_alloc), &device_max_alloc,
                               nullptr);
@@ -330,32 +342,14 @@ cl_command_queue ggml_openvino_get_cl_queue() {
     return ggml_openvino_get_device_config().cl_queue;
 }
 
-// Get the clEnqueueMemFillINTEL function pointer (lazy load)
+// Get the clEnqueueMemFillINTEL function pointer
 clEnqueueMemFillINTEL_fn ggml_openvino_get_clEnqueueMemFillINTEL() {
-    static clEnqueueMemFillINTEL_fn fn = nullptr;
-    static bool loaded = false;
-    if (!loaded) {
-        loaded = true;
-        cl_platform_id platform;
-        if (clGetPlatformIDs(1, &platform, nullptr) == CL_SUCCESS) {
-            fn = (clEnqueueMemFillINTEL_fn) clGetExtensionFunctionAddressForPlatform(platform, "clEnqueueMemFillINTEL");
-        }
-    }
-    return fn;
+    return ggml_openvino_get_device_config().cl_mem_fill_fn;
 }
 
-// Get the clEnqueueMemcpyINTEL function pointer (lazy load)
+// Get the clEnqueueMemcpyINTEL function pointer
 clEnqueueMemcpyINTEL_fn ggml_openvino_get_clEnqueueMemcpyINTEL() {
-    static clEnqueueMemcpyINTEL_fn fn = nullptr;
-    static bool loaded = false;
-    if (!loaded) {
-        loaded = true;
-        cl_platform_id platform;
-        if (clGetPlatformIDs(1, &platform, nullptr) == CL_SUCCESS) {
-            fn = (clEnqueueMemcpyINTEL_fn) clGetExtensionFunctionAddressForPlatform(platform, "clEnqueueMemcpyINTEL");
-        }
-    }
-    return fn;
+    return ggml_openvino_get_device_config().cl_mem_cpy_fn;
 }
 
 // Get requantization type for a tensor type (returns nullopt if no requant needed)
