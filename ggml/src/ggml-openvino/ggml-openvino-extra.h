@@ -71,6 +71,8 @@ struct ggml_openvino_device_config {
     ov::AnyMap compile_config;
     std::unordered_map<std::string, std::string> environment_variables;
     cl_command_queue cl_queue = nullptr;
+    clEnqueueMemFillINTEL_fn cl_mem_fill_fn = nullptr;
+    clEnqueueMemcpyINTEL_fn cl_mem_cpy_fn = nullptr;
 
     void init();
     ~ggml_openvino_device_config();
