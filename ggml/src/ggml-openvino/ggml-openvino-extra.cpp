@@ -2,6 +2,7 @@
 
 #include "ggml-impl.h"
 #include "ggml.h"
+#include "model-cache.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -34,6 +35,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_SPILL_DIR",
         "GGML_OPENVINO_DEBUG_NODE",
         "GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR",
+        "GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY",
         "GGML_OPENVINO_NPU_COMPILE_CONFIG",
         // Integer values (use ggml_openvino_getenv_int)
         "GGML_OPENVINO_PREFILL_CHUNK_SIZE",
@@ -53,6 +55,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_DISABLE_KV_SLICE",
         "GGML_OPENVINO_ENABLE_FALLBACK",
         "GGML_OPENVINO_MANUAL_GQA_ATTN",
+        "GGML_OPENVINO_MOE_OP",
         "GGML_OPENVINO_MEMORY_OPTIMIZE",
         "GGML_OPENVINO_RELEASE_WEIGHTS",
         "GGML_OPENVINO_REDUCE_COMPILE_MEM",
@@ -80,6 +83,8 @@ void ggml_openvino_device_config::init() {
         device_name = "CPU";
     }
     is_npu = (device_name == "NPU");
+
+    ggml_openvino_model_cache_init();
 
     const char * cache_dir = ggml_openvino_getenv_str("GGML_OPENVINO_CACHE_DIR");
     if (device_name == "NPU") {

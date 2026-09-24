@@ -1,8 +1,8 @@
 #include "utils.h"
 
 #include "ggml-impl.h"
-#include "ggml-openvino.h"
 #include "ggml-openvino-extra.h"
+#include "ggml-openvino.h"
 #include "ggml-openvino/ggml-decoder.h"
 #include "ggml.h"
 #include "model-cache.h"
@@ -18,7 +18,6 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
-#include <future>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -171,8 +170,11 @@ static std::map<std::string, std::shared_ptr<ov::Node>> get_weight_names(ggml_cg
 // miss. Include topology, layouts, op parameters, constant extra inputs and weight
 // allocation identities. Never use a sampled weight hash or a graph name alone:
 // different models can have identical topology. OV buffer IDs survive address reuse.
-static std::string compiled_graph_key(const ggml_cgraph * graph, const GgmlOvDecoder & decoder,
-                                      const std::string & device, int prefill_chunk_size = 0) {
+static std::string compiled_graph_key(const ggml_cgraph * graph,
+                                      const GgmlOvDecoder & decoder,
+                                      const std::string & device,
+                                      int prefill_chunk_size = 0,
+                                      bool disk_cache = false) {
     std::string key;
     auto append = [&key](const auto & value) {
         key.append(reinterpret_cast<const char *>(&value), sizeof(value));
@@ -208,7 +210,7 @@ static std::string compiled_graph_key(const ggml_cgraph * graph, const GgmlOvDec
         const auto * base = tensor->view_src ? tensor->view_src : tensor;
         const bool weight = base->buffer && base->buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS;
         append(weight);
-        if (weight) {
+        if (weight && !disk_cache) {
             const size_t buffer_id = ggml_backend_openvino_buffer_get_ctx_id(base->buffer);
             has_weight_buffer_id |= buffer_id != 0;
             append(buffer_id);
@@ -241,7 +243,98 @@ static std::string compiled_graph_key(const ggml_cgraph * graph, const GgmlOvDec
     }
     // Without an allocation generation, pointer reuse could select stale weights.
     // Such graphs still get private requests; they simply do not share compilation.
-    return has_weight_buffer_id ? key : std::string{};
+    return disk_cache || has_weight_buffer_id ? key : std::string{};
+}
+
+static std::string dynamic_graph_signature(const ggml_cgraph * graph,
+                                           const GgmlOvDecoder & decoder,
+                                           const ModelParams & params) {
+    std::string key = "dynamic-1";
+    auto append = [&key](const auto & value) {
+        key.append(reinterpret_cast<const char *>(&value), sizeof(value));
+    };
+    auto append_string = [&](const std::string & value) {
+        append(value.size());
+        key.append(value);
+    };
+    graph_key graph_id(graph, true);
+    append(graph_id.n_nodes);
+    append_string(graph_id.first_node_name);
+    append_string(graph_id.last_node_name);
+    for (const auto & name : graph_id.input_src_names) {
+        append_string(name);
+    }
+    append(params.n_rs_slots);
+    append(params.has_rs_rollback);
+    append(params.mixed_rope_params);
+    append(params.is_cacheless_attn);
+    for (int layer : params.swa_layers) {
+        append(layer);
+    }
+    for (const auto & [layer, heads] : params.n_heads_kv_per_layer) {
+        append(layer);
+        append(heads);
+    }
+    for (const auto & [name, input] : decoder.get_model_inputs()) {
+        append_string(name);
+        append_string(input.type.get_type_name());
+    }
+    for (const auto & [name, tensor] : decoder.get_model_outputs()) {
+        append_string(name);
+        append(tensor->type);
+    }
+    for (const auto & [name, input] : decoder.get_model_extra_inputs()) {
+        append_string(name);
+        append_string(input.type.get_type_name());
+        append(input.is_parameter);
+        if (!input.is_parameter) {
+            append(input.value);
+        }
+    }
+    return key;
+}
+
+static bool compiled_model_matches_graph(const ov::CompiledModel & model,
+                                         const std::vector<std::string> & inputs,
+                                         const std::vector<std::string> & outputs,
+                                         const GgmlOvDecoder & decoder) {
+    if (model.inputs().size() != inputs.size() || model.outputs().size() != outputs.size()) {
+        return false;
+    }
+    const auto & graph_inputs = decoder.get_model_inputs();
+    const auto & extra_inputs = decoder.get_model_extra_inputs();
+    const auto & graph_outputs = decoder.get_model_outputs();
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        const auto & port = model.input(i);
+        auto graph_it = graph_inputs.find(inputs[i]);
+        if (graph_it != graph_inputs.end()) {
+            if (port.get_element_type() != graph_it->second.type ||
+                !port.get_partial_shape().compatible(graph_it->second.shape)) {
+                return false;
+            }
+            continue;
+        }
+        auto extra_it = extra_inputs.find(inputs[i]);
+        if (extra_it == extra_inputs.end() || port.get_element_type() != extra_it->second.type ||
+            !port.get_partial_shape().compatible(ov::PartialShape(extra_it->second.shape))) {
+            return false;
+        }
+    }
+    for (size_t i = 0; i < outputs.size(); ++i) {
+        auto graph_it = graph_outputs.find(outputs[i]);
+        if (graph_it == graph_outputs.end()) {
+            if (outputs[i].compare(0, 8, "__debug_") != 0) {
+                return false;
+            }
+            continue;
+        }
+        const auto & port = model.output(i);
+        if (port.get_element_type() != GgmlOvDecoder::get_ov_type(graph_it->second) ||
+            !port.get_partial_shape().compatible(ov::PartialShape(GgmlOvDecoder::get_shape(graph_it->second)))) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static std::string ov_profiling_csv_field(const std::string & value) {
@@ -412,6 +505,10 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
     bool model_is_splitted = key_seen ? false : is_model_splitted(cgraph);
     const int64_t model_split_check_time = ggml_time_us() - model_split_check_start_time;
 
+    if (ggml_openvino_model_cache_only() && (model_is_splitted || is_naive(cgraph))) {
+        GGML_LOG_ERROR("ggml-openvino: cache-only mode requires a complete model graph\n");
+        return GGML_STATUS_FAILED;
+    }
     if (is_naive(cgraph)) {
         if (!model_is_splitted) {
             return naive_compute(cgraph, core, device, config, *r_ctx->compiled_cache);
@@ -607,64 +704,83 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
             auto weight_names = get_weight_names(cgraph);
             ggml_decoder = std::make_shared<GgmlOvDecoder>(cgraph, m_params, c_params, weight_names,
                                                           is_static, r_ctx->stateful, model_is_splitted);
-            const std::string shared_key = cache_enabled ? compiled_graph_key(cgraph, *ggml_decoder, device) : "";
+            const std::string model_cache_dir = ggml_openvino_model_cache_dir();
+            const std::string exact_key = cache_enabled ? compiled_graph_key(cgraph, *ggml_decoder, device) : "";
+            uint64_t model_fp = 0;
+            uint64_t exact_fp = 0;
+            std::string blob_path, manifest_path;
+            if (!model_cache_dir.empty() && !model_is_splitted) {
+                const uint64_t extra_cfg =
+                    ggml_openvino_model_cache_extra_cfg(device, r_ctx->stateful, stateful_recurrent);
+                model_fp =
+                    ggml_openvino_model_fingerprint(cgraph, device, /*fa=*/true, m_params.rope_params, 16, extra_cfg,
+                                                    dynamic_graph_signature(cgraph, *ggml_decoder, m_params));
+                exact_fp =
+                    ggml_openvino_model_fingerprint(cgraph, device, /*fa=*/true, m_params.rope_params, 16, extra_cfg,
+                                                    compiled_graph_key(cgraph, *ggml_decoder, device, 0, true));
+                blob_path = ggml_openvino_model_cache_blob_path(model_cache_dir, model_fp);
+                manifest_path = ggml_openvino_model_cache_manifest_path(model_cache_dir, model_fp);
+            }
+            std::string shared_key =
+                cache_enabled ? (model_fp ? "dynamic:" + std::to_string(model_fp) : exact_key) : "";
             ov::CompiledModel shared_model;
             bool imported = false;
             auto shared_it = shared_cache->graphs.find(shared_key);
-            if (!shared_key.empty() && shared_it != shared_cache->graphs.end()) {
+            if (!shared_key.empty() && shared_it != shared_cache->graphs.end() &&
+                (model_fp == 0 || compiled_model_matches_graph(shared_it->second.decode, shared_it->second.input_names,
+                                                               shared_it->second.output_names, *ggml_decoder))) {
                 shared_model = shared_it->second.decode;
                 infer_request = std::make_shared<ov::InferRequest>(shared_model.create_infer_request());
                 ov_input_names = shared_it->second.input_names;
                 ov_output_names = shared_it->second.output_names;
                 imported = true;
                 GGML_LOG_DEBUG("ggml-openvino: shared compiled model HIT (dynamic)\n");
-            }
-            // Fail fast: a cache-miss recompile feeds weight data to compile_model, but
-            // GGML_OPENVINO_RELEASE_WEIGHTS (or GGML_OPENVINO_MEMORY_OPTIMIZE on GPU)
-            // may have already dropped the host weight pages
-            // (they would read as zeros). That mode requires stable graph shapes.
-            if (!imported && ggml_openvino_weight_buffers_released()) {
-                GGML_ABORT(
-                    "ggml-openvino: a new graph needs to be compiled but host weight buffers were already "
-                    "released via GGML_OPENVINO_RELEASE_WEIGHTS/GGML_OPENVINO_MEMORY_OPTIMIZE. This mode requires "
-                    "stable graph shapes; disable host weight release for dynamic workloads.");
+            } else if (model_fp && shared_it != shared_cache->graphs.end()) {
+                shared_key = exact_key;
+                shared_it = shared_cache->graphs.find(shared_key);
+                if (shared_it != shared_cache->graphs.end()) {
+                    shared_model = shared_it->second.decode;
+                    infer_request = std::make_shared<ov::InferRequest>(shared_model.create_infer_request());
+                    ov_input_names = shared_it->second.input_names;
+                    ov_output_names = shared_it->second.output_names;
+                    imported = true;
+                }
+                model_fp = exact_fp;
+                blob_path = ggml_openvino_model_cache_blob_path(model_cache_dir, model_fp);
+                manifest_path = ggml_openvino_model_cache_manifest_path(model_cache_dir, model_fp);
             }
             if (cache_enabled) {
                 std::lock_guard<std::mutex> map_lock(r_ctx->ctx_mutex);
                 r_ctx->infer_request_cache.erase(key);
             }
 
-            // Frontend-level compiled-model cache (GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR): if this model
-            // was compiled before, import the saved blob and skip requant + convert +
-            // compile. Only the dynamic single-model path is cached (split models compile
-            // two graphs and are left to the plugin-level ov::cache_dir). The decoder is
-            // still needed for I/O mapping, but can be built without weight nodes since
-            // the weights are baked into the imported CompiledModel.
-            const std::string model_cache_dir = ggml_openvino_model_cache_dir();
-            uint64_t model_fp = 0;
-            std::string blob_path, manifest_path;
-            // When the frontend model cache is active it supersedes the plugin-level
-            // ov::cache_dir: a blob exported from a model compiled WITH cache_dir cannot
-            // be re-imported (import returns an uninitialized model). Strip cache_dir /
-            // cache_mode from the config used for the cached compile and the import.
+            // Import standalone blobs with weights before graph conversion and compilation.
+            // Split models use the plugin cache instead. The decoder still maps graph I/O.
             ov::AnyMap mc_config = config;
             if (!model_cache_dir.empty()) {
                 mc_config.erase("CACHE_DIR");
-                mc_config.erase("CACHE_MODE");
+                mc_config[ov::cache_mode.name()] = ov::CacheMode::OPTIMIZE_SPEED;
             }
             if (!imported && !model_cache_dir.empty() && !model_is_splitted) {
-                const uint64_t extra_cfg =
-                    ggml_openvino_model_cache_extra_cfg(device, r_ctx->stateful, stateful_recurrent);
-                model_fp = ggml_openvino_model_fingerprint(cgraph, device, /*fa=*/true, m_params.rope_params,
-                                                           16, extra_cfg);
-                blob_path = ggml_openvino_model_cache_blob_path(model_cache_dir, model_fp);
-                manifest_path = ggml_openvino_model_cache_manifest_path(model_cache_dir, model_fp);
-
-                std::ifstream blob_in(blob_path, std::ios::binary);
-                bool blob_ok = blob_in.is_open();
-                bool manifest_ok = blob_ok && ggml_openvino_model_cache_verify_manifest(manifest_path, cgraph, model_fp);
-                if (blob_ok && manifest_ok) {
-                    int64_t import_start = ggml_time_us();
+                const uint64_t preferred_fp = model_fp;
+                bool dynamic_incompatible = preferred_fp == exact_fp;
+                for (int candidate = 0; candidate < 2; ++candidate) {
+                    if (imported || (candidate == 1 && preferred_fp == exact_fp)) {
+                        break;
+                    }
+                    const uint64_t candidate_fp = candidate == 0 ? preferred_fp : exact_fp;
+                    const std::string candidate_blob =
+                        ggml_openvino_model_cache_blob_path(model_cache_dir, candidate_fp);
+                    const std::string candidate_manifest =
+                        ggml_openvino_model_cache_manifest_path(model_cache_dir, candidate_fp);
+                    std::ifstream blob_in(candidate_blob, std::ios::binary);
+                    std::vector<std::string> saved_inputs, saved_outputs;
+                    if (!blob_in.is_open() ||
+                        !ggml_openvino_model_cache_verify_manifest(candidate_manifest, cgraph, candidate_fp,
+                                                                   saved_inputs, saved_outputs)) {
+                        continue;
+                    }
+                    const int64_t import_start = ggml_time_us();
                     try {
                         ov::CompiledModel cm;
                         auto remote_context = ggml_openvino_get_remote_context();
@@ -673,43 +789,71 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
                         } else {
                             cm = core.import_model(blob_in, device, mc_config);
                         }
-                        // Lightweight decoder: names-only weight map (membership is all the
-                        // decoder needs; weights live in the imported model).
-                        std::map<std::string, std::shared_ptr<ov::Node>> weight_names;
-                        for (const auto & n : GgmlOvDecoder::collect_weight_names(cgraph)) {
-                            weight_names[n] = nullptr;
+                        // CPU serialization can rename Results that share a name with a Parameter.
+                        if (!saved_inputs.empty() || !saved_outputs.empty()) {
+                            ov_input_names = std::move(saved_inputs);
+                            ov_output_names = std::move(saved_outputs);
+                        } else {
+                            for (const auto & p : cm.inputs()) {
+                                ov_input_names.push_back(p.get_node()->get_friendly_name());
+                            }
+                            for (const auto & o : cm.outputs()) {
+                                ov_output_names.push_back(o.get_node()->get_friendly_name());
+                            }
                         }
-                        ggml_decoder = std::make_shared<GgmlOvDecoder>(cgraph, m_params, c_params, weight_names,
-                                                                       is_static, r_ctx->stateful, model_is_splitted);
+                        if (!compiled_model_matches_graph(cm, ov_input_names, ov_output_names, *ggml_decoder)) {
+                            dynamic_incompatible |= candidate == 0;
+                            ov_input_names.clear();
+                            ov_output_names.clear();
+                            continue;
+                        }
                         infer_request = std::make_shared<ov::InferRequest>(cm.create_infer_request());
                         shared_model = cm;
                         entry->ptr = ggml_decoder;
-                        // Names must match the decoder's ggml-tensor keys. The non-cached
-                        // path keys off Parameter/Result *friendly names* (set by the
-                        // frontend); export_model preserves these, and each compiled-model
-                        // port's node is exactly that Parameter/Result. Use the port nodes
-                        // directly (NOT get_runtime_model(), whose graph differs and is
-                        // unsafe to deref this way).
-                        for (const auto & p : cm.inputs()) {
-                            ov_input_names.push_back(p.get_node()->get_friendly_name());
-                        }
-                        for (const auto & o : cm.outputs()) {
-                            ov_output_names.push_back(o.get_node()->get_friendly_name());
-                        }
                         imported = true;
+                        model_fp = candidate_fp;
+                        blob_path = candidate_blob;
+                        manifest_path = candidate_manifest;
+                        if (candidate_fp == exact_fp) {
+                            shared_key = exact_key;
+                            shared_it = shared_cache->graphs.find(shared_key);
+                        }
                         if (ggml_openvino_getenv_int("GGML_OPENVINO_PROFILING")) {
                             GGML_LOG_INFO("  - Model cache import time: %.3f ms \n",
                                           (ggml_time_us() - import_start) / 1000.0);
                         }
-                        GGML_LOG_INFO("ggml-openvino: model cache HIT %s\n", blob_path.c_str());
+                        GGML_LOG_INFO("ggml-openvino: model cache HIT %s\n", candidate_blob.c_str());
                     } catch (const std::exception & e) {
-                        GGML_LOG_WARN("ggml-openvino: model cache import failed (%s), recompiling\n", e.what());
+                        GGML_LOG_WARN("ggml-openvino: model cache import failed: %s\n", e.what());
+                        dynamic_incompatible |= candidate == 0;
                         imported = false;
+                        ov_input_names.clear();
+                        ov_output_names.clear();
+                        infer_request.reset();
+                        shared_model = {};
                     }
+                }
+                if (!imported && dynamic_incompatible) {
+                    model_fp = exact_fp;
+                    shared_key = exact_key;
+                    shared_it = shared_cache->graphs.find(shared_key);
+                    blob_path = ggml_openvino_model_cache_blob_path(model_cache_dir, model_fp);
+                    manifest_path = ggml_openvino_model_cache_manifest_path(model_cache_dir, model_fp);
                 }
             }
 
             std::shared_ptr<ov::Model> model;
+            if (!imported && ggml_openvino_model_cache_only()) {
+                GGML_LOG_ERROR(
+                    "ggml-openvino: missing or incompatible compiled model: %s; run once without "
+                    "GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY\n",
+                    blob_path.c_str());
+                return GGML_STATUS_FAILED;
+            }
+            if (!imported && ggml_openvino_weight_buffers_released()) {
+                GGML_LOG_ERROR("ggml-openvino: cannot compile a new graph after releasing host weights\n");
+                return GGML_STATUS_FAILED;
+            }
             if (imported) {
                 decoder_end_time = conversion_end_time = compile_end_time = ggml_time_us();
             } else {
@@ -743,13 +887,21 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
                 }
                 compile_end_time = ggml_time_us();
 
+                for (const auto & ov_param : model->get_parameters()) {
+                    ov_input_names.push_back(ov_param->get_friendly_name());
+                }
+                for (const auto & ov_output : model->get_results()) {
+                    ov_output_names.push_back(ov_output->get_friendly_name());
+                }
+
                 // Export to the frontend model cache for next time. Publish the blob first,
                 // then the manifest, so a cache hit only sees fully written artifacts.
                 if (!model_cache_dir.empty() && !model_is_splitted && model_fp != 0) {
                     try {
-                        const std::string blob_tmp = blob_path + ".tmp";
-                        const std::string manifest_tmp = manifest_path + ".tmp";
-                        if (ggml_openvino_model_cache_write_manifest(manifest_tmp, cgraph, model_fp)) {
+                        const std::string blob_tmp = ggml_openvino_model_cache_temp_path(blob_path);
+                        const std::string manifest_tmp = ggml_openvino_model_cache_temp_path(manifest_path);
+                        if (ggml_openvino_model_cache_write_manifest(manifest_tmp, cgraph, model_fp, ov_input_names,
+                                                                     ov_output_names)) {
                             std::ofstream blob_out(blob_tmp, std::ios::binary | std::ios::trunc);
                             if (blob_out.is_open()) {
                                 compiled_model.export_model(blob_out);
@@ -779,12 +931,6 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, std::shared_ptr<
                 shared_model = compiled_model;
                 entry->ptr = ggml_decoder;
 
-                for (const auto & ov_param : model->get_parameters()) {
-                    ov_input_names.push_back(ov_param->get_friendly_name());
-                }
-                for (const auto & ov_output : model->get_results()) {
-                    ov_output_names.push_back(ov_output->get_friendly_name());
-                }
             }  // end non-imported (compile) path
 
             entry->ptr = ggml_decoder;

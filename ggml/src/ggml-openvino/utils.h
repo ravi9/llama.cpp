@@ -26,14 +26,14 @@ struct graph_key {
     std::string last_node_name;
     std::vector<std::string> input_src_names;
 
-    graph_key(const ggml_cgraph * cgraph) : n_nodes(cgraph->n_nodes) {
+    graph_key(const ggml_cgraph * cgraph, bool include_inputs = false) : n_nodes(cgraph->n_nodes) {
         if (n_nodes > 0) {
             first_node_name = cgraph->nodes[0]->name;
             last_node_name = cgraph->nodes[n_nodes - 1]->name;
         }
 
         static const bool full_key = ggml_openvino_getenv_int("GGML_OPENVINO_FULL_GRAPH_KEY") != 0;
-        if (!full_key) {
+        if (!full_key && !include_inputs) {
             return;
         }
 

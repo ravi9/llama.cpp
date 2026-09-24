@@ -8,6 +8,7 @@
 #include "ggml-openvino/utils.h"
 #include "ggml-quants.h"
 #include "ggml.h"
+#include "model-cache.h"
 
 #include <atomic>
 #include <cerrno>
@@ -72,8 +73,7 @@ struct ggml_backend_openvino_buffer_context {
     size_t size;
     bool is_remote;
 
-    // Set when the buffer is a file-backed spill mapping (GGML_OPENVINO_SPILL_DIR); it must be
-    // munmap'd rather than freed.
+    // File-backed spill or cache-only virtual memory.
     void * spill_mapping = nullptr;
     size_t spill_size = 0;
 
@@ -82,6 +82,8 @@ struct ggml_backend_openvino_buffer_context {
 
     // Track all extras for cleanup
     std::map<ggml_tensor *, ggml_openvino_extra_base *> tensor_extras;
+    std::map<const void *, uint64_t> weight_fingerprints;
+    std::vector<ggml_openvino_source_mapping> source_mappings;
 
     // Used for re-allocation on device for kvcache
     void * data_prev;
@@ -111,8 +113,25 @@ struct ggml_backend_openvino_buffer_context {
             data = usm_tensor.get();
             ov_buffer = std::make_shared<ov::intel_gpu::ocl::USMTensor>(std::move(usm_tensor));
         } else {
-#ifndef _WIN32
-            if (const char * spill_dir = ggml_openvino_getenv_str("GGML_OPENVINO_SPILL_DIR")) {
+#ifdef _WIN32
+            if (ggml_openvino_model_cache_only()) {
+                data = spill_mapping = VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+                if (data == nullptr) {
+                    return;
+                }
+                spill_size = size;
+                ov_buffer = std::make_shared<ov::Tensor>(ov::element::u8, ov::Shape{size}, data);
+            } else
+#else
+            if (ggml_openvino_model_cache_only()) {
+                void * m = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                if (m == MAP_FAILED) {
+                    return;
+                }
+                data = spill_mapping = m;
+                spill_size = size;
+                ov_buffer = std::make_shared<ov::Tensor>(ov::element::u8, ov::Shape{size}, data);
+            } else if (const char * spill_dir = ggml_openvino_getenv_str("GGML_OPENVINO_SPILL_DIR")) {
                 // Disk-backed weight buffer: back the repacked weights with a temp file via MAP_SHARED
                 // instead of anonymous memory. Anonymous pages can only be evicted to swap, so the
                 // repacked buffer stays pinned alongside the mmap'd source and both are resident at once
@@ -183,7 +202,11 @@ struct ggml_backend_openvino_buffer_context {
             delete pair.second;
         }
         tensor_extras.clear();
-#ifndef _WIN32
+#ifdef _WIN32
+        if (spill_mapping != nullptr) {
+            VirtualFree(spill_mapping, 0, MEM_RELEASE);
+        } else
+#else
         if (spill_mapping != nullptr) {
             munmap(spill_mapping, spill_size);
         } else
@@ -375,6 +398,17 @@ static void ggml_backend_openvino_buffer_set_tensor(ggml_backend_buffer_t buffer
     bool is_weight_buffer = (buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
     // Full tensor set: offset=0, full size, not a view
     bool is_full_tensor_set = (offset == 0 && size == ggml_nbytes(tensor) && tensor->view_src == nullptr);
+    if (is_weight_buffer && ggml_openvino_getenv_str("GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR")) {
+        if (is_full_tensor_set) {
+            ctx->weight_fingerprints[tensor->data] = ggml_openvino_source_fingerprint(data, size, ctx->source_mappings);
+        }
+        if (ggml_openvino_model_cache_only()) {
+            if (!is_full_tensor_set) {
+                GGML_ABORT("ggml-openvino: cache-only mode requires whole mmap weight uploads");
+            }
+            return;
+        }
+    }
     // 2D tensor (typical weight shape), or a 3D quantized MoE expert weight (MUL_MAT_ID). Dense 3D
     // expert weights are handled later in create_weight_node instead.
     bool is_2d = (tensor->ne[2] == 1 && tensor->ne[3] == 1);
@@ -477,6 +511,10 @@ static void ggml_backend_openvino_buffer_get_tensor(ggml_backend_buffer_t buffer
     // GGML_LOG_DEBUG("%s: buffer usage=%d, tensor name=%s\n", __func__, buffer->usage, tensor->name);
     GGML_ASSERT(tensor != nullptr && tensor->data != nullptr);
     ggml_backend_openvino_buffer_context * ctx = (ggml_backend_openvino_buffer_context *) buffer->context;
+
+    if (ggml_openvino_model_cache_only() && buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS) {
+        GGML_ABORT("ggml-openvino: cannot read unloaded weights in cache-only mode");
+    }
 
     if (ctx->is_remote) {
         // For remote (device) buffers, use OpenCL USM memcpy (device-to-host)
@@ -617,7 +655,7 @@ static size_t ggml_backend_openvino_buffer_type_get_alloc_size(ggml_backend_buff
     GGML_UNUSED(buft);
 
     // For quantized weight tensors, we need extra space for extracted data.
-    if (ggml_is_quantized(tensor->type) && tensor->ne[3] == 1) {
+    if (!ggml_openvino_model_cache_only() && ggml_is_quantized(tensor->type) && tensor->ne[3] == 1) {
         ggml_openvino_extracted_layout layout = ggml_openvino_get_extracted_layout(tensor);
         if (layout.total_size > 0) {
             // GGML_LOG_DEBUG("%s: tensor %s needs %zu bytes (original %zu, extracted: weights=%zu scales=%zu zp=%zu)\n",
@@ -766,6 +804,19 @@ bool ggml_backend_buft_is_openvino(ggml_backend_buffer_type_t buft) {
 
 bool ggml_backend_buft_is_openvino_host(ggml_backend_buffer_type_t buft) {
     return buft->iface.get_name == ggml_backend_openvino_host_buffer_type_get_name;
+}
+
+uint64_t ggml_backend_openvino_weight_fingerprint(const ggml_tensor * tensor) {
+    if (ggml_backend_buffer_is_openvino(tensor->buffer)) {
+        auto * ctx = static_cast<ggml_backend_openvino_buffer_context *>(tensor->buffer->context);
+        auto it = ctx->weight_fingerprints.find(tensor->data);
+        if (it != ctx->weight_fingerprints.end()) {
+            return it->second;
+        }
+        GGML_ABORT("ggml-openvino: missing source identity for weight %s", tensor->name);
+    }
+    std::vector<ggml_openvino_source_mapping> mappings;
+    return ggml_openvino_source_fingerprint(tensor->data, ggml_nbytes(tensor), mappings);
 }
 
 static void ggml_backend_openvino_free(ggml_backend_t backend) {
