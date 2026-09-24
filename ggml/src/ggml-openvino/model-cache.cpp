@@ -254,7 +254,7 @@ uint64_t ggml_openvino_source_fingerprint(const void * data, size_t size, std::v
         std::wstring name(MAX_PATH, L'\0');
         DWORD length = 0;
         while (name.size() <= 32768) {
-            length = GetMappedFileNameW(GetCurrentProcess(), data, name.data(), static_cast<DWORD>(name.size()));
+            length = GetMappedFileNameW(GetCurrentProcess(), const_cast<void *>(data), name.data(), static_cast<DWORD>(name.size()));
             if (length == 0 || length < name.size() - 1) {
                 break;
             }
