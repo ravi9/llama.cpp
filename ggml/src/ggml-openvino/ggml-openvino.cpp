@@ -333,6 +333,25 @@ static enum ggml_status ggml_backend_openvino_buffer_init_tensor(ggml_backend_bu
     if (tensor->view_src != nullptr) {
         GGML_ASSERT(tensor->view_src->buffer->buft == buffer->buft);
         if (tensor->view_src->extra != nullptr) {
+            // The cached ov::Tensor carries the shape it was built with, so sharing view_src's
+            // extra hands out the wrong shape for a reshaping view (e.g. Vcur reshaped from
+            // [n_embd, n_tokens] to [head_size, n_heads_kv, n_tokens]). When such a view is a
+            // graph input, binding it fails the shape check. Give it its own extra instead;
+            // ggml_openvino_create_tensor_extra reads ne and data off the view, so the offset is
+            // handled too. Only safe for a contiguous view - the ov::Tensor assumes dense strides.
+            if (!ggml_are_same_shape(tensor, tensor->view_src) && ggml_is_contiguous(tensor) &&
+                !ggml_is_quantized(tensor->type) && tensor->data != nullptr) {
+                if (ggml_openvino_tensor_extra * extra =
+                        ggml_openvino_create_tensor_extra(tensor, ctx->is_remote)) {
+                    auto it = ctx->tensor_extras.find(tensor);
+                    if (it != ctx->tensor_extras.end()) {
+                        delete it->second;
+                    }
+                    ctx->tensor_extras[tensor] = extra;
+                    tensor->extra = extra;
+                    return GGML_STATUS_SUCCESS;
+                }
+            }
             tensor->extra = tensor->view_src->extra;
         }
         return GGML_STATUS_SUCCESS;
@@ -1289,6 +1308,18 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         }
         break;
     }
+    case GGML_OP_SUM: {
+        if (op->src[0]->op == GGML_OP_PERMUTE) {
+            return {false, "SUM with PERMUTE input is not supported"};
+        }
+        break;
+    }
+    case GGML_OP_MEAN: {
+        if (op->src[0]->op == GGML_OP_PERMUTE && op->src[0]->src[0] != nullptr && op->src[0]->src[0]->op == GGML_OP_VIEW) {
+            return {false, "MEAN with PERMUTE of VIEW input is not supported"};
+        }
+        break;
+    }
     case GGML_OP_SUM_ROWS: {
         if (op->src[0]->op == GGML_OP_PERMUTE) {
             return {false, "SUM_ROWS with PERMUTE input is not supported"};
@@ -1407,42 +1438,8 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         break;
     }
     case GGML_OP_ROPE: {
-        const int32_t * op_params = op->op_params;
-        const int n_dims = op_params[1];
-        const int mode = op_params[2];
-        const int64_t n_offs = op_params[15];
-        if (mode != GGML_ROPE_TYPE_NORMAL && mode != GGML_ROPE_TYPE_NEOX && mode != GGML_ROPE_TYPE_IMROPE) {
-            return {false, "ROPE with mode " + std::to_string(mode) + " is not supported"};
-        }
-        if (n_offs < 0 || (n_offs % 2) != 0) {
-            return {false, "ROPE with invalid n_offs=" + std::to_string(n_offs)};
-        }
-        const int64_t head_dim = op->src[0]->ne[0];
-        const int64_t rope_dims = n_dims == 0 ? head_dim : n_dims;
-        if (rope_dims <= 0 || rope_dims + n_offs > head_dim || (rope_dims % 2) != 0) {
-            return {false, "ROPE with n_dims=" + std::to_string(n_dims) + ", n_offs=" + std::to_string(n_offs) +
-                           ", head_dim=" + std::to_string(head_dim) + " is not supported"};
-        }
-        if (op->type != GGML_TYPE_F32 && op->type != GGML_TYPE_F16) {
-            return {false, "ROPE with type " + std::string(ggml_type_name(op->type)) + " is not supported"};
-        }
         if (op->view_src != nullptr && !ggml_is_contiguous(op->src[0])) {
             return {false, "ROPE on VIEW / non-contiguous input is not supported"};
-        }
-        if (op->src[0]->ne[3] > 1) {
-            // translate_rope's cos/sin tables cover one sequence only; ne[3] > 1 fails to broadcast.
-            return {false, "ROPE with multiple sequences (ne[3]=" + std::to_string(op->src[0]->ne[3]) +
-                           ") is not supported"};
-        }
-        float freq_scale;
-        float ext_factor;
-        float attn_factor;
-        memcpy(&freq_scale,  op_params + 6, sizeof(float));
-        memcpy(&ext_factor,  op_params + 7, sizeof(float));
-        memcpy(&attn_factor, op_params + 8, sizeof(float));
-        if (mode == GGML_ROPE_TYPE_IMROPE &&
-            (op->src[2] != nullptr || freq_scale != 1.0f || ext_factor != 0.0f || attn_factor != 1.0f)) {
-            return {false, "IMROPE with freq_factors, freq_scale, ext_factor, or attn_factor is not supported"};
         }
         break;
     }
@@ -1550,8 +1547,9 @@ static ggml_openvino_op_support ggml_backend_openvino_device_supports_op_impl(gg
         if (!supported) {
             return {false, "unary op " + std::string(ggml_unary_op_name(ggml_get_unary_op(op))) + " has no op translator"};
         }
-        if (ggml_get_unary_op(op) == GGML_UNARY_OP_EXP && op->type == GGML_TYPE_F32) {
-            return {false, "UNARY_EXP with F32 type is not supported"};
+        if (op->type == GGML_TYPE_F32 && (ggml_get_unary_op(op) == GGML_UNARY_OP_EXP ||
+                                          ggml_get_unary_op(op) == GGML_UNARY_OP_EXPM1)) {
+            return {false, "UNARY_EXP / UNARY_EXPM1 with F32 type is not supported"};
         }
         break;
     }
