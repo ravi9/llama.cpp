@@ -1,5 +1,6 @@
 #include "ggml-decoder.h"
 #include "ggml-impl.h"
+#include "ggml-openvino-extra.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -10,21 +11,30 @@
 #include <openvino/runtime/infer_request.hpp>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
-// Local execution-cache key. A match still needs the ModelParams compatibility
-// check; this key alone does not identify weights or a compiled model.
+// Cache key for a translated/compiled graph. Node count plus the two end node names identify a
+// graph during inference, where the same few graphs repeat for the whole session. The list of
+// external input names below tells those apart more precisely, but it walks every node and every
+// src slot, so it is built only when GGML_OPENVINO_FULL_GRAPH_KEY is set. Op tests run many small
+// graphs that can share a node count and end names, and need the full key.
 struct graph_key {
     int n_nodes;
     std::string first_node_name;
     std::string last_node_name;
     std::vector<std::string> input_src_names;
 
-    graph_key(const ggml_cgraph * cgraph) : n_nodes(cgraph->n_nodes) {
+    graph_key(const ggml_cgraph * cgraph, bool include_inputs = false) : n_nodes(cgraph->n_nodes) {
         if (n_nodes > 0) {
             first_node_name = cgraph->nodes[0]->name;
             last_node_name = cgraph->nodes[n_nodes - 1]->name;
+        }
+
+        static const bool full_key = ggml_openvino_getenv_int("GGML_OPENVINO_FULL_GRAPH_KEY") != 0;
+        if (!full_key && !include_inputs) {
+            return;
         }
 
         std::unordered_map<const ggml_tensor *, std::string> names;
@@ -36,10 +46,13 @@ struct graph_key {
             return it->second;
         };
 
-        std::vector<std::string> node_names;
+        // A set, not a vector: the lookup below runs once per node per src slot, so a linear scan
+        // makes this key O(n_nodes^2). The key is rebuilt on every graph_compute call, which on a
+        // 41-layer model costs several ms per token.
+        std::unordered_set<std::string> node_names;
         node_names.reserve(cgraph->n_nodes);
         for (int node_idx = 0; node_idx < cgraph->n_nodes; node_idx++) {
-            node_names.emplace_back(cgraph->nodes[node_idx]->name);
+            node_names.emplace(cgraph->nodes[node_idx]->name);
         }
 
         for (int node_idx = 0; node_idx < cgraph->n_nodes; node_idx++) {
@@ -51,7 +64,7 @@ struct graph_key {
                 }
 
                 const std::string src_name = get_input_key_name(cgraph, src);
-                if (std::find(node_names.begin(), node_names.end(), src_name) != node_names.end()) {
+                if (node_names.count(src_name) != 0) {
                     continue;
                 }
                 if (src_name.find("weight") != std::string::npos) {

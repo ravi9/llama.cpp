@@ -2,6 +2,7 @@
 
 #include "ggml-impl.h"
 #include "ggml.h"
+#include "model-cache.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -34,6 +35,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_SPILL_DIR",
         "GGML_OPENVINO_DEBUG_NODE",
         "GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR",
+        "GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY",
         "GGML_OPENVINO_NPU_COMPILE_CONFIG",
         // Integer values (use ggml_openvino_getenv_int)
         "GGML_OPENVINO_PREFILL_CHUNK_SIZE",
@@ -53,6 +55,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_DISABLE_KV_SLICE",
         "GGML_OPENVINO_ENABLE_FALLBACK",
         "GGML_OPENVINO_MANUAL_GQA_ATTN",
+        "GGML_OPENVINO_MOE_OP",
         "GGML_OPENVINO_MEMORY_OPTIMIZE",
         "GGML_OPENVINO_RELEASE_WEIGHTS",
         "GGML_OPENVINO_REDUCE_COMPILE_MEM",
@@ -62,6 +65,8 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_DISABLE_REMOTE_OUTPUTS",
         "GGML_OPENVINO_REQUANT_KQUANT",
         "GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT",
+        // Build the precise (but O(n_nodes)) graph cache key. Needed by op tests.
+        "GGML_OPENVINO_FULL_GRAPH_KEY",
     };
 
     for (const char * const & env_var : env_var_names) {
@@ -78,6 +83,8 @@ void ggml_openvino_device_config::init() {
         device_name = "CPU";
     }
     is_npu = (device_name == "NPU");
+
+    ggml_openvino_model_cache_init();
 
     const char * cache_dir = ggml_openvino_getenv_str("GGML_OPENVINO_CACHE_DIR");
     if (device_name == "NPU") {
@@ -106,6 +113,10 @@ void ggml_openvino_device_config::init() {
         compile_config.insert(ov::cache_mode(ov::CacheMode::OPTIMIZE_SIZE));
     }
 
+    if (ggml_openvino_getenv_int("GGML_OPENVINO_PROFILING") >= 2) {
+        compile_config.insert(ov::enable_profiling(true));
+    }
+
     // Initialize remote context with queue sharing for GPU
     if (device_name == "GPU") {
         // Create OpenCL context and queue
@@ -124,13 +135,30 @@ void ggml_openvino_device_config::init() {
             return;
         }
 
+        cl_ulong device_max_alloc = 0;
+        err = clGetDeviceInfo(cl_device, CL_DEVICE_MAX_MEM_ALLOC_SIZE, sizeof(device_max_alloc), &device_max_alloc,
+                              nullptr);
+        if (err == CL_SUCCESS) {
+            max_alloc_size = device_max_alloc;
+        } else {
+            // not fatal, ggml then allocates one buffer
+            GGML_LOG_WARN("Failed to get OpenCL max allocation size: %d\n", err);
+        }
+
         cl_context cl_ctx = clCreateContext(nullptr, 1, &cl_device, nullptr, nullptr, &err);
         if (err != CL_SUCCESS) {
             GGML_LOG_ERROR("Failed to create OpenCL context: %d\n", err);
             return;
         }
 
-        cl_queue = clCreateCommandQueueWithProperties(cl_ctx, cl_device, nullptr, &err);
+        const cl_queue_properties profiling_properties[] = {
+            CL_QUEUE_PROPERTIES,
+            CL_QUEUE_PROFILING_ENABLE,
+            0,
+        };
+        const cl_queue_properties * queue_properties =
+            ggml_openvino_getenv_int("GGML_OPENVINO_PROFILING") >= 2 ? profiling_properties : nullptr;
+        cl_queue = clCreateCommandQueueWithProperties(cl_ctx, cl_device, queue_properties, &err);
         if (err != CL_SUCCESS) {
             GGML_LOG_ERROR("Failed to create OpenCL command queue: %d\n", err);
             clReleaseContext(cl_ctx);
@@ -211,6 +239,10 @@ bool ggml_openvino_is_npu() {
     return ggml_openvino_get_device_config().is_npu;
 }
 
+size_t ggml_openvino_max_alloc_size() {
+    return ggml_openvino_get_device_config().max_alloc_size;
+}
+
 // Get the remote context for the current device (returns empty optional for CPU)
 std::optional<ov::RemoteContext> ggml_openvino_get_remote_context() {
     return ggml_openvino_get_device_config().remote_context;
@@ -280,14 +312,11 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
     // Q6_K/Q5_K are touched):
     //   q4_sym128      Q6_K/Q5_K -> Q4_0_128 (u4, group 128, symmetric)
     //   q4_sym128_all  and Q4_K too -- drops Q4_K's per-32 zero point, which costs some accuracy
-    //   q4_asym64_all  Q6_K/Q5_K and Q4_K -> Q4_1_64 (u4, group 64, asymmetric) -- most of the
-    //                  metadata saving while keeping a real zero point
+    //   q4_asym64      Q6_K/Q5_K -> Q4_1_64 (u4, group 64, asymmetric)
+    //   q4_asym64_all  Q6_K/Q5_K and Q4_K -> Q4_1_64 (u4, group 64, asymmetric)
     //   native         no requantization at all (keep Q6_K/Q5_K as they are)
     //
-    // The asymmetric target is only offered in its _all form: leaving Q4_K at its native group 32
-    // while Q6_K/Q5_K move to group 64 gives the Q/K/V projections different group counts, and the
-    // GPU plugin's FullyConnectedHorizontalFusion concatenates their scale constants, which then
-    // fails shape inference. Requantizing all three keeps the group size uniform.
+    // q4_asym64 leaves Q4_K at its native group 32. Use q4_asym64_all to keep the group size uniform.
     const char * rq = ggml_openvino_getenv_str("GGML_OPENVINO_REQUANT_KQUANT");
     auto is_opt = [rq](const char * name) {
         return rq && strcmp(rq, name) == 0;
@@ -295,6 +324,7 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
     const bool sym128 = is_opt("q4_sym128");
     const bool sym128_all = is_opt("q4_sym128_all");
     const bool asym64_all = is_opt("q4_asym64_all");
+    const bool asym64 = is_opt("q4_asym64");
 
     if (tensor->type == GGML_TYPE_Q4_K) {
         if (sym128_all) {
@@ -313,7 +343,7 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
         if (sym128 || sym128_all) {
             return ExtraQuantType::Q4_0_64;
         }
-        if (asym64_all) {
+        if (asym64 || asym64_all) {
             return ExtraQuantType::Q4_1_64;
         }
         // TODO: temporary workaround for a known OpenVINO GPU-plugin bug -- remove once the
@@ -338,7 +368,7 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
         if (sym128 || sym128_all) {
             return ExtraQuantType::Q4_0_128;
         }
-        if (asym64_all) {
+        if (asym64 || asym64_all) {
             return ExtraQuantType::Q4_1_64;
         }
         if (is_opt("native")) {

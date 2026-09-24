@@ -13,6 +13,10 @@ ggml_add_backend_library(ggml-openvino
 
 target_link_libraries(ggml-openvino PRIVATE openvino::runtime openvino::threading OpenCL::OpenCL)
 
+if (WIN32)
+    target_link_libraries(ggml-openvino PRIVATE psapi)
+endif()
+
 if (GGML_OPENVINO)
     if (CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
     elseif (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "amd64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "AMD64")
