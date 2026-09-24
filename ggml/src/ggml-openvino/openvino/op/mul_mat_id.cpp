@@ -157,6 +157,13 @@ OutputVector translate_mul_mat_id(const NodeContext & context) {
     auto activations = process_view_input_new(context, 1);
     auto ids = process_view_input_new(context, 2);
 
+    if (activations.get_partial_shape().rank() == 3) {
+        activations = std::make_shared<ov::op::v0::Unsqueeze>(activations, const_i64({0}));
+    }
+    if (ids.get_partial_shape().rank() == 3) {
+        ids = std::make_shared<ov::op::v0::Unsqueeze>(ids, const_i64({0}));
+    }
+
     if (expert_weights.get_element_type() == ov::element::u8 && expert_weights.get_partial_shape().rank().is_static() &&
         expert_weights.get_partial_shape().rank().get_length() == 5) {
         return rename_outputs_with_suffix({translate_mul_mat_id_mxfp4_packed(context, expert_weights, activations, ids)},
