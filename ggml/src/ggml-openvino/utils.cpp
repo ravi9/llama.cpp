@@ -224,9 +224,10 @@ static std::string dynamic_graph_signature(const ggml_cgraph * graph,
     };
     graph_key graph_id(graph, true);
     append(graph_id.n_nodes);
+    append(graph_id.n_leaves);
     append_string(graph_id.first_node_name);
     append_string(graph_id.last_node_name);
-    for (const auto & name : graph_id.input_src_names) {
+    for (const auto & name : graph_id.input_srcs) {
         append_string(name);
     }
     append(params.n_rs_slots);
