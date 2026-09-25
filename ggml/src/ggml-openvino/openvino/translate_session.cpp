@@ -492,6 +492,10 @@ std::shared_ptr<Model> TranslateSession::apply_transformations(std::shared_ptr<M
             ggml_openvino_getenv_int("GGML_OPENVINO_MOE_OP", 1) != 0) {
             manager.register_pass<pass::FuseMoeRouter>();
             manager.register_pass<pass::FuseMoeCompressed>();
+            // Same fusion for models whose gate and up projections share one fused expert
+            // weight (gemma-4). It only matches that shape and only when the experts carry an
+            // integer zero point, so it is a no-op on the separate-gate/up models above.
+            manager.register_pass<pass::FuseMoeCompressedFusedGateUp>();
         }
 
         if (ggml_model_decoder->is_stateful()) {
