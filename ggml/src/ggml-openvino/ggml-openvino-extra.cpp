@@ -10,6 +10,7 @@
 #include <openvino/runtime/intel_gpu/ocl/ocl.hpp>
 #include <openvino/runtime/intel_npu/level_zero/level_zero.hpp>
 #include <openvino/runtime/properties.hpp>
+#include <mutex>
 #include <optional>
 
 ov::Core & ov_singleton_core() {
@@ -43,18 +44,48 @@ static std::vector<std::string> ov_enumerate_devices() {
     return result;
 }
 
+std::string ggml_openvino_get_device_description(const std::string & device_name) {
+    std::string description = device_name;
+    try {
+        description = ov_singleton_core().get_property(device_name, ov::device::full_name);
+    } catch (...) {
+        return device_name;
+    }
+
+    if (has_prefix(device_name, "NPU")) {
+        try {
+            const std::string arch = ov_singleton_core().get_property(device_name, "DEVICE_ARCHITECTURE").as<std::string>();
+            if (!arch.empty()) {
+                description += " (NPU " + arch + ")";
+            }
+        } catch (...) {
+        }
+    }
+
+    return description;
+}
+
+// requested: GGML_OPENVINO_DEVICE, nullptr if unset. available_devices is never empty (see ov_enumerate_devices)
 static std::string resolve_openvino_device_name(const std::vector<std::string> & available_devices,
-                                                const std::string & requested) {
-    if (available_devices.empty()) {
-        return "CPU";
+                                                const char * requested) {
+    auto available = [&](const std::string & name) {
+        return std::find(available_devices.begin(), available_devices.end(), name) != available_devices.end();
+    };
+    if (requested == nullptr) {
+        return available("CPU") ? "CPU" : available_devices.front();
     }
-
-    auto it = std::find(available_devices.begin(), available_devices.end(), requested);
-    if (it != available_devices.end()) {
-        return *it;
+    if (!available(requested)) {
+        // No fallback to CPU (easy to miss) and no GPU -> GPU.0 alias (with iGPU + dGPU, GPU.0 is often the
+        // wrong one). List the devices here: --list-devices initializes this backend and would abort too.
+        std::string list;
+        for (const std::string & name : available_devices) {
+            list += "\n  " + name + ": " + ggml_openvino_get_device_description(name);
+        }
+        GGML_ABORT("GGML OpenVINO Backend: GGML_OPENVINO_DEVICE=%s is not available. "
+                   "Set it to one of the available OpenVINO devices:%s",
+                   requested, list.c_str());
     }
-
-    return "CPU";
+    return requested;
 }
 
 // =====================================================
@@ -62,9 +93,13 @@ static std::string resolve_openvino_device_name(const std::vector<std::string> &
 // =====================================================
 
 void ggml_openvino_device_config::init() {
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
     if (initialized) {
         return;
     }
+    // Set up front: a failed OpenCL setup below is not retried on every call
+    initialized = true;
 
     // All recognized GGML_OPENVINO_* env vars. Their values are cached here
     // once at backend init time and read back via ggml_openvino_getenv_str()
@@ -117,13 +152,8 @@ void ggml_openvino_device_config::init() {
         }
     }
 
-    const std::string requested_device = ggml_openvino_getenv_str("GGML_OPENVINO_DEVICE", "CPU");
     available_devices = ov_enumerate_devices();
-    device_name = resolve_openvino_device_name(available_devices, requested_device);
-    if (device_name != requested_device) {
-        GGML_LOG_WARN("GGML OpenVINO Backend: device %s is not available, fallback to %s\n", requested_device.c_str(),
-                      device_name.c_str());
-    }
+    device_name = resolve_openvino_device_name(available_devices, ggml_openvino_getenv_str("GGML_OPENVINO_DEVICE"));
     is_npu = has_prefix(device_name, "NPU");
 
     ggml_openvino_model_cache_init();
@@ -161,17 +191,19 @@ void ggml_openvino_device_config::init() {
 
     // Initialize remote context with queue sharing for GPU
     if (has_prefix(device_name, "GPU")) {
-        // Create OpenCL context and queue
-        cl_int err;
-        cl_platform_id platform;
-        err = clGetPlatformIDs(1, &platform, nullptr);
-        if (err != CL_SUCCESS) {
-            GGML_LOG_ERROR("Failed to get OpenCL platform: %d\n", err);
+        // Use the OpenCL context OpenVINO created for this device, so GPU.N gets its own device
+        cl_context cl_ctx;
+        try {
+            auto ov_ctx = ov_singleton_core().get_default_context(device_name).as<ov::intel_gpu::ocl::ClContext>();
+            cl_ctx = ov_ctx.get();
+        } catch (const std::exception & e) {
+            GGML_LOG_ERROR("Failed to get OpenCL context for %s: %s\n", device_name.c_str(), e.what());
             return;
         }
 
+        cl_int err;
         cl_device_id cl_device;
-        err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &cl_device, nullptr);
+        err = clGetContextInfo(cl_ctx, CL_CONTEXT_DEVICES, sizeof(cl_device), &cl_device, nullptr);
         if (err != CL_SUCCESS) {
             GGML_LOG_ERROR("Failed to get OpenCL device: %d\n", err);
             return;
@@ -187,12 +219,6 @@ void ggml_openvino_device_config::init() {
             GGML_LOG_WARN("Failed to get OpenCL max allocation size: %d\n", err);
         }
 
-        cl_context cl_ctx = clCreateContext(nullptr, 1, &cl_device, nullptr, nullptr, &err);
-        if (err != CL_SUCCESS) {
-            GGML_LOG_ERROR("Failed to create OpenCL context: %d\n", err);
-            return;
-        }
-
         const cl_queue_properties profiling_properties[] = {
             CL_QUEUE_PROPERTIES,
             CL_QUEUE_PROFILING_ENABLE,
@@ -203,21 +229,15 @@ void ggml_openvino_device_config::init() {
         cl_queue = clCreateCommandQueueWithProperties(cl_ctx, cl_device, queue_properties, &err);
         if (err != CL_SUCCESS) {
             GGML_LOG_ERROR("Failed to create OpenCL command queue: %d\n", err);
-            clReleaseContext(cl_ctx);
             return;
         }
 
         // Create OpenVINO remote context with queue sharing
         remote_context = ov::intel_gpu::ocl::ClContext(ov_singleton_core(), cl_queue);
-
-        // Release the context (queue keeps a reference)
-        clReleaseContext(cl_ctx);
     } else if (has_prefix(device_name, "NPU")) {
         // remote tensor is not used for NPU yet
         // remote_context = ov_singleton_core().get_default_context(device_name);
     }
-
-    initialized = true;
 }
 
 ggml_openvino_device_config::~ggml_openvino_device_config() {
@@ -274,17 +294,21 @@ bool ggml_openvino_reduce_compile_mem_enabled() {
     return ggml_openvino_getenv_int("GGML_OPENVINO_MEMORY_OPTIMIZE") != 0;
 }
 
-bool ggml_openvino_release_weights_enabled(const std::string & device) {
+bool ggml_openvino_release_weights_enabled() {
     const char * release_weights = ggml_openvino_getenv_str("GGML_OPENVINO_RELEASE_WEIGHTS");
     if (release_weights != nullptr) {
-        return device == "GPU" && ggml_openvino_getenv_int("GGML_OPENVINO_RELEASE_WEIGHTS") != 0;
+        return ggml_openvino_is_gpu() && ggml_openvino_getenv_int("GGML_OPENVINO_RELEASE_WEIGHTS") != 0;
     }
-    return device == "GPU" && ggml_openvino_getenv_int("GGML_OPENVINO_MEMORY_OPTIMIZE") != 0;
+    return ggml_openvino_is_gpu() && ggml_openvino_getenv_int("GGML_OPENVINO_MEMORY_OPTIMIZE") != 0;
 }
 
 // Check if running on NPU
 bool ggml_openvino_is_npu() {
     return ggml_openvino_get_device_config().is_npu;
+}
+
+bool ggml_openvino_is_gpu() {
+    return has_prefix(ggml_openvino_get_device_name(), "GPU");
 }
 
 size_t ggml_openvino_max_alloc_size() {
@@ -406,7 +430,7 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
         // already requantize to per-channel Q8_0_C (grouped=0). Sending these to grouped 4 bit
         // avoids the broken layout and restores correct output.
         // Opt out with GGML_OPENVINO_REQUANT_KQUANT=native.
-        if (ggml_openvino_get_device_name() == "GPU" && !is_opt("native")) {
+        if (ggml_openvino_is_gpu() && !is_opt("native")) {
             return ExtraQuantType::Q4_0_64;
         }
     }
@@ -638,12 +662,11 @@ ggml_openvino_tensor_extra * ggml_openvino_create_tensor_extra(const ggml_tensor
         return nullptr;
     }
 
-    const auto & device_name = ggml_openvino_get_device_name();
     auto remote_context = ggml_openvino_get_remote_context();
 
     std::shared_ptr<ov::Tensor> ov_tensor;
     if (is_remote) {
-        GGML_ASSERT(device_name == "GPU");
+        GGML_ASSERT(ggml_openvino_is_gpu());
         auto gpu_context = remote_context->as<ov::intel_gpu::ocl::ClContext>();
         auto usm_tensor = gpu_context.create_tensor(element_type, shape, tensor->data);
         ov_tensor = std::make_shared<ov::intel_gpu::ocl::USMTensor>(std::move(usm_tensor));
