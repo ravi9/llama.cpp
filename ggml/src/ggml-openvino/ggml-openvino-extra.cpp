@@ -197,23 +197,22 @@ void ggml_openvino_device_config::init() {
             auto ov_ctx = ov_singleton_core().get_default_context(device_name).as<ov::intel_gpu::ocl::ClContext>();
             cl_ctx = ov_ctx.get();
         } catch (const std::exception & e) {
-            GGML_LOG_ERROR("Failed to get OpenCL context for %s: %s\n", device_name.c_str(), e.what());
-            return;
+            // The consumers of the remote context have no host fallback, and OpenVINO
+            // already reported the device as present.
+            GGML_ABORT("ggml-openvino: failed to get the OpenCL context for %s: %s", device_name.c_str(), e.what());
         }
 
         cl_int err;
         cl_device_id cl_device;
         err = clGetContextInfo(cl_ctx, CL_CONTEXT_DEVICES, sizeof(cl_device), &cl_device, nullptr);
         if (err != CL_SUCCESS) {
-            GGML_LOG_ERROR("Failed to get OpenCL device: %d\n", err);
-            return;
+            GGML_ABORT("ggml-openvino: failed to get the OpenCL device for %s: %d", device_name.c_str(), err);
         }
 
         cl_platform_id cl_platform;
         err = clGetDeviceInfo(cl_device, CL_DEVICE_PLATFORM, sizeof(cl_platform), &cl_platform, nullptr);
         if (err != CL_SUCCESS) {
-            GGML_LOG_ERROR("Failed to get OpenCL platform: %d\n", err);
-            return;
+            GGML_ABORT("ggml-openvino: failed to get the OpenCL platform for %s: %d", device_name.c_str(), err);
         }
 
         cl_mem_fill_fn =
@@ -240,8 +239,7 @@ void ggml_openvino_device_config::init() {
             ggml_openvino_getenv_int("GGML_OPENVINO_PROFILING") >= 2 ? profiling_properties : nullptr;
         cl_queue = clCreateCommandQueueWithProperties(cl_ctx, cl_device, queue_properties, &err);
         if (err != CL_SUCCESS) {
-            GGML_LOG_ERROR("Failed to create OpenCL command queue: %d\n", err);
-            return;
+            GGML_ABORT("ggml-openvino: failed to create the OpenCL queue for %s: %d", device_name.c_str(), err);
         }
 
         // Create OpenVINO remote context with queue sharing
