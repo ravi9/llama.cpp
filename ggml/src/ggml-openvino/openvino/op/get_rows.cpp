@@ -70,8 +70,19 @@ OutputVector translate_get_rows(const NodeContext & context) {
 
     // data[1,b,x,y] ind[1,1,b,x'] test-backend-ops case
     // data[x,y] ind[1,1,1,x'] normal case
-    indices =
-        std::make_shared<ov::op::v0::Squeeze>(indices, ov::op::v0::Constant::create(ov::element::i64, {2}, {0, 1}));
+    // Squeeze the leading dims down to [b,x']. Stateful models drop one rank, so a hardcoded
+    // {0,1} would also strip the batch dim whenever b == 1 (every decode step).
+    const auto indices_rank = indices.get_partial_shape().rank();
+    FRONT_END_OP_CONVERSION_CHECK(indices_rank.is_static(), "Expected static rank for GET_ROWS indices");
+    std::vector<int64_t> indices_squeeze_axes;
+    for (int64_t i = 0; i + 2 < indices_rank.get_length(); ++i) {
+        indices_squeeze_axes.push_back(i);
+    }
+    if (!indices_squeeze_axes.empty()) {
+        indices = std::make_shared<ov::op::v0::Squeeze>(
+            indices, ov::op::v0::Constant::create(ov::element::i64, {indices_squeeze_axes.size()},
+                                                  indices_squeeze_axes));
+    }
     if (row_offset != 0) {
         indices = std::make_shared<ov::op::v1::Add>(
             indices, ov::op::v0::Constant::create(indices.get_element_type(), {}, {row_offset}));
