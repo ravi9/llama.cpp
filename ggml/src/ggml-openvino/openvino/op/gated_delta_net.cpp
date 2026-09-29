@@ -118,7 +118,7 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
 
     Output<Node> raw_q, raw_k;
     float q_eps = 1e-6f, k_eps = 1e-6f;
-    const bool fuse_qk_l2norm = ggml_openvino_get_device_name() == "GPU" &&
+    const bool fuse_qk_l2norm = ggml_openvino_is_gpu() &&
         match_gdn_l2_norm(q, raw_q, q_eps) && match_gdn_l2_norm(k, raw_k, k_eps);
     if (fuse_qk_l2norm) {
         // Keep head tiling below; GDN applies normalization per head and keeps its attention scale.
