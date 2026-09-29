@@ -40,6 +40,21 @@ ov::Output<ov::Node> slice_axis(const ov::Output<ov::Node> & input, int64_t axis
                                               const_i64({axis}));
 }
 
+// GGML tensors are rank 4, but stateful models drop the leading size-1 batch dim, so
+// activations and ids arrive one rank lower. Pick the trailing dims by actual rank.
+std::vector<int> trailing_dims(const ov::Output<ov::Node> & input, int count) {
+    const auto rank = input.get_partial_shape().rank();
+    FRONT_END_OP_CONVERSION_CHECK(rank.is_static(), "Expected static rank for MUL_MAT_ID input");
+    const int rank_len = static_cast<int>(rank.get_length());
+    FRONT_END_OP_CONVERSION_CHECK(rank_len >= count, "MUL_MAT_ID input rank is too low");
+
+    std::vector<int> dims;
+    for (int i = rank_len - count; i < rank_len; ++i) {
+        dims.push_back(i);
+    }
+    return dims;
+}
+
 ov::Output<ov::Node> static_shape_dims_or_shapeof(const ov::Output<ov::Node> & input,
                                                   const std::vector<int> & dims) {
     const auto & partial_shape = input.get_partial_shape();
@@ -193,8 +208,8 @@ OutputVector translate_mul_mat_id(const NodeContext & context) {
         expert_weights = std::make_shared<ov::op::v1::Reshape>(expert_weights, expert_weights_shape_3d, false);
     }
 
-    auto activations_shape_3d = static_shape_dims_or_shapeof(activations, {1, 2, 3});
-    auto ids_shape_2d = static_shape_dims_or_shapeof(ids, {2, 3});
+    auto activations_shape_3d = static_shape_dims_or_shapeof(activations, trailing_dims(activations, 3));
+    auto ids_shape_2d = static_shape_dims_or_shapeof(ids, trailing_dims(ids, 2));
 
     activations = std::make_shared<ov::op::v1::Reshape>(activations, activations_shape_3d, false);
     ids = std::make_shared<ov::op::v1::Reshape>(ids, ids_shape_2d, false);
@@ -217,11 +232,14 @@ OutputVector translate_mul_mat_id(const NodeContext & context) {
 
     ov::Output<ov::Node> result = std::make_shared<ov::op::internal::GatherMatmul>(activations_for_gather, expert_weights, ids);
 
-    // result is [n_used, n_tokens, m]; GGML expects [1, n_tokens, n_used, m].
+    // result is [n_used, n_tokens, m]; GGML expects [1, n_tokens, n_used, m], except on the
+    // stateful path where the leading batch dim is dropped.
     auto result_transpose_order = const_i64({1, 0, 2});
     result = std::make_shared<ov::op::v1::Transpose>(result, result_transpose_order);
-    auto unsqueeze_axes = ov::op::v0::Constant::create(ov::element::i64, {1}, {0});
-    result = std::make_shared<ov::op::v0::Unsqueeze>(result, unsqueeze_axes);
+    if (!context.is_stateful()) {
+        auto unsqueeze_axes = ov::op::v0::Constant::create(ov::element::i64, {1}, {0});
+        result = std::make_shared<ov::op::v0::Unsqueeze>(result, unsqueeze_axes);
+    }
 
     if (result.get_element_type() != output_type) {
         result = std::make_shared<ov::op::v0::Convert>(result, output_type);
