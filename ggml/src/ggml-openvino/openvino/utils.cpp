@@ -305,18 +305,32 @@ ov::Output<ov::Node> process_view_input_new(const NodeContext & context, int inp
     // here would re-slice/re-flatten the already-resolved single-plane view against the
     // recorded (multi-plane) source strides and emit a constant-target Reshape whose baked
     // dims no longer divide the concretized input -> "dimensions do not evenly divide".
+    // A fourth case matters for stateful execution: `expected` comes from ggml metadata and is
+    // always GGML_MAX_DIMS ranks, but stateful drops the leading size-1 batch dim, so the
+    // resolved view is one rank lower. Compare the common trailing dims and require the
+    // leading expected dims we skip to be 1. Without this the rank test below never matches on
+    // the stateful path and every already-resolved MoE expert-plane view is re-sliced.
     auto expected_ov_shape = context.get_view_input_ov_shape(input_index, 0);
     auto actual_shape = input.get_partial_shape();
     if (expected_ov_shape.rank().is_static() && actual_shape.rank().is_static() &&
-        expected_ov_shape.rank() == actual_shape.rank()) {
+        expected_ov_shape.rank().get_length() >= actual_shape.rank().get_length()) {
+        const int64_t n_actual = actual_shape.rank().get_length();
+        const int64_t shift = expected_ov_shape.rank().get_length() - n_actual;
         bool shapes_match = true;
-        for (int64_t i = 0; i < expected_ov_shape.rank().get_length(); ++i) {
-            const bool both_dynamic = expected_ov_shape[i].is_dynamic() && actual_shape[i].is_dynamic();
-            const bool both_static_equal = expected_ov_shape[i].is_static() && actual_shape[i].is_static() &&
-                                           expected_ov_shape[i] == actual_shape[i];
+        for (int64_t i = 0; i < shift; ++i) {
+            if (!expected_ov_shape[i].is_static() || expected_ov_shape[i].get_length() != 1) {
+                shapes_match = false;
+                break;
+            }
+        }
+        for (int64_t i = 0; i < n_actual && shapes_match; ++i) {
+            const auto & exp = expected_ov_shape[i + shift];
+            const bool both_dynamic = exp.is_dynamic() && actual_shape[i].is_dynamic();
+            const bool both_static_equal =
+                exp.is_static() && actual_shape[i].is_static() && exp == actual_shape[i];
             // expected dynamic, actual static: the resolved view already carries the
             // concrete size for this fragment; reuse it rather than re-materializing.
-            const bool expected_dyn_actual_static = expected_ov_shape[i].is_dynamic() && actual_shape[i].is_static();
+            const bool expected_dyn_actual_static = exp.is_dynamic() && actual_shape[i].is_static();
             if (!both_dynamic && !both_static_equal && !expected_dyn_actual_static) {
                 shapes_match = false;
                 break;
@@ -399,6 +413,15 @@ ov::Output<ov::Node> process_view_input_new(const NodeContext & context, int inp
            const ov::Shape & view_ggml_shape, const ov::PartialShape & view_ov_shape, const std::string & view_name,
            size_t view_src_offset, const std::vector<size_t> & view_src_stride, const ov::Shape & view_src_ggml_shape,
            const ov::PartialShape & view_src_ov_shape, const std::string & view_src_name) -> ov::Output<ov::Node> {
+        // Stateful execution drops a leading size-1 axis, so `current` can be one rank lower
+        // than the ggml shape metadata (view_stride/view_ggml_shape, always GGML_MAX_DIMS
+        // entries) assumes. Shift any axis index built from that metadata down by the
+        // difference before using it as an OV Slice axis.
+        const auto current_rank = current.get_partial_shape().rank();
+        const int axis_shift = current_rank.is_static() ?
+                                    static_cast<int>(view_stride.size()) - static_cast<int>(current_rank.get_length()) :
+                                    0;
+
         auto build_reshape_pattern = [](const ov::PartialShape & target_ov_shape,
                                         const ov::Shape & target_ggml_shape) -> std::vector<int64_t> {
             const size_t ndims = target_ggml_shape.size();
@@ -509,7 +532,7 @@ ov::Output<ov::Node> process_view_input_new(const NodeContext & context, int inp
                             current, ov::op::v0::Constant::create(ov::element::i64, {1}, {begin_val}),
                             ov::op::v0::Constant::create(ov::element::i64, {1}, {end_val}),
                             ov::op::v0::Constant::create(ov::element::i64, {1}, {1}),
-                            ov::op::v0::Constant::create(ov::element::i64, {1}, {slice_dim}));
+                            ov::op::v0::Constant::create(ov::element::i64, {1}, {slice_dim - axis_shift}));
 
                         if (view_ov_shape.is_static()) {
                             auto reshaped = std::make_shared<ov::op::v1::Reshape>(
