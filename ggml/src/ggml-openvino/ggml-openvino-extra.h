@@ -88,6 +88,9 @@ const std::string & ggml_openvino_get_device_name();
 // Get all available physical OpenVINO devices
 std::vector<std::string> ggml_openvino_get_available_devices();
 
+// Human-readable device name, e.g. "Intel(R) AI Boost (NPU 4000)"; the device id if unavailable
+std::string ggml_openvino_get_device_description(const std::string & device_name);
+
 // Environment variable accessors. All GGML_OPENVINO_* env vars are read once
 // during backend init and cached on the device config; consumers must go
 // through these helpers (never call ::getenv directly) so behavior stays
@@ -107,10 +110,13 @@ int ggml_openvino_getenv_int(const char * var, int default_value = 0);
 // Memory optimization toggles. GGML_OPENVINO_MEMORY_OPTIMIZE is an umbrella
 // switch; the fine-grained env vars still override it when explicitly set.
 bool ggml_openvino_reduce_compile_mem_enabled();
-bool ggml_openvino_release_weights_enabled(const std::string & device);
+bool ggml_openvino_release_weights_enabled();
 
 // Check if running on NPU
 bool ggml_openvino_is_npu();
+
+// Check if running on a GPU (GPU, GPU.0, GPU.1, ...)
+bool ggml_openvino_is_gpu();
 
 // Largest single memory object the device can allocate, SIZE_MAX when there is no known limit
 size_t ggml_openvino_max_alloc_size();

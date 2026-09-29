@@ -105,7 +105,7 @@ struct ggml_backend_openvino_buffer_context {
         const auto & device_name = ggml_openvino_get_device_name();
 
         if (is_remote) {
-            GGML_ASSERT(device_name == "GPU");
+            GGML_ASSERT(ggml_openvino_is_gpu());
             auto remote_context = ggml_openvino_get_remote_context();
             auto gpu_context = remote_context->as<ov::intel_gpu::ocl::ClContext>();
             ov::intel_gpu::ocl::USMTensor usm_tensor =
@@ -321,7 +321,7 @@ static enum ggml_status ggml_backend_openvino_buffer_init_tensor(ggml_backend_bu
     ggml_backend_openvino_buffer_context * ctx = (ggml_backend_openvino_buffer_context *) buffer->context;
 
     // Put kvcache on device memory for GPU (NPU memory is too small even for kvcache)
-    if (strncmp(tensor->name, "cache_", 6) == 0 && !ctx->is_remote && ggml_openvino_get_device_name() == "GPU" &&
+    if (strncmp(tensor->name, "cache_", 6) == 0 && !ctx->is_remote && ggml_openvino_is_gpu() &&
         !is_stateful_enabled()) {
         GGML_ASSERT(ctx->tensor_extras.empty());
         auto device = ctx->device;
@@ -935,6 +935,7 @@ namespace {
 struct ggml_backend_openvino_device_context {
     int device;
     std::string name;
+    std::string ov_name;  // OpenVINO device id: CPU, GPU, GPU.1, NPU, ...
     std::string description;
     size_t total_memory;
 };
@@ -942,27 +943,6 @@ struct ggml_backend_openvino_device_context {
 
 static bool ov_device_has_prefix(const std::string & s, const std::string & prefix) {
     return s.size() >= prefix.size() && std::equal(prefix.begin(), prefix.end(), s.begin());
-}
-
-static std::string ov_device_description_from_name(const std::string & device_name) {
-    std::string description = device_name;
-    try {
-        description = ov_singleton_core().get_property(device_name, ov::device::full_name);
-    } catch (...) {
-        return device_name;
-    }
-
-    if (ov_device_has_prefix(device_name, "NPU")) {
-        try {
-            const std::string arch = ov_singleton_core().get_property(device_name, "DEVICE_ARCHITECTURE").as<std::string>();
-            if (!arch.empty()) {
-                description += " (NPU " + arch + ")";
-            }
-        } catch (...) {
-        }
-    }
-
-    return description;
 }
 
 static bool ov_try_get_size_t_property(const std::string & device, const std::string & property, size_t & out) {
@@ -992,6 +972,51 @@ static bool ov_try_get_size_t_property(const std::string & device, const std::st
     return false;
 }
 
+// System memory available to new allocations (MemAvailable on Linux), SIZE_MAX if unknown
+static size_t ov_system_available_memory() {
+#ifdef _WIN32
+    MEMORYSTATUSEX status;
+    status.dwLength = sizeof(status);
+    if (GlobalMemoryStatusEx(&status)) {
+        return (size_t) status.ullAvailPhys;
+    }
+#else
+    if (FILE * f = fopen("/proc/meminfo", "r")) {
+        char line[256];
+        unsigned long long kb = 0;
+        bool found = false;
+        while (!found && fgets(line, sizeof(line), f)) {
+            found = sscanf(line, "MemAvailable: %llu kB", &kb) == 1;
+        }
+        fclose(f);
+        if (found) {
+            return (size_t) std::min<unsigned long long>(kb * 1024, SIZE_MAX);
+        }
+    }
+#endif
+    return SIZE_MAX;
+}
+
+// iGPU and NPU allocate from system RAM, so their free memory can't exceed what the OS has available
+static bool ov_device_shares_system_memory(const std::string & device) {
+    if (ov_device_has_prefix(device, "NPU")) {
+        return true;
+    }
+    if (!ov_device_has_prefix(device, "GPU")) {
+        return false;
+    }
+    try {
+        return ov_singleton_core().get_property(device, ov::device::type) == ov::device::Type::INTEGRATED;
+    } catch (...) {
+        return false;
+    }
+}
+
+// usm_host / usm_shared allocations live in system RAM on a discrete GPU
+static bool ov_gpu_stat_is_host_memory(const std::string & key) {
+    return key == "usm_host" || key == "usm_shared";
+}
+
 static bool ov_try_get_gpu_used_memory(const std::string & device, size_t & out) {
     out = 0;
     try {
@@ -999,13 +1024,18 @@ static bool ov_try_get_gpu_used_memory(const std::string & device, size_t & out)
         if (stats_any.is<std::map<std::string, uint64_t>>()) {
             const auto stats = stats_any.as<std::map<std::string, uint64_t>>();
             for (const auto & kv : stats) {
-                out += (size_t) kv.second;
+                if (!ov_gpu_stat_is_host_memory(kv.first)) {
+                    out += (size_t) kv.second;
+                }
             }
             return true;
         }
         if (stats_any.is<ov::AnyMap>()) {
             const auto stats = stats_any.as<ov::AnyMap>();
             for (const auto & kv : stats) {
+                if (ov_gpu_stat_is_host_memory(kv.first)) {
+                    continue;
+                }
                 if (kv.second.is<size_t>()) {
                     out += kv.second.as<size_t>();
                 } else if (kv.second.is<uint64_t>()) {
@@ -1034,53 +1064,43 @@ static const char * ggml_backend_openvino_device_get_description(ggml_backend_de
 static void ggml_backend_openvino_device_get_memory(ggml_backend_dev_t dev, size_t * free, size_t * total) {
     ggml_backend_openvino_device_context * ctx = (ggml_backend_openvino_device_context *) dev->context;
 
-    if (ov_device_has_prefix(ctx->name, "GPU")) {
-        size_t used = 0;
-        if (ctx->total_memory == 0 || !ov_try_get_gpu_used_memory(ctx->name, used)) {
-            *total = 0;
-            *free = 0;
-            return;
-        }
-
+    // total_memory is only set for GPU/NPU; used = this process's OpenVINO allocations on the device
+    size_t used = 0;
+    const bool known = ctx->total_memory > 0 &&
+                       (ov_device_has_prefix(ctx->ov_name, "GPU") ?
+                            ov_try_get_gpu_used_memory(ctx->ov_name, used) :
+                            ov_try_get_size_t_property(ctx->ov_name, "NPU_DEVICE_ALLOC_MEM_SIZE", used));
+    if (known) {
         *total = ctx->total_memory;
         *free = (used >= *total) ? 0 : (*total - used);
-        return;
-    }
-
-    if (ov_device_has_prefix(ctx->name, "NPU")) {
-        size_t allocated = 0;
-        if (ctx->total_memory == 0 || !ov_try_get_size_t_property(ctx->name, "NPU_DEVICE_ALLOC_MEM_SIZE", allocated)) {
-            *total = 0;
-            *free = 0;
-            return;
-        }
-
-        *total = ctx->total_memory;
-        *free = (allocated >= *total) ? 0 : (*total - allocated);
-        return;
-    }
-
+    } else {
+        // CPU, or a plugin without memory properties: report system memory
 #ifdef _WIN32
-    MEMORYSTATUSEX status;
-    status.dwLength = sizeof(status);
-    GlobalMemoryStatusEx(&status);
-    *total = status.ullTotalPhys;
-    *free = status.ullAvailPhys;
+        MEMORYSTATUSEX status;
+        status.dwLength = sizeof(status);
+        GlobalMemoryStatusEx(&status);
+        *total = status.ullTotalPhys;
+        *free = status.ullAvailPhys;
 #else
-    long pages = sysconf(_SC_PHYS_PAGES);
-    long page_size = sysconf(_SC_PAGE_SIZE);
-    *total = pages * page_size;
+        long pages = sysconf(_SC_PHYS_PAGES);
+        long page_size = sysconf(_SC_PAGE_SIZE);
+        *total = pages * page_size;
 
-    // "free" system memory is ill-defined, for practical purposes assume that all of it is free:
-    *free = *total;
+        // "free" system memory is ill-defined, for practical purposes assume that all of it is free:
+        *free = *total;
 #endif  // _WIN32
+    }
 
-    GGML_UNUSED(dev);
+    if (ov_device_shares_system_memory(ctx->ov_name)) {
+        *free = std::min(*free, ov_system_available_memory());
+    }
 }
 
 static enum ggml_backend_dev_type ggml_backend_openvino_device_get_type(ggml_backend_dev_t dev) {
-    GGML_UNUSED(dev);
-    return GGML_BACKEND_DEVICE_TYPE_GPU;
+    ggml_backend_openvino_device_context * ctx = (ggml_backend_openvino_device_context *) dev->context;
+    // Only the device selected by GGML_OPENVINO_DEVICE is offered for offload. The others are
+    // registered for discovery (--list-devices) only; llama.cpp skips IGPU devices when a GPU exists.
+    return ctx->ov_name == ggml_openvino_get_device_name() ? GGML_BACKEND_DEVICE_TYPE_GPU : GGML_BACKEND_DEVICE_TYPE_IGPU;
 }
 
 static void ggml_backend_openvino_device_get_props(ggml_backend_dev_t dev, ggml_backend_dev_props * props) {
@@ -1101,6 +1121,12 @@ static void ggml_backend_openvino_device_get_props(ggml_backend_dev_t dev, ggml_
 static ggml_backend_t ggml_backend_openvino_device_init(ggml_backend_dev_t dev, const char * params) {
     GGML_UNUSED(params);
     ggml_backend_openvino_device_context * ctx = (ggml_backend_openvino_device_context *) dev->context;
+    if (ctx->ov_name != ggml_openvino_get_device_name()) {
+        // Not an error: test-backend-ops initializes every device
+        GGML_LOG_WARN("%s: %s (OpenVINO %s) is not the selected device, no ops will run on it; "
+                      "set GGML_OPENVINO_DEVICE=%s to use it\n",
+                      __func__, ctx->name.c_str(), ctx->ov_name.c_str(), ctx->ov_name.c_str());
+    }
     return ggml_backend_openvino_init(ctx->device);
 }
 
@@ -1320,7 +1346,7 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         if (op->type == GGML_TYPE_I64) {
             return {false, "CONCAT with I64 type is not supported"};
         }
-        if (ggml_openvino_get_device_name() == "GPU" && op->type == GGML_TYPE_BF16 && has_view_op_input(op)) {
+        if (ggml_openvino_is_gpu() && op->type == GGML_TYPE_BF16 && has_view_op_input(op)) {
             return {false, "CONCAT with BF16 type and VIEW input is not supported on GPU"};
         }
         break;
@@ -1344,7 +1370,7 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         if (op->ne[3] != 1) {
             return {false, "GET_ROWS/SET_ROWS with ne[3] != 1 (ne[3]=" + std::to_string(op->ne[3]) + ") is not supported"};
         }
-        if (op->op == GGML_OP_GET_ROWS && ggml_openvino_get_device_name() == "GPU" &&
+        if (op->op == GGML_OP_GET_ROWS && ggml_openvino_is_gpu() &&
             op->src[0]->type == GGML_TYPE_BF16) {
             return {false, "GET_ROWS with BF16 src0 is not supported on GPU"};
         }
@@ -1407,22 +1433,21 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         // The GPU plugin can fuse broadcast DIV into the preceding FFN GEMM path
         // and produce infs for per-channel scale vectors. Keep those DIVs on CPU
         // until the fused GPU kernel is reliable. (falied case llama-arch-test mpt)
-        if (ggml_openvino_get_device_name() == "GPU" && op->src[1]->ne[0] == op->ne[0] &&
+        if (ggml_openvino_is_gpu() && op->src[1]->ne[0] == op->ne[0] &&
             op->src[1]->ne[1] == 1 && op->src[1]->ne[2] == 1 && op->src[1]->ne[3] == 1) {
             return {false, "DIV per-channel scale broadcast is not supported on GPU"};
         }
         break;
     }
     case GGML_OP_POOL_2D: {
-        const auto& name = ggml_openvino_get_device_name();
-        if (name == "GPU") {
+        if (ggml_openvino_is_gpu()) {
             const int32_t * params = op->op_params;
             const int k0 = params[1];
             const int k1 = params[2];
             const int p0 = params[5];
             const int p1 = params[6];
             if ((p0 > 0 || p1 > 0) && (k0 < 3 || k1 < 3)) {
-                return {false, "POOL_2D with padding and kernel size < 3 is not supported on " + name};
+                return {false, "POOL_2D with padding and kernel size < 3 is not supported on " + ggml_openvino_get_device_name()};
             }
         }
         break;
@@ -1464,7 +1489,7 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         break;
     }
     case GGML_OP_PERMUTE: {
-        if (op->type == GGML_TYPE_BF16 && ggml_openvino_get_device_name() == "GPU") {
+        if (op->type == GGML_TYPE_BF16 && ggml_openvino_is_gpu()) {
             return {false, "PERMUTE with BF16 type is not supported on GPU"};
         }
         break;
@@ -1473,7 +1498,7 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         if (op->src[0]->type != GGML_TYPE_BF16 && op->src[1]->type == GGML_TYPE_BF16) {
             return {false, "CPY with BF16 src[1] type is not supported"};
         }
-        if (ggml_openvino_get_device_name() == "NPU" && (op->src[0]->type == GGML_TYPE_BF16 || op->src[1]->type == GGML_TYPE_BF16)) {
+        if (ggml_openvino_is_npu() && (op->src[0]->type == GGML_TYPE_BF16 || op->src[1]->type == GGML_TYPE_BF16)) {
             return {false, "CPY with BF16 is not supported is not supported on NPU"};
         }
         // CPY to a quantized destination (e.g. f32 -> q4_0) is numerically unstable with OpenVINO backend.
@@ -1498,13 +1523,13 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         break;
     }
     case GGML_OP_MUL_MAT: {
-        if (ggml_openvino_get_device_name() == "GPU" && op->src[0] != nullptr && op->src[1] != nullptr &&
+        if (ggml_openvino_is_gpu() && op->src[0] != nullptr && op->src[1] != nullptr &&
             ggml_is_quantized(op->src[0]->type) && strcmp(op->src[0]->name, "a") == 0 &&
             strcmp(op->src[1]->name, "b") == 0 && op->src[0]->ne[1] == 1 && op->src[1]->ne[1] == 64 &&
             op->src[0]->ne[0] == 256 && op->src[1]->ne[0] == 256) {
             return {false, "MUL_MAT quantized benchmark test case on GPU is not supported"};
         }
-        if (ggml_openvino_get_device_name() == "GPU" && op->type == GGML_TYPE_F32 && op->ne[0] == 1 && op->ne[1] == 1 &&
+        if (ggml_openvino_is_gpu() && op->type == GGML_TYPE_F32 && op->ne[0] == 1 && op->ne[1] == 1 &&
             (op->src[0]->buffer == nullptr || op->src[0]->buffer->usage != GGML_BACKEND_BUFFER_USAGE_WEIGHTS)) {
             return {false, "MUL_MAT scalar dot product with non-weight src[0] on GPU is not supported"};
         }
@@ -1524,7 +1549,7 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
             return {false, "MUL_MAT_ID with single-expert or empty ne[2] <= 1 (ne[2]=" +
                            std::to_string(op->src[0]->ne[2]) + ") is not supported"};
         }
-        if (ggml_openvino_get_device_name() == "GPU" && op->src[0] != nullptr && !ggml_is_quantized(op->src[0]->type)) {
+        if (ggml_openvino_is_gpu() && op->src[0] != nullptr && !ggml_is_quantized(op->src[0]->type)) {
             return {false, "MUL_MAT_ID with non-quantized weights on GPU is not supported"};
         }
         // The GPU plugin's GatherMatmul returns wrong values for the layouts test-backend-ops
@@ -1533,12 +1558,12 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         // The same graph is correct on the CPU plugin, and correct on GPU for every real model,
         // which always feeds experts from a bound tensor buffer. Standalone op-test tensors have
         // no buffer at all, so use that to exclude them and let the scheduler run them on CPU.
-        if (ggml_openvino_get_device_name() == "GPU" && op->src[0] != nullptr && op->src[0]->buffer == nullptr) {
+        if (ggml_openvino_is_gpu() && op->src[0] != nullptr && op->src[0]->buffer == nullptr) {
             return {false, "MUL_MAT_ID with unbound expert tensors on GPU is not supported"};
         }
         // Only MXFP4 still needs the large-temporary guard; every other quantized type goes
         // through GatherMatmul, which never materializes the selected expert weights.
-        if (ggml_openvino_get_device_name() == "GPU" && op->src[0] != nullptr && op->src[0]->type == GGML_TYPE_MXFP4 &&
+        if (ggml_openvino_is_gpu() && op->src[0] != nullptr && op->src[0]->type == GGML_TYPE_MXFP4 &&
             mul_mat_id_requires_large_tmp(op)) {
             return {false, "MUL_MAT_ID with MXFP4 weights requires large temporary on GPU"};
         }
@@ -1591,7 +1616,7 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         break;
     }
     case GGML_OP_REPEAT: {
-        if (ggml_openvino_get_device_name() == "GPU" && op->type == GGML_TYPE_BF16) {
+        if (ggml_openvino_is_gpu() && op->type == GGML_TYPE_BF16) {
             return {false, "REPEAT with BF16 type is not supported on GPU"};
         }
         break;
@@ -1599,7 +1624,7 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
     case GGML_OP_GATED_DELTA_NET: {
         // enable after https://github.com/openvinotoolkit/openvino/pull/35917 is included in OV release
         // return true;
-        // if (ggml_openvino_get_device_name() == "GPU" && op->src[0]->ne[2] > 1) {
+        // if (ggml_openvino_is_gpu() && op->src[0]->ne[2] > 1) {
         //     // CVS-186471
         //     return true;
         // }
@@ -1640,8 +1665,8 @@ static ggml_openvino_op_support ggml_backend_openvino_device_supports_op_impl(gg
     GGML_ASSERT(dev->reg != nullptr);
 
     ggml_backend_openvino_device_context * dev_ctx = (ggml_backend_openvino_device_context *) dev->context;
-    if (dev_ctx->name != ggml_openvino_get_device_name()) {
-        return false;
+    if (dev_ctx->ov_name != ggml_openvino_get_device_name()) {
+        return {false, "device is not the selected OpenVINO device"};
     }
 
     static std::unordered_set<ggml_type> supported_types{
@@ -1838,13 +1863,16 @@ GGML_BACKEND_API ggml_backend_reg_t ggml_backend_openvino_reg(void) {
             for (int i = 0; i < ggml_backend_openvino_get_device_count(); i++) {
                 ggml_backend_openvino_device_context * dev_ctx = new ggml_backend_openvino_device_context;
                 dev_ctx->device = i;
-                dev_ctx->name = openvino_devices[i];
-                dev_ctx->description = ov_device_description_from_name(dev_ctx->name);
+                // Not the raw OpenVINO id: "CPU" would shadow the ggml CPU backend in ggml_backend_dev_by_name
+                dev_ctx->name = GGML_OPENVINO_NAME + std::to_string(i);
+                dev_ctx->ov_name = openvino_devices[i];
+                dev_ctx->description =
+                    ggml_openvino_get_device_description(dev_ctx->ov_name) + " (OpenVINO " + dev_ctx->ov_name + ")";
                 dev_ctx->total_memory = 0;
-                if (ov_device_has_prefix(dev_ctx->name, "GPU")) {
-                    ov_try_get_size_t_property(dev_ctx->name, "GPU_DEVICE_TOTAL_MEM_SIZE", dev_ctx->total_memory);
-                } else if (ov_device_has_prefix(dev_ctx->name, "NPU")) {
-                    ov_try_get_size_t_property(dev_ctx->name, "NPU_DEVICE_TOTAL_MEM_SIZE", dev_ctx->total_memory);
+                if (ov_device_has_prefix(dev_ctx->ov_name, "GPU")) {
+                    ov_try_get_size_t_property(dev_ctx->ov_name, "GPU_DEVICE_TOTAL_MEM_SIZE", dev_ctx->total_memory);
+                } else if (ov_device_has_prefix(dev_ctx->ov_name, "NPU")) {
+                    ov_try_get_size_t_property(dev_ctx->ov_name, "NPU_DEVICE_TOTAL_MEM_SIZE", dev_ctx->total_memory);
                 }
 
                 ggml_backend_dev_t dev =

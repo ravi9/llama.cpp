@@ -488,7 +488,7 @@ std::shared_ptr<Model> TranslateSession::apply_transformations(std::shared_ptr<M
 
         // MOECompressed has no CPU plugin implementation, so enable it by default only on GPU.
         // GGML_OPENVINO_MOE_OP=0 keeps the unfused GatherMatmul path for fallback/debugging.
-        if (ggml_openvino_get_device_name() == "GPU" &&
+        if (ggml_openvino_is_gpu() &&
             ggml_openvino_getenv_int("GGML_OPENVINO_MOE_OP", 1) != 0) {
             manager.register_pass<pass::FuseMoeRouter>();
             manager.register_pass<pass::FuseMoeCompressed>();
