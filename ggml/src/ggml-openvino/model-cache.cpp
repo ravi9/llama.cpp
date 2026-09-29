@@ -354,7 +354,7 @@ uint64_t ggml_openvino_model_fingerprint(const ggml_cgraph * cgraph,
         h = fnv1a(h, "GGML_OPENVINO_DEBUG_NODE", sizeof("GGML_OPENVINO_DEBUG_NODE"));
         h = fnv1a(h, debug_nodes, strlen(debug_nodes) + 1);
     }
-    if (device == "GPU" && ggml_openvino_getenv_int("GGML_OPENVINO_MOE_OP", 1) == 0) {
+    if (ggml_openvino_is_gpu() && ggml_openvino_getenv_int("GGML_OPENVINO_MOE_OP", 1) == 0) {
         h = fnv1a(h, "GGML_OPENVINO_MOE_OP=0", sizeof("GGML_OPENVINO_MOE_OP=0"));
     }
 

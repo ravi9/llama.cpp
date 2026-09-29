@@ -625,7 +625,7 @@ $env:GGML_OPENVINO_DEVICE = "NPU"
 build\ReleaseOV\bin\llama-cli.exe -m "C:\models\Llama-3.2-1B-Instruct-Q4_K_M.gguf" -c 512
 ```
 > [!NOTE]
-> On systems with multiple GPUs, use `GPU.0` or `GPU.1` to explicitly target specific GPU. See [OpenVINO GPU Device](https://docs.openvino.ai/2026/openvino-workflow/running-inference/inference-devices-and-modes/gpu-device.html) for more details.
+> On systems with multiple GPUs, use `GPU.0` or `GPU.1` to explicitly target specific GPU. A device that is not available is an error (no fallback to CPU), and the error message lists the available OpenVINO devices with their names. See [OpenVINO GPU Device](https://docs.openvino.ai/2026/openvino-workflow/running-inference/inference-devices-and-modes/gpu-device.html) for more details.
 
 ### 5. Docker Build
 
@@ -713,7 +713,7 @@ Boolean flags follow a uniform convention: set to a **positive integer** (e.g. `
 
 | Variable                          | Type      | Default    | Description                                                                                                 |
 |-----------------------------------|-----------|------------|-------------------------------------------------------------------------------------------------------------|
-| `GGML_OPENVINO_DEVICE`            | String    | `CPU`      | Specify the target device (CPU, GPU, NPU). On systems with multiple GPUs, use `GPU.0` or `GPU.1` to explicitly target specific GPU. See [OpenVINO GPU Device](https://docs.openvino.ai/2026/openvino-workflow/running-inference/inference-devices-and-modes/gpu-device.html). When set to **NPU**, static compilation mode is enabled for optimal performance. |
+| `GGML_OPENVINO_DEVICE`            | String    | `CPU`      | Specify the target device (CPU, GPU, NPU). On systems with multiple GPUs, use `GPU.0` or `GPU.1` to explicitly target specific GPU. A device that is not available is an error (no fallback to CPU), and the error message lists the available OpenVINO devices with their names. See [OpenVINO GPU Device](https://docs.openvino.ai/2026/openvino-workflow/running-inference/inference-devices-and-modes/gpu-device.html). When set to **NPU**, static compilation mode is enabled for optimal performance. |
 | `GGML_OPENVINO_CACHE_DIR`         | String    | `not set`  | Directory for OpenVINO's separate plugin cache. On NPU, this sets `NPUW_CACHE_DIR`. |
 | `GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR` | String | `not set` | Directory for standalone compiled blobs with weights. Dynamic CPU/GPU graphs can import matching blobs on later runs. |
 | `GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY` | Boolean | `0` | Require an existing compiled blob and skip weight uploads and compilation. Requires Linux or Windows mmap loading and a full dynamic CPU/GPU graph on OpenVINO. |
