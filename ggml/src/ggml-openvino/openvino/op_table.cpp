@@ -41,6 +41,7 @@ std::unordered_map<std::string, CreatorFunction> get_supported_ops() {
         {"GGML_OP_FILL",            op::translate_fill                             },
         {"GGML_OP_GET_ROWS",        op::translate_get_rows                         },
         {"GGML_OP_IM2COL",          op::translate_im2col                           },
+        {"GGML_OP_IM2COL_3D",       op::translate_im2col_3d                        },
         {"GGML_OP_MUL",             op::translate_1to1_match_2_inputs<v1::Multiply>},
         {"GGML_OP_MUL_MAT",         op::translate_mulmat                           },
         {"GGML_OP_MUL_MAT_ID",      op::translate_mul_mat_id                       },
@@ -105,6 +106,11 @@ std::unordered_map<std::string, CreatorFunction> get_supported_ops() {
         {"GGML_OP_POOL_2D",         op::translate_pool_2d                          },
         {"GGML_OP_ROLL",            op::translate_roll                             },
         {"GGML_OP_UPSCALE",         op::translate_upscale                          },
+        {"GGML_OP_CONV_2D",         op::translate_conv_2d                          },
+        {"GGML_OP_CONV_2D_DW",      op::translate_conv_2d_dw                       },
+        {"GGML_OP_CONV_TRANSPOSE_1D", op::translate_conv_transpose_1d             },
+        {"GGML_OP_CONV_TRANSPOSE_2D", op::translate_conv_transpose_2d             },
+        {"GGML_OP_CONV_3D",         op::translate_conv_3d                          },
         // solve_tri has accuracy issues on GPU
         // {"GGML_OP_SOLVE_TRI",       op::translate_solve_tri                        },
     };

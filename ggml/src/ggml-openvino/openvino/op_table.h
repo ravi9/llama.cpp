@@ -18,6 +18,7 @@ GGML_OP_CONVERTER(translate_div);
 GGML_OP_CONVERTER(translate_fill);
 GGML_OP_CONVERTER(translate_get_rows);
 GGML_OP_CONVERTER(translate_im2col);
+GGML_OP_CONVERTER(translate_im2col_3d);
 GGML_OP_CONVERTER(translate_mulmat);
 GGML_OP_CONVERTER(translate_mul_mat_id);
 GGML_OP_CONVERTER(translate_permute);
@@ -67,6 +68,11 @@ GGML_OP_CONVERTER(translate_unary_hardsigmoid);
 GGML_OP_CONVERTER(translate_unary_step);
 GGML_OP_CONVERTER(translate_unary_round);
 GGML_OP_CONVERTER(translate_unary_expm1);
+GGML_OP_CONVERTER(translate_conv_2d);
+GGML_OP_CONVERTER(translate_conv_2d_dw);
+GGML_OP_CONVERTER(translate_conv_transpose_1d);
+GGML_OP_CONVERTER(translate_conv_transpose_2d);
+GGML_OP_CONVERTER(translate_conv_3d);
 
 }  // namespace op
 
