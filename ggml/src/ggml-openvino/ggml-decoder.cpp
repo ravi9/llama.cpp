@@ -2322,6 +2322,25 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
             }
             break;
         }
+        case GGML_OP_IM2COL_3D: {
+            m_node_dynamic_dims[node] = -1;
+            if (m_node_dynamic_dims[node->src[1]] != -1) {
+                const int src_dyn = m_node_dynamic_dims[node->src[1]];
+                if (src_dyn == 0) {
+                    m_node_dynamic_dims[node] = 1;  // IW -> OW
+                } else if (src_dyn == 1) {
+                    m_node_dynamic_dims[node] = 2;  // IH -> OH
+                } else if (src_dyn == 3) {
+                    m_node_dynamic_dims[node] = 3;  // N  -> N
+                }
+                if (m_node_dynamic_dims[node] != -1) {
+                    OPENVINO_ASSERT(node->src[1]->ne[src_dyn] == node->ne[m_node_dynamic_dims[node]],
+                                    "Dynamic dim value mismatch for IM2COL_3D node: " + std::string(node->name) +
+                                        " and its src[1]: " + std::string(node->src[1]->name));
+                }
+            }
+            break;
+        }
         default:
             GGML_LOG_DEBUG("ggml-openvino: compute_node_dynamic_dims: unhandled op %s for node '%s'\n",
                            ggml_op_name(node->op), node->name);
