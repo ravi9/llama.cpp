@@ -18,6 +18,7 @@ GGML_OP_CONVERTER(translate_div);
 GGML_OP_CONVERTER(translate_fill);
 GGML_OP_CONVERTER(translate_get_rows);
 GGML_OP_CONVERTER(translate_im2col);
+GGML_OP_CONVERTER(translate_im2col_3d);
 GGML_OP_CONVERTER(translate_mulmat);
 GGML_OP_CONVERTER(translate_mul_mat_id);
 GGML_OP_CONVERTER(translate_permute);
@@ -56,6 +57,11 @@ GGML_OP_CONVERTER(translate_tri);
 GGML_OP_CONVERTER(translate_solve_tri);
 GGML_OP_CONVERTER(translate_pool_2d);
 GGML_OP_CONVERTER(translate_roll);
+GGML_OP_CONVERTER(translate_conv_2d);
+GGML_OP_CONVERTER(translate_conv_2d_dw);
+GGML_OP_CONVERTER(translate_conv_transpose_1d);
+GGML_OP_CONVERTER(translate_conv_transpose_2d);
+GGML_OP_CONVERTER(translate_conv_3d);
 
 }  // namespace op
 

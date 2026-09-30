@@ -280,6 +280,9 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
     int op_case = 0;
     switch (node->op) {
     case GGML_OP_RESHAPE: {
+        if (m_naive) {
+            break;
+        }
         auto name = std::string(node->name);
         auto * src = node->src[0];
         // Identify recurrent sequence reshapes before size checks, which are ambiguous for one token.
@@ -314,7 +317,7 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
             if (src->ne[2] * src->ne[3] == node->ne[1]) {
                 op_case = 5;
             }
-        } else if (src->ne[0] * src->ne[1] * src->ne[2] == node->ne[1]) {
+        } else if (node->ne[0] == 1 && src->ne[0] * src->ne[1] * src->ne[2] == node->ne[1]) {
             op_case = 3;
         } else if (name.find("linear_attn_qkv_mixed") == 0 || name.find("alpha") == 0) {
             op_case = 6;
@@ -2310,6 +2313,25 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
                 if (m_node_dynamic_dims[node] != -1) {
                     OPENVINO_ASSERT(node->src[1]->ne[src_dyn] == node->ne[m_node_dynamic_dims[node]],
                                     "Dynamic dim value mismatch for IM2COL node: " + std::string(node->name) +
+                                        " and its src[1]: " + std::string(node->src[1]->name));
+                }
+            }
+            break;
+        }
+        case GGML_OP_IM2COL_3D: {
+            m_node_dynamic_dims[node] = -1;
+            if (m_node_dynamic_dims[node->src[1]] != -1) {
+                const int src_dyn = m_node_dynamic_dims[node->src[1]];
+                if (src_dyn == 0) {
+                    m_node_dynamic_dims[node] = 1;  // IW -> OW
+                } else if (src_dyn == 1) {
+                    m_node_dynamic_dims[node] = 2;  // IH -> OH
+                } else if (src_dyn == 3) {
+                    m_node_dynamic_dims[node] = 3;  // N  -> N
+                }
+                if (m_node_dynamic_dims[node] != -1) {
+                    OPENVINO_ASSERT(node->src[1]->ne[src_dyn] == node->ne[m_node_dynamic_dims[node]],
+                                    "Dynamic dim value mismatch for IM2COL_3D node: " + std::string(node->name) +
                                         " and its src[1]: " + std::string(node->src[1]->name));
                 }
             }
