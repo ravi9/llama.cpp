@@ -1651,6 +1651,9 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
     }
     case GGML_OP_CONV_2D:
     case GGML_OP_CONV_2D_DW: {
+        if (op->src[0]->ne[0] <= 0 || op->src[0]->ne[1] <= 0) {
+            return {false, "CONV_2D kernel size must be positive"};
+        }
         if (op->src[0]->op == GGML_OP_PERMUTE || op->src[1]->op == GGML_OP_PERMUTE) {
             return {false, "CONV_2D with PERMUTE input is not supported"};
         }
@@ -1672,6 +1675,9 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         break;
     }
     case GGML_OP_CONV_3D: {
+        if (op->src[0]->ne[0] <= 0 || op->src[0]->ne[1] <= 0 || op->src[0]->ne[2] <= 0) {
+            return {false, "CONV_3D kernel size must be positive"};
+        }
         if (op->src[0]->op == GGML_OP_PERMUTE || op->src[1]->op == GGML_OP_PERMUTE) {
             return {false, "CONV_3D with PERMUTE input is not supported"};
         }
@@ -1698,11 +1704,26 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
     }
     case GGML_OP_CONV_TRANSPOSE_1D:
     case GGML_OP_CONV_TRANSPOSE_2D: {
+        if (op->src[0]->ne[0] <= 0 || op->src[0]->ne[1] <= 0) {
+            return {false, "CONV_TRANSPOSE kernel size must be positive"};
+        }
         if (op->src[0]->op == GGML_OP_PERMUTE || op->src[1]->op == GGML_OP_PERMUTE) {
             return {false, "CONV_TRANSPOSE with PERMUTE input is not supported"};
         }
         if (has_non_contiguous_view_input(op)) {
             return {false, "CONV_TRANSPOSE with non-contiguous view input is not supported"};
+        }
+        break;
+    }
+    case GGML_OP_IM2COL: {
+        if (op->src[0]->ne[0] <= 0 || op->src[0]->ne[1] <= 0) {
+            return {false, "IM2COL kernel size must be positive"};
+        }
+        break;
+    }
+    case GGML_OP_IM2COL_3D: {
+        if (op->src[0]->ne[0] <= 0 || op->src[0]->ne[1] <= 0 || op->src[0]->ne[2] <= 0) {
+            return {false, "IM2COL_3D kernel size must be positive"};
         }
         break;
     }
