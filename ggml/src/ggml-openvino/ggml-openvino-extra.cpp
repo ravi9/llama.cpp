@@ -533,9 +533,7 @@ ggml_openvino_extracted_layout ggml_openvino_get_extracted_layout(const ggml_ten
             layout.weights_per_block = tensor->ne[0];
             break;
         default:
-            layout.weights_per_block = -1;
             GGML_ABORT("Code of re-quantizing to channel-wise is not updated");
-            break;
         }
 
         if (layout.is_requant) {
