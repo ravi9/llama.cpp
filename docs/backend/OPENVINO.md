@@ -625,7 +625,7 @@ $env:GGML_OPENVINO_DEVICE = "NPU"
 build\ReleaseOV\bin\llama-cli.exe -m "C:\models\Llama-3.2-1B-Instruct-Q4_K_M.gguf" -c 512
 ```
 > [!NOTE]
-> On systems with multiple GPUs, use `GPU.0` or `GPU.1` to explicitly target specific GPU. A device that is not available is an error (no fallback to CPU), and the error message lists the available OpenVINO devices with their names. See [OpenVINO GPU Device](https://docs.openvino.ai/2026/openvino-workflow/running-inference/inference-devices-and-modes/gpu-device.html) for more details.
+> On systems with multiple GPUs, use `GPU.0` or `GPU.1` to explicitly target specific GPU. A device that is not available is an error (no fallback to CPU), and the error message lists the available OpenVINO devices with their names. Run `llama-cli --list-devices` to see the valid values: each OpenVINO device shows the `GGML_OPENVINO_DEVICE=<value>` to set, and `(selected)` marks the active one. Select the OpenVINO device with this variable, not with `-dev`. See [OpenVINO GPU Device](https://docs.openvino.ai/2026/openvino-workflow/running-inference/inference-devices-and-modes/gpu-device.html) for more details.
 
 ### 5. Docker Build
 
