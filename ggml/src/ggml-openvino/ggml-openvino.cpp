@@ -1741,6 +1741,19 @@ static ggml_openvino_op_support ggml_backend_openvino_device_supports_op_impl(gg
 
     ggml_backend_openvino_device_context * dev_ctx = (ggml_backend_openvino_device_context *) dev->context;
     if (dev_ctx->ov_name != ggml_openvino_get_device_name()) {
+        // Data placed on a non-selected device (e.g. with -dev) can never run here; stop with a hint
+        // instead of the generic scheduler abort. Unallocated tensors (test-backend-ops) pass through.
+        for (int i = -1; i < GGML_MAX_SRC; i++) {
+            const ggml_tensor * t = i < 0 ? op : op->src[i];
+            ggml_backend_buffer_t buf = t == nullptr ? nullptr : (t->view_src ? t->view_src->buffer : t->buffer);
+            if (buf != nullptr &&
+                (ggml_backend_buft_is_openvino(buf->buft) || ggml_backend_buft_is_openvino_host(buf->buft)) &&
+                ((ggml_backend_openvino_buffer_type_context *) buf->buft->context)->device == dev_ctx->device) {
+                GGML_ABORT("%s is not the selected OpenVINO device (%s). The OpenVINO device is chosen with the "
+                           "GGML_OPENVINO_DEVICE environment variable, not -dev: set GGML_OPENVINO_DEVICE=%s",
+                           dev_ctx->name.c_str(), ggml_openvino_get_device_name().c_str(), dev_ctx->ov_name.c_str());
+            }
+        }
         return {false, "device is not the selected OpenVINO device"};
     }
 
@@ -1942,8 +1955,10 @@ GGML_BACKEND_API ggml_backend_reg_t ggml_backend_openvino_reg(void) {
                 // Not the raw OpenVINO id: "CPU" would shadow the ggml CPU backend in ggml_backend_dev_by_name
                 dev_ctx->name = GGML_OPENVINO_NAME + std::to_string(i);
                 dev_ctx->ov_name = openvino_devices[i];
-                dev_ctx->description =
-                    ggml_openvino_get_device_description(dev_ctx->ov_name) + " (OpenVINO " + dev_ctx->ov_name + ")";
+                // The device is chosen with GGML_OPENVINO_DEVICE, not -dev, so show the value to set
+                dev_ctx->description = "GGML_OPENVINO_DEVICE=" + dev_ctx->ov_name +
+                                       (dev_ctx->ov_name == ggml_openvino_get_device_name() ? " (selected)" : "") +
+                                       " - " + ggml_openvino_get_device_description(dev_ctx->ov_name);
                 dev_ctx->total_memory = 0;
                 if (ov_device_has_prefix(dev_ctx->ov_name, "GPU")) {
                     ov_try_get_size_t_property(dev_ctx->ov_name, "GPU_DEVICE_TOTAL_MEM_SIZE", dev_ctx->total_memory);
