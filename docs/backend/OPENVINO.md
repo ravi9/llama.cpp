@@ -244,8 +244,8 @@ chmod +x build-llamacpp-ov.sh
 # ============================================
 set -euo pipefail
 
-OPENVINO_VERSION_MAJOR="2026.4"
-OPENVINO_VERSION_FULL="2026.4.0.22959.99c81491cc3"
+OPENVINO_VERSION_MAJOR="2026.4.1"
+OPENVINO_VERSION_FULL="2026.4.1.22982.07f9c262b05"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OPENVINO_INSTALL_DIR="/opt/intel/openvino_${OPENVINO_VERSION_MAJOR}"
@@ -342,7 +342,7 @@ echo "  ./build/ReleaseOV/bin/llama-cli -m model.gguf"
 ```
 
 > [!NOTE]
-> The script pins OpenVINO `2026.4` via the `OPENVINO_VERSION_MAJOR` / `OPENVINO_VERSION_FULL` variables at the top — edit them to track a different release.
+> The script pins OpenVINO `2026.4.1` via the `OPENVINO_VERSION_MAJOR` / `OPENVINO_VERSION_FULL` variables at the top — edit them to track a different release.
 
 </details>
 
@@ -372,8 +372,8 @@ REM ============================================
 REM llama.cpp OpenVINO Build Script (Ninja)
 REM ============================================
 
-set "OPENVINO_VERSION_MAJOR=2026.4"
-set "OPENVINO_VERSION_FULL=2026.4.0.22959.99c81491cc3"
+set "OPENVINO_VERSION_MAJOR=2026.4.1"
+set "OPENVINO_VERSION_FULL=2026.4.1.22982.07f9c262b05"
 
 set "SCRIPT_DIR=%~dp0"
 set "VCPKG_DIR=C:\vcpkg"
@@ -552,7 +552,7 @@ endlocal
 ```
 
 > [!NOTE]
-> The script pins OpenVINO `2026.4` via the `OPENVINO_VERSION_MAJOR` / `OPENVINO_VERSION_FULL` variables at the top — edit them to track a different release. From any new shell, source the matching `setupvars` script via the junction — `call "C:\Intel\openvino\setupvars.bat"` from `cmd`, or `& "C:\Intel\openvino\setupvars.ps1"` from PowerShell. If `winget` cannot register Visual Studio Build Tools on first run, install them once manually and re-run the script from an elevated **Developer Command Prompt for VS 2022**.
+> The script pins OpenVINO `2026.4.1` via the `OPENVINO_VERSION_MAJOR` / `OPENVINO_VERSION_FULL` variables at the top — edit them to track a different release. From any new shell, source the matching `setupvars` script via the junction — `call "C:\Intel\openvino\setupvars.bat"` from `cmd`, or `& "C:\Intel\openvino\setupvars.ps1"` from PowerShell. If `winget` cannot register Visual Studio Build Tools on first run, install them once manually and re-run the script from an elevated **Developer Command Prompt for VS 2022**.
 
 </details>
 
