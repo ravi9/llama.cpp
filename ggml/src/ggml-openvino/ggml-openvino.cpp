@@ -391,7 +391,7 @@ static void ggml_backend_openvino_buffer_memset_tensor(ggml_backend_buffer_t buf
         // For remote (device) buffers, use OpenCL USM memfill
         cl_command_queue queue = ggml_openvino_get_cl_queue();
         auto mem_fill_fn = ggml_openvino_get_clEnqueueMemFillINTEL();
-        if (queue != nullptr && mem_fill_fn != nullptr) {
+        if (mem_fill_fn != nullptr) {
             uint8_t pattern = value;
             cl_int err = mem_fill_fn(queue, (char *) tensor->data + offset, &pattern, sizeof(pattern), size, 0, nullptr,
                                      nullptr);
@@ -400,7 +400,7 @@ static void ggml_backend_openvino_buffer_memset_tensor(ggml_backend_buffer_t buf
             }
             clFinish(queue);
         } else {
-            GGML_LOG_ERROR("%s: no OpenCL queue or clEnqueueMemFillINTEL not available for GPU buffer\n", __func__);
+            GGML_LOG_ERROR("%s: clEnqueueMemFillINTEL not available for GPU buffer\n", __func__);
         }
     } else {
         memset((char *) tensor->data + offset, value, size);
@@ -497,14 +497,14 @@ static void ggml_backend_openvino_buffer_set_tensor(ggml_backend_buffer_t buffer
         if (ctx->is_remote) {
             cl_command_queue queue = ggml_openvino_get_cl_queue();
             auto mem_cpy_fn = ggml_openvino_get_clEnqueueMemcpyINTEL();
-            if (queue != nullptr && mem_cpy_fn != nullptr) {
+            if (mem_cpy_fn != nullptr) {
                 cl_int err =
                     mem_cpy_fn(queue, CL_TRUE, (char *) tensor->data + offset, data, size, 0, nullptr, nullptr);
                 if (err != CL_SUCCESS) {
                     GGML_LOG_ERROR("%s: clEnqueueMemcpyINTEL failed with error %d\n", __func__, err);
                 }
             } else {
-                GGML_LOG_ERROR("%s: no OpenCL queue or clEnqueueMemcpyINTEL not available for GPU buffer\n", __func__);
+                GGML_LOG_ERROR("%s: clEnqueueMemcpyINTEL not available for GPU buffer\n", __func__);
             }
         } else {
             memcpy((char *) tensor->data + offset, data, size);
@@ -542,14 +542,14 @@ static void ggml_backend_openvino_buffer_get_tensor(ggml_backend_buffer_t buffer
         // For remote (device) buffers, use OpenCL USM memcpy (device-to-host)
         cl_command_queue queue = ggml_openvino_get_cl_queue();
         auto mem_cpy_fn = ggml_openvino_get_clEnqueueMemcpyINTEL();
-        if (queue != nullptr && mem_cpy_fn != nullptr) {
+        if (mem_cpy_fn != nullptr) {
             cl_int err =
                 mem_cpy_fn(queue, CL_TRUE, data, (const char *) tensor->data + offset, size, 0, nullptr, nullptr);
             if (err != CL_SUCCESS) {
                 GGML_LOG_ERROR("%s: clEnqueueMemcpyINTEL failed with error %d\n", __func__, err);
             }
         } else {
-            GGML_LOG_ERROR("%s: no OpenCL queue or clEnqueueMemcpyINTEL not available for GPU buffer\n", __func__);
+            GGML_LOG_ERROR("%s: clEnqueueMemcpyINTEL not available for GPU buffer\n", __func__);
         }
     } else {
         memcpy(data, (const char *) tensor->data + offset, size);
@@ -567,8 +567,8 @@ static bool ggml_backend_openvino_buffer_cpy_tensor(ggml_backend_buffer_t buffer
         // For remote (device) buffers, use OpenCL USM memcpy
         cl_command_queue queue = ggml_openvino_get_cl_queue();
         auto mem_cpy_fn = ggml_openvino_get_clEnqueueMemcpyINTEL();
-        if (queue == nullptr || mem_cpy_fn == nullptr) {
-            GGML_LOG_ERROR("%s: no OpenCL queue or clEnqueueMemcpyINTEL not available for GPU buffer\n", __func__);
+        if (mem_cpy_fn == nullptr) {
+            GGML_LOG_ERROR("%s: clEnqueueMemcpyINTEL not available for GPU buffer\n", __func__);
             return false;
         }
         // Can copy from host to device
@@ -610,7 +610,7 @@ static void ggml_backend_openvino_buffer_clear(ggml_backend_buffer_t buffer, uin
     if (ctx->is_remote) {
         cl_command_queue queue = ggml_openvino_get_cl_queue();
         auto mem_fill_fn = ggml_openvino_get_clEnqueueMemFillINTEL();
-        if (queue != nullptr && mem_fill_fn != nullptr) {
+        if (mem_fill_fn != nullptr) {
             uint8_t pattern = value;
             cl_int err = mem_fill_fn(queue, ctx->data, &pattern, sizeof(pattern), ctx->size, 0, nullptr, nullptr);
             if (err != CL_SUCCESS) {
@@ -618,8 +618,7 @@ static void ggml_backend_openvino_buffer_clear(ggml_backend_buffer_t buffer, uin
             }
             clFinish(queue);
         } else {
-            GGML_LOG_WARN("%s: no OpenCL queue or clEnqueueMemFillINTEL not available for GPU buffer clear\n",
-                          __func__);
+            GGML_LOG_WARN("%s: clEnqueueMemFillINTEL not available for GPU buffer clear\n", __func__);
         }
     } else {
         memset(ctx->data, value, ctx->size);
