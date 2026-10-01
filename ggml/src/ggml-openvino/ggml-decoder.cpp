@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <map>
@@ -31,7 +32,6 @@
 #include <set>
 #include <stdexcept>
 #include <string>
-#include <cstring>
 #include <unordered_map>
 #include <vector>
 
@@ -317,7 +317,7 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
             if (src->ne[2] * src->ne[3] == node->ne[1]) {
                 op_case = 5;
             }
-        } else if (node->ne[0] == 1 && src->ne[0] * src->ne[1] * src->ne[2] == node->ne[1]) {
+        } else if (node->ne[0] == 1 && src->ne[0] * src->ne[1] * src->ne[2] == node->ne[1] && is_kvcache(src, node)) {
             op_case = 3;
         } else if (name.find("linear_attn_qkv_mixed") == 0 || name.find("alpha") == 0) {
             op_case = 6;
@@ -350,7 +350,7 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
                             norm = norm->src[0];
                         }
                         recurrent = recurrent || (norm->op == GGML_OP_RMS_NORM && norm->src[0]->op == GGML_OP_VIEW &&
-                                                   norm->src[0]->src[0]->op == GGML_OP_GATED_DELTA_NET);
+                                                  norm->src[0]->src[0]->op == GGML_OP_GATED_DELTA_NET);
                     }
                 }
             }
@@ -442,8 +442,7 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         break;
     }
     case GGML_OP_VIEW: {
-        if (!m_model_params.has_rs_rollback && node->src[0] != nullptr &&
-            node->src[0]->op == GGML_OP_GATED_DELTA_NET) {
+        if (!m_model_params.has_rs_rollback && node->src[0] != nullptr && node->src[0]->op == GGML_OP_GATED_DELTA_NET) {
             // The GDN translator publishes native attention/state outputs under these VIEW names.
             op_case = 2;
             break;
@@ -505,8 +504,7 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         if (node->src[0]->op == GGML_OP_VIEW) {
             if (is_same_shape(node->src[0]->src[0], node->src[0])) {
                 op_case = 1;
-            } else if (!m_model_params.has_rs_rollback &&
-                       node->src[0]->src[0]->op == GGML_OP_GATED_DELTA_NET) {
+            } else if (!m_model_params.has_rs_rollback && node->src[0]->src[0]->op == GGML_OP_GATED_DELTA_NET) {
                 // GDN attention is routed directly to this VIEW by get_output_names().
                 op_case = 3;
             } else if (node->src[0]->src[0]->op == GGML_OP_GATED_DELTA_NET) {
@@ -793,8 +791,8 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
     // two agree while the context is shorter than the window, then diverge, and the mask add fails
     // shape inference ("Failed to broadcast-merge input shapes") partway into a long prompt.
     {
-        std::map<int, int64_t> layer_extent;                      // layer -> leaf cache_k cell count
-        std::map<int, const ggml_tensor *> layer_mask;            // layer -> mask it consumes
+        std::map<int, int64_t> layer_extent;            // layer -> leaf cache_k cell count
+        std::map<int, const ggml_tensor *> layer_mask;  // layer -> mask it consumes
         int64_t max_extent = 0;
 
         for (int i = 0; i < cgraph->n_nodes; i++) {
@@ -804,10 +802,18 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
             }
             const ggml_tensor * cache_k_permute = nullptr;
             switch (get_attention_pattern_case(cgraph->nodes[i])) {
-            case 0:  cache_k_permute = cgraph->nodes[i]->src[1];                     break;
-            case 1:  cache_k_permute = cgraph->nodes[i]->src[1]->src[0];             break;
-            case 2:  cache_k_permute = cgraph->nodes[i]->src[0]->src[0];             break;
-            default: cache_k_permute = cgraph->nodes[i]->src[0]->src[0]->src[0];     break;
+            case 0:
+                cache_k_permute = cgraph->nodes[i]->src[1];
+                break;
+            case 1:
+                cache_k_permute = cgraph->nodes[i]->src[1]->src[0];
+                break;
+            case 2:
+                cache_k_permute = cgraph->nodes[i]->src[0]->src[0];
+                break;
+            default:
+                cache_k_permute = cgraph->nodes[i]->src[0]->src[0]->src[0];
+                break;
             }
             const ggml_tensor * cache_k_view = cache_k_permute->src[0];
             if (cache_k_view->op != GGML_OP_VIEW) {
@@ -836,8 +842,8 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
         if (ggml_openvino_getenv_int("GGML_OPENVINO_LOG_SWA_LAYERS")) {
             std::string per_layer;
             for (const auto & [layer, extent] : layer_extent) {
-                per_layer += " " + std::to_string(layer) + ":" + std::to_string(extent) +
-                             (extent < max_extent ? "(swa)" : "");
+                per_layer +=
+                    " " + std::to_string(layer) + ":" + std::to_string(extent) + (extent < max_extent ? "(swa)" : "");
             }
             GGML_LOG_WARN("ov-swa: attn_layers=%zu max_extent=%ld swa_layers=%zu |%s\n", layer_extent.size(),
                           (long) max_extent, model_params.swa_layers.size(), per_layer.c_str());
@@ -1086,8 +1092,8 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
         input_shape = ov::PartialShape{1, 1, 1, m_is_static ? m_compute_params.output_len : -1};
 
     } else if (is_inp_mean(input, op)) {
-        input_shape = m_is_static ? ov::PartialShape{1, 1, input->ne[1], m_prefill_chunk_size} :
-                                    ov::PartialShape{1, 1, -1, -1};
+        input_shape =
+            m_is_static ? ov::PartialShape{1, 1, input->ne[1], m_prefill_chunk_size} : ov::PartialShape{1, 1, -1, -1};
 
     } else if (is_inp_mask(input, op)) {
         // mask
@@ -1331,8 +1337,7 @@ void GgmlOvDecoder::compute_model_inputs() {
                 src_name = get_tensor_ov_name(m_cgraph, src);
             }
             m_inputs[src_name] = src;
-            m_model_inputs[src_name] = {get_ov_type(src),
-                                        get_graph_input_shape(node, src, m_node_dynamic_dims[src])};
+            m_model_inputs[src_name] = {get_ov_type(src), get_graph_input_shape(node, src, m_node_dynamic_dims[src])};
         }
     }
 }
@@ -1537,8 +1542,8 @@ std::shared_ptr<ov::Node> GgmlOvDecoder::create_weight_node(ggml_tensor * tensor
     // pointer to avoid re-extracting on every recompile. Opt-in via
     // GGML_OPENVINO_REDUCE_COMPILE_MEM or GGML_OPENVINO_MEMORY_OPTIMIZE. Skip
     // for `naive` (test/naive path) since use_bias changes the produced node.
-    const bool cacheable_nonov = ggml_openvino_reduce_compile_mem_enabled() && !is_ov_buffer &&
-                                 !naive && tensor->data != nullptr;
+    const bool cacheable_nonov =
+        ggml_openvino_reduce_compile_mem_enabled() && !is_ov_buffer && !naive && tensor->data != nullptr;
     if (cacheable_nonov) {
         std::lock_guard<std::mutex> lock(g_nonov_weight_cache_mutex);
         auto it = g_nonov_weight_cache.find(tensor->data);
