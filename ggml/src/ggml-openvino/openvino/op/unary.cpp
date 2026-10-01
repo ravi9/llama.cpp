@@ -61,10 +61,19 @@ OutputVector translate_unary_elu(const NodeContext & context) {
 
 OutputVector translate_unary_hardsigmoid(const NodeContext & context) {
     num_inputs_check(context, 1, 1);
+    // compute in f32 like the ggml reference: 1/6 is not exact in f16/bf16 (NPU cannot take the f32 path)
     auto input = process_view_input_new(context, 0);
-    auto alpha = ov::op::v0::Constant::create(input.get_element_type(), ov::Shape{}, {1.0f / 6.0f});
-    auto beta = ov::op::v0::Constant::create(input.get_element_type(), ov::Shape{}, {0.5f});
-    auto res = std::make_shared<ov::op::v0::HardSigmoid>(input, alpha, beta);
+    const auto type = ggml_openvino_is_npu() ? input.get_element_type() : ov::element::f32;
+    ov::Output<ov::Node> x = input;
+    if (type != input.get_element_type()) {
+        x = std::make_shared<ov::op::v0::Convert>(input, type);
+    }
+    auto alpha = ov::op::v0::Constant::create(type, ov::Shape{}, {1.0f / 6.0f});
+    auto beta = ov::op::v0::Constant::create(type, ov::Shape{}, {0.5f});
+    ov::Output<ov::Node> res = std::make_shared<ov::op::v0::HardSigmoid>(x, alpha, beta);
+    if (type != input.get_element_type()) {
+        res = std::make_shared<ov::op::v0::Convert>(res, input.get_element_type());
+    }
     return rename_outputs_with_suffix({res}, context.get_name());
 }
 
@@ -86,10 +95,19 @@ OutputVector translate_unary_round(const NodeContext & context) {
 
 OutputVector translate_unary_expm1(const NodeContext & context) {
     num_inputs_check(context, 1, 1);
+    // compute in f32 like the ggml reference: exp(x) - 1 in f16 loses the small-x digits (NPU cannot take the f32 path)
     auto input = process_view_input_new(context, 0);
-    auto exp = std::make_shared<ov::op::v0::Exp>(input);
-    auto one = ov::op::v0::Constant::create(input.get_element_type(), ov::Shape{}, {1.0f});
-    auto res = std::make_shared<ov::op::v1::Subtract>(exp, one);
+    const auto type = ggml_openvino_is_npu() ? input.get_element_type() : ov::element::f32;
+    ov::Output<ov::Node> x = input;
+    if (type != input.get_element_type()) {
+        x = std::make_shared<ov::op::v0::Convert>(input, type);
+    }
+    auto exp = std::make_shared<ov::op::v0::Exp>(x);
+    auto one = ov::op::v0::Constant::create(type, ov::Shape{}, {1.0f});
+    ov::Output<ov::Node> res = std::make_shared<ov::op::v1::Subtract>(exp, one);
+    if (type != input.get_element_type()) {
+        res = std::make_shared<ov::op::v0::Convert>(res, input.get_element_type());
+    }
     return rename_outputs_with_suffix({res}, context.get_name());
 }
 
