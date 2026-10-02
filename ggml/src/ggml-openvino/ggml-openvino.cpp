@@ -343,8 +343,9 @@ static enum ggml_status ggml_backend_openvino_buffer_init_tensor(ggml_backend_bu
             // graph input, binding it fails the shape check. Give it its own extra instead;
             // ggml_openvino_create_tensor_extra reads ne and data off the view, so the offset is
             // handled too. Only safe for a contiguous view - the ov::Tensor assumes dense strides.
+            // Skip empty views: they have no data, and on GPU one can sit at the end of the USM buffer.
             if (!ggml_are_same_shape(tensor, tensor->view_src) && ggml_is_contiguous(tensor) &&
-                !ggml_is_quantized(tensor->type) && tensor->data != nullptr) {
+                !ggml_is_quantized(tensor->type) && tensor->data != nullptr && ggml_nbytes(tensor) > 0) {
                 if (ggml_openvino_tensor_extra * extra =
                         ggml_openvino_create_tensor_extra(tensor, ctx->is_remote)) {
                     auto it = ctx->tensor_extras.find(tensor);
