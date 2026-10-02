@@ -87,6 +87,14 @@ void GgmlOvDecoder::update_io(ggml_cgraph * cgraph) {
     compute_model_outputs();
 }
 
+// llama keeps separate graphs for batches with and without outputs, so a cache hit can come from a
+// graph built in other memory. The decoder then still points at the old graph's tensors.
+bool GgmlOvDecoder::is_bound_to(const ggml_cgraph * cgraph) const {
+    return m_cgraph == cgraph && cgraph->n_nodes > 0 && m_node_info_list.size() == (size_t) cgraph->n_nodes &&
+           m_node_info_list.front().node == cgraph->nodes[0] &&
+           m_node_info_list.back().node == cgraph->nodes[cgraph->n_nodes - 1];
+}
+
 GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph, std::map<std::string, std::shared_ptr<ov::Node>> & model_weights) {
     m_cgraph = cgraph;
     m_model_weights = model_weights;

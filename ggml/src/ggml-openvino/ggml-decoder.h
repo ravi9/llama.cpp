@@ -361,6 +361,7 @@ public:
     void add_extra_inputs();
 
     void update_io(ggml_cgraph * cgraph);
+    bool is_bound_to(const ggml_cgraph * cgraph) const;
 
     static bool is_inp_tok(const ggml_tensor * tensor, const ggml_tensor * op) {
         return op->op == GGML_OP_GET_ROWS && tensor == op->src[1] && op->src[0]->op == GGML_OP_NONE;
