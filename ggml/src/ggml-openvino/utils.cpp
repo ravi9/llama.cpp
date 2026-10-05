@@ -676,6 +676,15 @@ ov::Tensor get_ov_input_tensor_static_prefill(const std::shared_ptr<GgmlOvDecode
         return input_tensor;
     }
 
+    if (GgmlOvDecoder::is_inp_scale_rows(ggml_tensor, op)) {
+        ov::Tensor input_tensor(ov::element::f32, ov::Shape{1, 1, chunk_size, 1});
+        auto * dst = input_tensor.data<float>();
+        const auto * src = static_cast<const float *>(ggml_tensor->data) + chunk_index * chunk_size;
+        std::copy(src, src + chunk_valid_size, dst);
+        std::fill(dst + chunk_valid_size, dst + chunk_size, 1.0f);
+        return input_tensor;
+    }
+
     if (GgmlOvDecoder::is_inp_mean(ggml_tensor, op)) {
         const size_t n_seqs = ggml_tensor->ne[1];
         const size_t src_stride = ggml_tensor->ne[0];

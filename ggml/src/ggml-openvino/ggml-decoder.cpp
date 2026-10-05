@@ -1097,6 +1097,9 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
         input_shape = m_is_static ? ov::PartialShape{1, 1, input->ne[1], m_prefill_chunk_size} :
                                     ov::PartialShape{1, 1, -1, -1};
 
+    } else if (is_inp_scale_rows(input, op)) {
+        input_shape = ov::PartialShape{1, 1, m_is_static ? (m_is_prefill ? m_prefill_chunk_size : 1) : -1, 1};
+
     } else if (is_inp_mask(input, op)) {
         // mask
         if (m_is_static) {
@@ -2099,6 +2102,10 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
             } else {
                 if (is_inp_tok(src, node) || is_inp_pos(src, node) || is_output_idx(src, node)) {
                     m_node_dynamic_dims[src] = 0;
+                    continue;
+                }
+                if (is_inp_scale_rows(src, node)) {
+                    m_node_dynamic_dims[src] = 1;
                     continue;
                 }
                 if (node->op == GGML_OP_VIEW && src->op == GGML_OP_NONE && !is_stateful() && !m_model_is_splitted) {
