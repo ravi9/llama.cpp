@@ -1529,6 +1529,13 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         }
         break;
     }
+    case GGML_OP_DUP: {
+        // translated as CONT, so only a plain copy
+        if (op->type != op->src[0]->type || !ggml_are_same_shape(op, op->src[0]) || !ggml_is_contiguous(op->src[0])) {
+            return {false, "DUP with type conversion or non-contiguous src is not supported"};
+        }
+        break;
+    }
     case GGML_OP_CPY: {
         if (op->src[0]->type != GGML_TYPE_BF16 && op->src[1]->type == GGML_TYPE_BF16) {
             return {false, "CPY with BF16 src[1] type is not supported"};
