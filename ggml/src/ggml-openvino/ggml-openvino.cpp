@@ -1369,6 +1369,10 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         if (op->type == GGML_TYPE_I64) {
             return {false, "CONCAT with I64 type is not supported"};
         }
+        // quantized inputs are dequantized, so the output cannot be written in the quantized type
+        if (ggml_is_quantized(op->type)) {
+            return {false, "CONCAT with quantized type is not supported"};
+        }
         if (ggml_openvino_is_gpu() && op->type == GGML_TYPE_BF16 && has_view_op_input(op)) {
             return {false, "CONCAT with BF16 type and VIEW input is not supported on GPU"};
         }
