@@ -229,6 +229,15 @@ static std::string get_tensor_graph_input_ov_name(const GgmlOvDecoder * decoder,
             return get_tensor_ov_name(cgraph, tensor) + "_swa";
         }
     }
+    if (!decoder->get_model_params().swa_layers.empty() && GgmlOvDecoder::is_kv_idx(tensor, op) &&
+        op->src[2] != nullptr) {
+        // same as the masks: the full and the sliding-window cache get KV write indices of the same name
+        const ggml_tensor * cache = op->src[2]->view_src != nullptr ? op->src[2]->view_src : op->src[2];
+        auto layer = extract_layer_from_name(cache->name);
+        if (layer.has_value() && decoder->is_swa_layer(layer.value())) {
+            return get_tensor_ov_name(cgraph, tensor) + "_swa";
+        }
+    }
     return get_tensor_ov_name(cgraph, tensor);
 }
 
@@ -803,10 +812,9 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
     // from the first graph onwards, while the view grows with context depth and would invert the
     // comparison at shallow depth.
     //
-    // Layers whose leaf is smaller than the largest leaf are the windowed ones. When every layer
-    // reports the same extent there is no distinction to draw -- either the model has no windowed
-    // layers, or the window is at least as large as the context so the two caches coincide, in
-    // which case a windowed layer and a full-attention one compute the same thing.
+    // Layers whose leaf is smaller than the largest leaf are the windowed ones. Equal extents do not
+    // rule them out: the windowed cache is padded to n_swa + n_ubatch, which can equal the full
+    // context (gemma-4 at -c 1024 -ub 512). See the mask fallback below.
     //
     // Getting this wrong is silent and severe: with the windowed layers classified as
     // full-attention, permute's KV slicing uses attention_size instead of attention_size_swa. The
@@ -849,6 +857,32 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
                 if (model_params.swa_mask == nullptr) {
                     model_params.swa_mask = layer_mask[layer];
                 }
+            }
+        }
+
+        // equal extents: tell the two masks apart by the layers that read them, the larger group gets the swa role
+        // (gemma-4: 4 of 5 layers). Groups of equal size can not be told apart, so leave the layers unclassified.
+        // Two masks do not imply swa (deepseek sparse attention builds two full masks), but the role does not need
+        // them to: it gives each group its own mask, KV write indices and attention size, which is right either way.
+        // The only use of the window itself, the stateful mask rebuild, reads it back from the mask, and on a full
+        // mask that gives back the causal mask. Decide from the first graph, before the window shows in the mask, so
+        // the graph does not change, and is not recompiled, when it does.
+        // TODO: "larger group is swa" is a model-level guess. Revisit when llama.cpp tells the backend which layers
+        // use a sliding window. Stateless graphs only need the two groups kept apart (separate mask, KV write index
+        // and attention size inputs), not the swa role itself, so the guess could be limited to stateful execution.
+        if (model_params.swa_layers.empty()) {
+            std::map<const ggml_tensor *, std::vector<int>> mask_layers;
+            for (const auto & [layer, mask] : layer_mask) {
+                mask_layers[mask].push_back(layer);
+            }
+            if (mask_layers.size() == 2 &&
+                mask_layers.begin()->second.size() != std::next(mask_layers.begin())->second.size()) {
+                auto swa = mask_layers.begin();
+                if (std::next(swa)->second.size() > swa->second.size()) {
+                    swa = std::next(swa);
+                }
+                model_params.swa_layers = swa->second;
+                model_params.swa_mask = swa->first;
             }
         }
         std::sort(model_params.swa_layers.begin(), model_params.swa_layers.end());
