@@ -88,6 +88,12 @@ OutputVector translate_flash_attn_ext(const NodeContext & context) {
     // float logit_softcap = params[2];
 
     auto q = std::make_shared<ov::op::v0::Convert>(q_f32, ov::element::f16);
+    // if (k.get_element_type() != ov::element::f16) {
+    //     k = std::make_shared<ov::op::v0::Convert>(k, ov::element::f16);
+    // }
+    // if (v.get_element_type() != ov::element::f16) {
+    //     v = std::make_shared<ov::op::v0::Convert>(v, ov::element::f16);
+    // }
     auto scale_node = std::make_shared<ov::op::v0::Constant>(ov::element::f16, ov::Shape{}, std::vector<float>{scale});
 
     ov::Output<ov::Node> res;

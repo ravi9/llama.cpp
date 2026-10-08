@@ -322,7 +322,13 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
         FRONT_END_OP_CONVERSION_CHECK(it != m_translator_map.end(), "Translation for operation type ", operation_type,
                                       " is not implemented.");
         NodeContext node_context(decoder, tensor_map, node_idx, this);
-        ov::OutputVector converted_outputs = it->second(node_context);
+        ov::OutputVector converted_outputs;
+        try {
+            converted_outputs = it->second(node_context);
+        } catch (const std::exception & e) {
+            OPENVINO_THROW("Error in op translator for '", operation_type, "' while translating node '",
+                           decoder->get_op_name(node_idx), "' (node_idx: ", node_idx, "): ", e.what());
+        }
 
         FRONT_END_OP_CONVERSION_CHECK(node_output_names.size() == converted_outputs.size(), "Number of ",
                                       operation_type, " outputs greater than number of converted outputs, which are ",

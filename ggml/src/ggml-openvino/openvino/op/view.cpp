@@ -33,7 +33,8 @@ OutputVector translate_view(const NodeContext & context) {
         // single-expert slice here. Gated by name (ffn_moe_weighted...view) so it can't
         // affect any other view.
         const std::string & vname = context.get_name();
-        if (vname.find("ffn_moe_weighted") != std::string::npos) {
+        if (vname.find("ffn_moe_weighted") != std::string::npos ||
+            vname.find("per_layer") != std::string::npos) {
             auto src_ps = context.get_input_shape(0);
             auto dst_ps = context.get_output_shape();
             if (src_ps.rank().is_static() && dst_ps.rank().is_static() && src_ps.rank() == dst_ps.rank() &&
