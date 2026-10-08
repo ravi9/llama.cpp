@@ -461,6 +461,17 @@ ov::Output<ov::Node> process_view_input_new(const NodeContext & context, int inp
     // Check if this input has view inputs
     size_t view_input_size = context.get_view_input_size(input_index);
     if (view_input_size == 0) {
+        auto exp_shape = context.get_input_shape(input_index);
+        if (exp_shape.is_static() && input.get_partial_shape().is_static() &&
+            exp_shape != input.get_partial_shape() &&
+            ov::shape_size(exp_shape.to_shape()) == ov::shape_size(input.get_shape())) {
+            auto target_shape = exp_shape.to_shape();
+            return std::make_shared<ov::op::v1::Reshape>(
+                input,
+                ov::op::v0::Constant::create(ov::element::i64, {target_shape.size()},
+                    std::vector<int64_t>(target_shape.begin(), target_shape.end())),
+                false);
+        }
         // No view inputs, return the input as is
         return input;
     }

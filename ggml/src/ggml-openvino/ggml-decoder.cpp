@@ -246,6 +246,65 @@ bool is_moe_expert_sum_add(const ggml_tensor * node) {
     return base != nullptr && base->ne[1] > 1 && plane_indices.size() == static_cast<size_t>(base->ne[1]);
 }
 
+bool is_mmproj_flash_attn_pattern(const ggml_tensor * node) {
+    if (node == nullptr || node->op != GGML_OP_FLASH_ATTN_EXT) {
+        return false;
+    }
+    if (node->src[0] == nullptr || node->src[1] == nullptr || node->src[2] == nullptr) {
+        return false;
+    }
+
+    auto unwrap_cast = [](const ggml_tensor * t) -> const ggml_tensor * {
+        if (t != nullptr && t->op == GGML_OP_CPY && t->src[0] != nullptr) {
+            return t->src[0];
+        }
+        return t;
+    };
+
+    const ggml_tensor * q = unwrap_cast(node->src[0]);
+    const ggml_tensor * k = unwrap_cast(node->src[1]);
+    const ggml_tensor * v = unwrap_cast(node->src[2]);
+
+    if (q->op != GGML_OP_PERMUTE || k->op != GGML_OP_PERMUTE || v->op != GGML_OP_PERMUTE) {
+        return false;
+    }
+
+    if (q->src[0] == nullptr || k->src[0] == nullptr || v->src[0] == nullptr) {
+        return false;
+    }
+
+    // mmproj attention tensors are direct projections without KV cache
+    if (k->src[0]->op == GGML_OP_VIEW || v->src[0]->op == GGML_OP_VIEW ||
+        GgmlOvDecoder::is_cache(k->src[0], nullptr) || GgmlOvDecoder::is_cache(v->src[0], nullptr) ||
+        GgmlOvDecoder::is_cache(k->src[0]->view_src, nullptr) || GgmlOvDecoder::is_cache(v->src[0]->view_src, nullptr)) {
+        return false;
+    }
+
+    // Permutation must swap axis 1 and 2: (0, 2, 1, 3)
+    const int32_t expected_perm[4] = {0, 2, 1, 3};
+    for (const auto * t : {q, k, v}) {
+        if (memcmp(t->op_params, expected_perm, sizeof(expected_perm)) != 0) {
+            return false;
+        }
+    }
+
+    // Shapes: [d_head, n_pos, n_head, B]
+    if (q->ne[0] != k->ne[0] || k->ne[0] != v->ne[0]) {
+        return false;
+    }
+    if (k->ne[1] != v->ne[1] || k->ne[2] != v->ne[2] || k->ne[2] == 0) {
+        return false;
+    }
+    if (q->ne[2] % k->ne[2] != 0) {
+        return false;
+    }
+    if (q->ne[3] != k->ne[3] || k->ne[3] != v->ne[3]) {
+        return false;
+    }
+
+    return true;
+}
+
 std::string GgmlOvDecoder::get_tensor_name(const ggml_cgraph * cgraph, const ggml_tensor * tensor) {
     if (tensor == nullptr) {
         return "";
@@ -591,9 +650,11 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
                     op_case = 6;
                 }
             }
-        } else {
+        } else if (node->src[0]->src[0]->op == GGML_OP_ROPE) {
             // rope'ed query tensor
             op_case = 2;
+        } else {
+            op_case = 1;
         }
         break;
     }
@@ -960,7 +1021,7 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
 
         switch (node->op) {
         case GGML_OP_FLASH_ATTN_EXT:
-            if (node->src[0] == nullptr || node->src[1] == nullptr) {
+            if (node->src[0] == nullptr || node->src[1] == nullptr || is_mmproj_flash_attn_pattern(node)) {
                 return -1;
             }
             switch (node->src[1]->op) {
@@ -1202,7 +1263,11 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
             }
 
             ggml_tensor * cache_k = cache_k_view->src[0];
-            int layer = extract_layer_from_name(cache_k->name).value();
+            auto layer_opt = extract_layer_from_name(cache_k->name);
+            if (!layer_opt.has_value()) {
+                continue;
+            }
+            int layer = layer_opt.value();
 
             // Classified by the pre-pass above, which groups layers by mask tensor identity. The
             // mask NAME cannot be used: build_attn_inp_kq_mask() gives both masks the same name.
@@ -2507,8 +2572,9 @@ size_t GgmlOvDecoder::get_view_input_src_offset(int node_idx, const std::string 
     if (it != m_node_info_list[node_idx].node_inputs_views.end()) {
         if (view_index < it->second.size()) {
             auto * view_tensor = it->second[view_index].second;
-            if (view_tensor && view_tensor->src[0]) {
-                return view_tensor->src[0]->view_offs;
+            auto * src_tensor = view_tensor ? (view_tensor->src[0] ? view_tensor->src[0] : view_tensor->view_src) : nullptr;
+            if (src_tensor) {
+                return src_tensor->view_offs;
             }
         }
     }
@@ -2534,8 +2600,9 @@ std::vector<size_t> GgmlOvDecoder::get_view_input_src_stride(int node_idx,
     if (it != m_node_info_list[node_idx].node_inputs_views.end()) {
         if (view_index < it->second.size()) {
             auto * view_tensor = it->second[view_index].second;
-            if (view_tensor && view_tensor->src[0]) {
-                return get_stride(view_tensor->src[0]);
+            auto * src_tensor = view_tensor ? (view_tensor->src[0] ? view_tensor->src[0] : view_tensor->view_src) : nullptr;
+            if (src_tensor) {
+                return get_stride(src_tensor);
             }
         }
     }
@@ -2559,8 +2626,9 @@ ov::Shape GgmlOvDecoder::get_view_input_src_ggml_shape(int node_idx,
     if (it != m_node_info_list[node_idx].node_inputs_views.end()) {
         if (view_index < it->second.size()) {
             auto * view_tensor = it->second[view_index].second;
-            if (view_tensor && view_tensor->src[0]) {
-                return get_shape(view_tensor->src[0]);
+            auto * src_tensor = view_tensor ? (view_tensor->src[0] ? view_tensor->src[0] : view_tensor->view_src) : nullptr;
+            if (src_tensor) {
+                return get_shape(src_tensor);
             }
         }
     }
@@ -2597,8 +2665,8 @@ ov::PartialShape GgmlOvDecoder::get_view_input_src_ov_shape(int node_idx,
     if (it != m_node_info_list[node_idx].node_inputs_views.end()) {
         if (view_index < it->second.size()) {
             auto * view_tensor = it->second[view_index].second;
-            if (view_tensor && view_tensor->src[0]) {
-                auto * src_tensor = view_tensor->src[0];
+            auto * src_tensor = view_tensor ? (view_tensor->src[0] ? view_tensor->src[0] : view_tensor->view_src) : nullptr;
+            if (src_tensor) {
                 ov::PartialShape shape = ov::PartialShape{get_shape(src_tensor)};
 
                 // Check if this tensor has a dynamic dimension
@@ -2631,9 +2699,36 @@ std::string GgmlOvDecoder::get_view_input_src_name(int node_idx, const std::stri
     if (it != m_node_info_list[node_idx].node_inputs_views.end()) {
         if (view_index < it->second.size()) {
             auto * view_tensor = it->second[view_index].second;
-            if (view_tensor && view_tensor->src[0]) {
-                return get_tensor_ov_name(m_cgraph, view_tensor->src[0]);
+            if (view_tensor) {
+                auto * base = view_tensor->src[0] ? view_tensor->src[0] : view_tensor->view_src;
+                if (base) {
+                    if (is_rope_freqs_weight(base->view_src ? base->view_src : base, m_node_info_list[node_idx].node)) {
+                        return "rope_freqs.weight";
+                    }
+                    if (base->flags & GGML_TENSOR_FLAG_INPUT) {
+                        return get_tensor_graph_input_ov_name(this, m_cgraph, base, m_node_info_list[node_idx].node);
+                    }
+                    return get_tensor_ov_name(m_cgraph, base);
+                }
             }
+        }
+    }
+    return "";
+}
+
+std::string GgmlOvDecoder::get_input_view_src_name(int node_idx, const std::string & name) const {
+    auto it = m_node_info_list[node_idx].node_inputs.find(name);
+    if (it != m_node_info_list[node_idx].node_inputs.end()) {
+        auto * src = it->second;
+        auto * base = src->view_src ? src->view_src : (src->src[0] ? src->src[0] : nullptr);
+        if (base) {
+            if (is_rope_freqs_weight(base->view_src ? base->view_src : base, m_node_info_list[node_idx].node)) {
+                return "rope_freqs.weight";
+            }
+            if (base->flags & GGML_TENSOR_FLAG_INPUT) {
+                return get_tensor_graph_input_ov_name(this, m_cgraph, base, m_node_info_list[node_idx].node);
+            }
+            return get_tensor_ov_name(m_cgraph, base);
         }
     }
     return "";
