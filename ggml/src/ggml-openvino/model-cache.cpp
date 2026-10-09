@@ -175,6 +175,7 @@ static const char * cache_settings[] = {
     "GGML_OPENVINO_REDUCE_COMPILE_MEM",
     "GGML_OPENVINO_MEMORY_OPTIMIZE",
     "GGML_OPENVINO_PROFILING",
+    "GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK",
 };
 
 void ggml_openvino_model_cache_init() {

@@ -142,6 +142,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_DISABLE_REMOTE_OUTPUTS",
         "GGML_OPENVINO_REQUANT_KQUANT",
         "GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT",
+        "GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK",
         // Build the precise (but O(n_nodes)) graph cache key. Needed by op tests.
         "GGML_OPENVINO_FULL_GRAPH_KEY",
     };
@@ -320,6 +321,10 @@ bool ggml_openvino_is_npu() {
 
 bool ggml_openvino_is_gpu() {
     return has_prefix(ggml_openvino_get_device_name(), "GPU");
+}
+
+bool ggml_openvino_shape_from_mask_enabled() {
+    return ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK") == 0;
 }
 
 size_t ggml_openvino_max_alloc_size() {
