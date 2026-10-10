@@ -129,6 +129,9 @@ std::optional<int> extract_layer_from_name(const std::string & name);
 // detects the MoE expert-plane-sum ADD chain (see definition); used by supports_op too
 bool is_moe_expert_sum_add(const ggml_tensor * node);
 
+// detects the mmproj / vision attention pattern; used by supports_op and compute_llm_params
+bool is_mmproj_flash_attn_pattern(const ggml_tensor * node);
+
 class GgmlOvDecoder : public ov::frontend::ggml::GgmlDecoder {
 public:
     static std::string get_tensor_name(const ggml_cgraph * cgraph, const ggml_tensor * tensor);

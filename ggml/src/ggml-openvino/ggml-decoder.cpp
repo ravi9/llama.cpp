@@ -180,6 +180,65 @@ bool is_moe_expert_sum_add(const ggml_tensor * node) {
     return base != nullptr && base->ne[1] > 1 && plane_indices.size() == static_cast<size_t>(base->ne[1]);
 }
 
+bool is_mmproj_flash_attn_pattern(const ggml_tensor * node) {
+    if (node == nullptr || node->op != GGML_OP_FLASH_ATTN_EXT) {
+        return false;
+    }
+    if (node->src[0] == nullptr || node->src[1] == nullptr || node->src[2] == nullptr) {
+        return false;
+    }
+
+    auto unwrap_cast = [](const ggml_tensor * t) -> const ggml_tensor * {
+        if (t != nullptr && t->op == GGML_OP_CPY && t->src[0] != nullptr) {
+            return t->src[0];
+        }
+        return t;
+    };
+
+    const ggml_tensor * q = unwrap_cast(node->src[0]);
+    const ggml_tensor * k = unwrap_cast(node->src[1]);
+    const ggml_tensor * v = unwrap_cast(node->src[2]);
+
+    if (q->op != GGML_OP_PERMUTE || k->op != GGML_OP_PERMUTE || v->op != GGML_OP_PERMUTE) {
+        return false;
+    }
+
+    if (q->src[0] == nullptr || k->src[0] == nullptr || v->src[0] == nullptr) {
+        return false;
+    }
+
+    // mmproj attention tensors are direct projections without KV cache
+    if (k->src[0]->op == GGML_OP_VIEW || v->src[0]->op == GGML_OP_VIEW ||
+        GgmlOvDecoder::is_cache(k->src[0], nullptr) || GgmlOvDecoder::is_cache(v->src[0], nullptr) ||
+        GgmlOvDecoder::is_cache(k->src[0]->view_src, nullptr) || GgmlOvDecoder::is_cache(v->src[0]->view_src, nullptr)) {
+        return false;
+    }
+
+    // Permutation must swap axis 1 and 2: (0, 2, 1, 3)
+    const int32_t expected_perm[4] = {0, 2, 1, 3};
+    for (const auto * t : {q, k, v}) {
+        if (memcmp(t->op_params, expected_perm, sizeof(expected_perm)) != 0) {
+            return false;
+        }
+    }
+
+    // Shapes: [d_head, n_pos, n_head, B]
+    if (q->ne[0] != k->ne[0] || k->ne[0] != v->ne[0]) {
+        return false;
+    }
+    if (k->ne[1] != v->ne[1] || k->ne[2] != v->ne[2] || k->ne[2] == 0) {
+        return false;
+    }
+    if (q->ne[2] % k->ne[2] != 0) {
+        return false;
+    }
+    if (q->ne[3] != k->ne[3] || k->ne[3] != v->ne[3]) {
+        return false;
+    }
+
+    return true;
+}
+
 std::string GgmlOvDecoder::get_tensor_name(const ggml_cgraph * cgraph, const ggml_tensor * tensor) {
     if (tensor == nullptr) {
         return "";
@@ -334,7 +393,7 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
             if (src->ne[2] * src->ne[3] == node->ne[1]) {
                 op_case = 5;
             }
-        } else if (node->ne[0] == 1 && src->ne[0] * src->ne[1] * src->ne[2] == node->ne[1]) {
+        } else if (node->ne[0] == 1 && src->ne[0] * src->ne[1] * src->ne[2] == node->ne[1] /*&& is_kvcache(src, node)*/) {
             op_case = 3;
         } else if (name.find("linear_attn_qkv_mixed") == 0 || name.find("alpha") == 0) {
             op_case = 6;
@@ -385,7 +444,8 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         } else if (node->src[0]->src[0]->op == GGML_OP_NONE) {
             // kv cache tensor
             std::string src_name(node->view_src->name);
-            int layer = extract_layer_from_name(src_name).value();
+            auto layer_opt = extract_layer_from_name(src_name);
+            int layer = layer_opt.has_value() ? layer_opt.value() : 0;
             if (ggml_is_contiguous(node->src[0])) {
                 // -  19: [    64,     8,   256,     1] VIEW            cache_k_l0 (view)             [ 2,   128,  1024, 1048576]
                 //         [   512,  1024,     1,     1]      0: NONE     cache_k_l0                    [ 2,  1024, 1048576, 1048576]
@@ -408,9 +468,11 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
                     op_case = 6;
                 }
             }
-        } else {
+        } else if (node->src[0]->src[0]->op == GGML_OP_ROPE) {
             // rope'ed query tensor
             op_case = 2;
+        } else {
+            op_case = 1;
         }
         break;
     }
@@ -728,7 +790,7 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
 
         switch (node->op) {
         case GGML_OP_FLASH_ATTN_EXT:
-            if (node->src[0] == nullptr || node->src[1] == nullptr) {
+            if (node->src[0] == nullptr || node->src[1] == nullptr || is_mmproj_flash_attn_pattern(node)) {
                 return -1;
             }
             switch (node->src[1]->op) {
@@ -952,7 +1014,11 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
             }
 
             ggml_tensor * cache_k = cache_k_view->src[0];
-            int layer = extract_layer_from_name(cache_k->name).value();
+            auto layer_opt = extract_layer_from_name(cache_k->name);
+            if (!layer_opt.has_value()) {
+                continue;
+            }
+            int layer = layer_opt.value();
 
             // Classified by the pre-pass above, which groups layers by mask tensor identity. The
             // mask NAME cannot be used: build_attn_inp_kq_mask() gives both masks the same name.
