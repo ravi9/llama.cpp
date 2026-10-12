@@ -1,4 +1,4 @@
-#include "keep_sum_square_fp32.h"
+#include "keep-sum-square-fp32.h"
 
 #include <map>
 #include <openvino/core/type/element_type.hpp>
@@ -30,10 +30,7 @@ namespace ov {
 TRANSFORMATIONS_API void disable_conversion(const std::shared_ptr<Node> & node, const element::Type & to);
 }  // namespace ov
 
-namespace ov {
-namespace frontend {
-namespace ggml {
-namespace pass {
+namespace ggml_openvino {
 
 namespace {
 // the only consumer of node's output 0, or nullptr
@@ -137,11 +134,8 @@ KeepSumSquareFP32::KeepSumSquareFP32() {
         return true;
     };
 
-    register_matcher(std::make_shared<ov::pass::pattern::Matcher>(pattern, "ov::frontend::ggml::pass::KeepSumSquareFP32"),
+    register_matcher(std::make_shared<ov::pass::pattern::Matcher>(pattern, "ggml_openvino::KeepSumSquareFP32"),
                      callback);
 }
 
-}  // namespace pass
-}  // namespace ggml
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ggml_openvino

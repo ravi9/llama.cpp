@@ -19,8 +19,8 @@ Build both repos against the matching single-output op spec. Translation revisio
 
 Cache-only MTP serving still requires the separate OpenVINO dynamic output-binding fix (PR #39354). Removing recurrent cache Results does not eliminate that independent trigger in imported MTP graphs.
 
-Set `GGML_OPENVINO_ENABLE_KV_4D=1` to enable the upstream stateless in-place
-attention KV update pattern where eligible. It binds full-capacity cache tensors
+The upstream stateless in-place attention KV update pattern is on by default where
+eligible (`GGML_OPENVINO_ENABLE_KV_4D=0` disables it). It binds full-capacity cache tensors
 and lets the GPU fusion expose the live prefix to attention. The current upstream
 eligibility check supports one physical stream (including unified KV); explicit
 split multi-slot KV retains the ordinary full-cache path. This option does not
