@@ -1206,6 +1206,10 @@ static bool has_non_contiguous_view_input(const ggml_tensor * op) {
 }
 
 static bool is_supported_flash_attn_pattern(const ggml_tensor * op) {
+    if (is_mmproj_flash_attn_pattern(op)) {
+        return true;
+    }
+
     // Each Q/K/V input must follow one of:
     //   PERMUTE -> VIEW  -> base (view_src==nullptr)   (llama KV-cache path)
     //   PERMUTE -> RESHAPE -> base (view_src==nullptr)  (whisper Q)
@@ -1238,6 +1242,10 @@ static bool is_supported_flash_attn_pattern(const ggml_tensor * op) {
 }
 
 static bool is_gemma3n_flash_attn_pattern(const ggml_tensor * op) {
+    if (is_mmproj_flash_attn_pattern(op)) {
+        return false;
+    }
+
     if (!is_supported_flash_attn_pattern(op)) {
         return false;
     }
