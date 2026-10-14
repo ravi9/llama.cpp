@@ -1297,7 +1297,8 @@ static bool cpy_output_view_is_supported(const ggml_tensor * op) {
         return false;
     }
 
-    return ggml_nbytes(op) == 0 || ggml_is_contiguous(op) || GgmlOvDecoder::is_conv_state_writeback(op);
+    return ggml_nbytes(op) == 0 || ggml_is_contiguous(op) || GgmlOvDecoder::is_conv_state_writeback(op) ||
+           GgmlOvDecoder::is_gdn_snapshot_writeback(op);
 }
 
 static bool mul_mat_id_requires_large_tmp(const ggml_tensor * op) {
@@ -1365,6 +1366,12 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
     }
 
     switch (op->op) {
+    case GGML_OP_TOP_K: {
+        if (op->src[0]->type != GGML_TYPE_F32 || op->type != GGML_TYPE_I32 || ggml_openvino_is_npu()) {
+            return {false, "TOP_K requires F32 input and I32 output on CPU or GPU"};
+        }
+        break;
+    }
     case GGML_OP_CONCAT: {
         if (op->type == GGML_TYPE_I64) {
             return {false, "CONCAT with I64 type is not supported"};
@@ -1655,9 +1662,8 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         if (op->src[3]->ne[0] != 1) {
             return {false, "GATED_DELTA_NET with kda (per-key-dimension gating) is not supported"};
         }
-        // K > 1 (multiple state snapshots) not supported by fused op
-        if (((const int32_t *) op->op_params)[0] > 1) {
-            return {false, "GATED_DELTA_NET with K > 1 (multiple state snapshots) is not supported"};
+        if (op->op_params[0] > 1 && (!ggml_openvino_is_gpu() || ggml_openvino_getenv_int("GGML_OPENVINO_FORCE_STATIC"))) {
+            return {false, "GATED_DELTA_NET snapshots require dynamic GPU execution"};
         }
         break;
     }
@@ -1872,7 +1878,7 @@ static ggml_openvino_op_support ggml_backend_openvino_device_supports_op_impl(gg
         if (supported_types.find(src->type) == supported_types.end()) {
             return {false, "src[" + std::to_string(i) + "] type " + std::string(ggml_type_name(src->type)) + " is not supported"};
         }
-        if (!has_strides_on_element_grid(src)) {
+        if (!has_strides_on_element_grid(src) && !(i == 1 && GgmlOvDecoder::is_gdn_snapshot_writeback(op))) {
             return {false, "src[" + std::to_string(i) + "] strides are not multiples of each other"};
         }
         const bool is_supported_3d_moe_expert =

@@ -12,8 +12,10 @@
 #include <openvino/op/concat.hpp>
 #include <openvino/op/constant.hpp>
 #include <openvino/op/convert.hpp>
+#include <openvino/op/divide.hpp>
 #include <openvino/op/gather.hpp>
 #include <openvino/op/multiply.hpp>
+#include <openvino/op/mod.hpp>
 #include <openvino/op/negative.hpp>
 #include <openvino/op/range.hpp>
 #include <openvino/op/reshape.hpp>
@@ -33,6 +35,45 @@ OutputVector translate_cpy(const NodeContext & context) {
     auto op_case = context.get_op_case();
     auto input_shape = context.get_input_shape(0);
     auto output_shape = context.get_input_shape(1);
+
+    if (op_case == 11 || op_case == 12) {
+        auto base = context.get_input(1);
+        auto axis = ov::op::v0::Constant::create(ov::element::i64, {1}, {2});
+        auto zero = ov::op::v0::Constant::create(ov::element::i64, {1}, {0});
+        auto one = ov::op::v0::Constant::create(ov::element::i64, {1}, {1});
+        auto feature = ov::op::v0::Constant::create(ov::element::i64, {4},
+            std::vector<int64_t>{1, 1, -1, output_shape[3].get_length()});
+        ov::Output<ov::Node> state_part = context.get_input(0);
+        if (op_case == 11) {
+            auto source_rows = std::make_shared<ov::op::v8::Gather>(
+                std::make_shared<ov::op::v3::ShapeOf>(context.get_input(0), ov::element::i64), axis,
+                ov::op::v0::Constant::create(ov::element::i64, {}, {0}));
+            auto source_indices = std::make_shared<ov::op::v4::Range>(
+                std::make_shared<ov::op::v0::Squeeze>(context.get_input("rs_src_begin_" + context.get_name())),
+                std::make_shared<ov::op::v0::Squeeze>(source_rows),
+                std::make_shared<ov::op::v0::Squeeze>(one), ov::element::i64);
+            state_part = std::make_shared<ov::op::v8::Gather>(context.get_input(0), source_indices,
+                ov::op::v0::Constant::create(ov::element::i64, {}, {2}));
+        }
+        auto states = std::make_shared<ov::op::v1::Reshape>(state_part, feature, false);
+        auto rows = std::make_shared<ov::op::v8::Gather>(
+            std::make_shared<ov::op::v3::ShapeOf>(states, ov::element::i64), axis,
+            ov::op::v0::Constant::create(ov::element::i64, {}, {0}));
+        auto indices = std::make_shared<ov::op::v4::Range>(
+            std::make_shared<ov::op::v0::Squeeze>(zero), std::make_shared<ov::op::v0::Squeeze>(rows),
+            std::make_shared<ov::op::v0::Squeeze>(one), ov::element::i64);
+        auto seq_count = context.get_input("rs_seq_count_" + context.get_name());
+        auto plane = std::make_shared<ov::op::v1::Divide>(indices, seq_count);
+        auto sequence = std::make_shared<ov::op::v1::Mod>(indices, seq_count);
+        auto slots = std::make_shared<ov::op::v1::Add>(
+            std::make_shared<ov::op::v1::Multiply>(plane, context.get_input("rs_snapshot_stride_" + context.get_name())),
+            std::make_shared<ov::op::v1::Add>(sequence, context.get_input("rs_slot_begin_" + context.get_name())));
+        auto updated = std::make_shared<ov::op::v3::ScatterUpdate>(
+            std::make_shared<ov::op::v1::Reshape>(base, feature, false), slots, states, axis);
+        auto result = std::make_shared<ov::op::v1::Reshape>(
+            updated, std::make_shared<ov::op::v3::ShapeOf>(base, ov::element::i64), false);
+        return rename_outputs_with_suffix({result}, context.get_name());
+    }
 
     if (op_case == 4) {
         auto src = process_view_input_new(context, 0);
@@ -145,9 +186,12 @@ OutputVector translate_cpy(const NodeContext & context) {
             const std::string src_begin_name = "rs_src_begin_" + context.get_name();
             if (context.has_input(src_begin_name)) {
                 auto src_begin = context.get_input(src_begin_name);
-                auto src_end = std::make_shared<ov::op::v1::Add>(
-                    src_begin, ov::op::v0::Constant::create(ov::element::i64, {1}, {window_size}));
-                window = std::make_shared<ov::op::v8::Slice>(context.get_input(0), src_begin, src_end, one, col_axis);
+                std::vector<int64_t> offsets(window_size);
+                std::iota(offsets.begin(), offsets.end(), 0);
+                auto indices = std::make_shared<ov::op::v1::Add>(src_begin,
+                    ov::op::v0::Constant::create(ov::element::i64, {size_t(window_size)}, offsets));
+                window = std::make_shared<ov::op::v8::Gather>(context.get_input(0), indices,
+                    ov::op::v0::Constant::create(ov::element::i64, {}, {3}));
             } else if (context.has_input("chunk_valid_len")) {
                 std::vector<int64_t> offsets(window_size);
                 std::iota(offsets.begin(), offsets.end(), 0);

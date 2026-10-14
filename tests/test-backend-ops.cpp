@@ -3746,6 +3746,29 @@ struct test_rms_norm : public test_case {
     }
 };
 
+struct test_rms_norm_head_view : public test_case {
+    const int64_t head_size;
+    const int64_t heads;
+    const int64_t tokens;
+    const bool gate;
+
+    test_rms_norm_head_view(int64_t head_size, int64_t heads, int64_t tokens, bool gate)
+        : head_size(head_size), heads(heads), tokens(tokens), gate(gate) {}
+
+    std::string vars() override { return VARS_TO_STR4(head_size, heads, tokens, gate); }
+    std::string op_desc(ggml_tensor *) override { return "RMS_NORM_HEAD_VIEW"; }
+    bool run_whole_graph() override { return true; }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        auto * input = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 2 * head_size * heads, tokens);
+        auto * packed = ggml_scale(ctx, input, 0.75f);
+        auto * view = ggml_view_3d(ctx, packed, head_size, heads, tokens,
+            2 * head_size * sizeof(float), 2 * head_size * heads * sizeof(float),
+            gate ? head_size * sizeof(float) : 0);
+        return ggml_rms_norm(ctx, view, 1e-6f);
+    }
+};
+
 // GGML_OP_RMS_NORM_BACK
 struct test_rms_norm_back : public test_case {
     const ggml_type type;
@@ -4783,17 +4806,20 @@ struct test_gated_delta_net_cache_fusion : public test_case {
     const int64_t n_seq_tokens;
     const int64_t n_seqs;
     const int64_t K; // snapshot slot count (>1)
+    const int64_t cache_slots;
+    const int64_t cache_begin;
 
     ggml_tensor * cpy_node = nullptr;
 
     std::string vars() override {
-        return VARS_TO_STR6(type, head_count, head_size, n_seq_tokens, n_seqs, K);
+        return VARS_TO_STR8(type, head_count, head_size, n_seq_tokens, n_seqs, K, cache_slots, cache_begin);
     }
 
     test_gated_delta_net_cache_fusion(ggml_type type = GGML_TYPE_F32,
             int64_t head_count = 4, int64_t head_size = 32, int64_t n_seq_tokens = 2, int64_t n_seqs = 1,
-            int64_t K = 2)
-        : type(type), head_count(head_count), head_size(head_size), n_seq_tokens(n_seq_tokens), n_seqs(n_seqs), K(K) {}
+            int64_t K = 2, int64_t cache_slots = 0, int64_t cache_begin = 0)
+        : type(type), head_count(head_count), head_size(head_size), n_seq_tokens(n_seq_tokens), n_seqs(n_seqs), K(K),
+          cache_slots(cache_slots ? cache_slots : n_seqs), cache_begin(cache_begin) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         const int64_t S_v = head_size;
@@ -4838,12 +4864,12 @@ struct test_gated_delta_net_cache_fusion : public test_case {
                 ggml_row_size(gdn_out->type, attn_score_elems));
 
         // recurrent cache view [D, n_seqs, n_written]
-        ggml_tensor * cache = ggml_new_tensor_3d(ctx, type, D, n_seqs, n_written);
+        ggml_tensor * cache = ggml_new_tensor_2d(ctx, type, D, cache_slots * K);
         ggml_set_name(cache, "cache");
         ggml_tensor * dst = ggml_view_3d(ctx, cache,
                 D, n_seqs, n_written,
                 ggml_row_size(cache->type, D),
-                ggml_row_size(cache->type, D * n_seqs), 0);
+                ggml_row_size(cache->type, D * cache_slots), ggml_row_size(cache->type, D * cache_begin));
 
         ggml_tensor * cpy = ggml_cpy(ctx, src, dst);
         ggml_set_name(cpy, "gdn_cache_cpy");
@@ -4851,7 +4877,7 @@ struct test_gated_delta_net_cache_fusion : public test_case {
 
         // read the cpy output (not the plain dst view, which would not pull the cpy into the graph)
         // so that neither the gdn nor the cpy is the graph output
-        ggml_tensor * out = ggml_sum(ctx, cpy);
+        ggml_tensor * out = ggml_sum(ctx, ggml_add(ctx, cache, ggml_scale(ctx, ggml_sum(ctx, cpy), 0.0f)));
         return out;
     }
 
@@ -4861,7 +4887,7 @@ struct test_gated_delta_net_cache_fusion : public test_case {
     }
 
     bool run_whole_graph() override { return true; }
-    std::vector<ggml_tensor *> fusion_test_nodes() override { return { cpy_node }; }
+    std::vector<ggml_tensor *> fusion_test_nodes() override { return {}; }
 
     uint64_t op_flops(ggml_tensor * t) override {
         GGML_UNUSED(t);
@@ -4882,7 +4908,7 @@ struct test_gated_delta_net_cache_fusion : public test_case {
             } else if (strcmp(t->name, "v") == 0) {
                 init_tensor_uniform(t, -0.3f, 5.0f);
             } else if (strcmp(t->name, "cache") == 0) {
-                init_tensor_uniform(t, 0.0f, 0.0f);
+                init_tensor_uniform(t, 0.25f, 0.75f);
             } else {
                 init_tensor_uniform(t);
             }
@@ -10110,6 +10136,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_softcap(GGML_TYPE_F32, {10, 10, 10, 10}, 50.0f));
     test_cases.emplace_back(new test_silu_back());
 
+    for (int64_t tokens : {1, 2, 5}) {
+        for (bool gate : {false, true}) {
+            test_cases.emplace_back(new test_rms_norm_head_view(256, 8, tokens, gate));
+        }
+    }
     for (float eps : { 0.0f, 1e-6f, 1e-4f, 1e-1f, 10.f }) {
         for (uint32_t n : { 64, 1025 }) {
             for (bool v : { false, true }) {
@@ -11025,6 +11056,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {n, 2, 1, 3}, k, true));
         }
     }
+    for (int k : {10, 64}) {
+        for (bool ties : {false, true}) {
+            test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {248320, 2, 1, 3}, k, ties));
+        }
+    }
     for (int i = 0; i < 20; ++i) {
         for (int k : {1, 2, 3, 7, 15, 100, 500, 1023, 9999}) {
             if (k <= 1<<i) {
@@ -11562,6 +11598,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_gated_delta_net_cache_fusion(GGML_TYPE_F32, 4, 32,   4, 1, 4));
     test_cases.emplace_back(new test_gated_delta_net_cache_fusion(GGML_TYPE_F32, 8, 32,   4, 2, 4));
     test_cases.emplace_back(new test_gated_delta_net_cache_fusion(GGML_TYPE_F32, 4, 32,   8, 1, 4));
+    for (int64_t head_size : {32, 128}) {
+        for (int64_t tokens : {1, 2, 3, 5}) {
+            test_cases.emplace_back(new test_gated_delta_net_cache_fusion(GGML_TYPE_F32, 4, head_size, tokens, 2, 3, 5, 1));
+        }
+    }
 
 #if 0
     // these tests are disabled to save execution time, sbut they can be handy for debugging

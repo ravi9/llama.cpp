@@ -404,6 +404,11 @@ ov::Tensor create_ov_output_tensor(const std::shared_ptr<GgmlOvDecoder> & ggml_d
             output_data = ggml_tensor->view_src->data;
         } else {
             output_shape = GgmlOvDecoder::get_shape(ggml_tensor);
+            if (ggml_tensor->op == GGML_OP_GATED_DELTA_NET && ggml_tensor->op_params[0] > 1) {
+                const auto * value = ggml_tensor->src[2];
+                const int64_t valid_count = std::min<int64_t>(value->ne[2], ggml_tensor->op_params[0]);
+                output_shape[2] = (value->ne[2] + valid_count * value->ne[0]) * value->ne[3];
+            }
         }
     }
 
@@ -803,7 +808,7 @@ enum ggml_status naive_compute(ggml_cgraph * cgraph,
             // Debug-only output added via GGML_OPENVINO_DEBUG_NODE; nothing to copy into.
             if (ggml_openvino_getenv_int("GGML_OPENVINO_DEBUG_OUTPUT") ||
                 ggml_openvino_getenv_str("GGML_OPENVINO_DEBUG_NODE")) {
-                print_output_tensor_info(output_names[i], output_tensor, output_tensor.data());
+                print_output_tensor_info(output_names[i], output_tensor, nullptr);
             }
             continue;
         }
@@ -894,7 +899,9 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::share
             if (cache_hit) {
                 entry = it->second;
             } else {
-                r_ctx->clear_caches_locked();
+                if (r_ctx->stateful || r_ctx->decoder_cache.size() >= 8) {
+                    r_ctx->clear_caches_locked();
+                }
                 auto mutex = std::make_shared<std::mutex>();
                 entry = std::make_shared<decoder_runtime_ctx>(mutex);
                 r_ctx->decoder_cache[key] = entry;
@@ -1365,7 +1372,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::share
             ggml_openvino_getenv_str("GGML_OPENVINO_DEBUG_NODE")) {
             for (size_t i = 0; i < ov_output_names.size(); i++) {
                 const auto output_tensor = infer_request->get_output_tensor(i);
-                print_output_tensor_info(ov_output_names[i], output_tensor, output_tensor.data());
+                print_output_tensor_info(ov_output_names[i], output_tensor, nullptr);
             }
         }
 
@@ -1680,7 +1687,7 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, const std::shared
                 ggml_openvino_getenv_str("GGML_OPENVINO_DEBUG_NODE")) {
                 for (size_t i = 0; i < ov_output_names_local.size(); i++) {
                     const auto output_tensor = infer_request->get_output_tensor(i);
-                    print_output_tensor_info(ov_output_names_local[i], output_tensor, output_tensor.data());
+                    print_output_tensor_info(ov_output_names_local[i], output_tensor, nullptr);
                 }
             }
         }
@@ -1720,7 +1727,7 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, const std::shared
             ggml_openvino_getenv_str("GGML_OPENVINO_DEBUG_NODE")) {
             for (size_t i = 0; i < ov_output_names_local.size(); i++) {
                 const auto output_tensor = infer_request->get_output_tensor(i);
-                print_output_tensor_info(ov_output_names_local[i], output_tensor, output_tensor.data());
+                print_output_tensor_info(ov_output_names_local[i], output_tensor, nullptr);
             }
         }
     }
@@ -1996,6 +2003,8 @@ void print_input_tensor_info(const std::string & name, const ov::Tensor & tensor
 }
 
 void print_output_tensor_info(const std::string & name, const ov::Tensor & tensor, const void * output_dst) {
+    ov::Tensor host(tensor.get_element_type(), tensor.get_shape());
+    tensor.copy_to(host);
     std::cout << "Output name: " << name << ", Output shape: " << tensor.get_shape() << ", Address: " << output_dst
               << '\n';
 
@@ -2025,13 +2034,13 @@ void print_output_tensor_info(const std::string & name, const ov::Tensor & tenso
 
     switch (tensor.get_element_type()) {
     case ov::element::f32: {
-        const float * data = tensor.data<float>();
+        const float * data = host.data<float>();
         size_t size = tensor.get_size();
         print_float_stats("[f32]", size, [data](size_t i) { return data[i]; });
         break;
     }
     case ov::element::f16: {
-        const ov::float16 * data = tensor.data<ov::float16>();
+        const ov::float16 * data = host.data<ov::float16>();
         size_t size = tensor.get_size();
         print_float_stats("[f16]", size, [data](size_t i) { return static_cast<float>(data[i]); });
         break;

@@ -2,6 +2,7 @@
 #include "llama.h"
 #include "llama-cpp.h"
 #include "common.h"
+#include "../src/llama-ext.h"
 
 #ifdef NDEBUG
 #undef NDEBUG
@@ -87,7 +88,8 @@ struct test_context {
             int32_t n_seq_max = -1,
             uint32_t n_outputs_max = 0,
             uint32_t n_ubatch = 0,
-            uint32_t n_outputs_max_per_seq = 1) {
+            uint32_t n_outputs_max_per_seq = 1,
+            uint32_t n_rs_seq = 0) {
         auto * model = params.model.get();
 
         GGML_ASSERT(model);
@@ -101,6 +103,7 @@ struct test_context {
         }
         cparams.n_outputs_max = n_outputs_max;
         cparams.n_outputs_max_per_seq = n_outputs_max_per_seq;
+        cparams.n_rs_seq = n_rs_seq;
         cparams.samplers = configs.data();
         cparams.n_samplers = configs.size();
         cparams.kv_unified = true;
@@ -375,6 +378,10 @@ static void test_backend_top_k_sampling(const test_params & params) {
 
     llama_token * candidates = llama_get_sampled_candidates_ith(test_ctx.ctx.get(), batch_idx);
     uint32_t n_candidates = llama_get_sampled_candidates_count_ith(test_ctx.ctx.get(), batch_idx);
+    GGML_ASSERT(n_candidates == (uint32_t) k && n_logits == (uint32_t) k);
+    std::vector<llama_token> sorted_candidates(candidates, candidates + n_candidates);
+    std::sort(sorted_candidates.begin(), sorted_candidates.end());
+    GGML_ASSERT(std::adjacent_find(sorted_candidates.begin(), sorted_candidates.end()) == sorted_candidates.end());
     for (size_t i = 0; i < n_candidates; ++i) {
         printf("top_k candidate[%zu] = %d : %s\n", i, candidates[i],
                test_ctx.token_to_piece(candidates[i], false).c_str());
@@ -984,7 +991,8 @@ static sampler_comparison_stats compare_sampler_outputs(
         const char * name,
         const std::unordered_map<llama_token, float> & expected,
         const backend_sampler_output & actual,
-        bool allow_extra_candidates = false) {
+        bool allow_extra_candidates = false,
+        float tolerance = 1e-3f) {
     GGML_ASSERT(actual.logits.size() == actual.candidates.size());
 
     sampler_comparison_stats result;
@@ -1017,7 +1025,7 @@ static sampler_comparison_stats compare_sampler_outputs(
 
         const float diff = fabsf(it->second - logit);
         result.max_diff = std::max(result.max_diff, diff);
-        if (!std::isfinite(logit) || diff > 1e-3f) {
+        if (!std::isfinite(logit) || diff > tolerance) {
             if (result.n_mismatch < 5) {
                 printf("%s mismatch token %d: cpu=%.6f backend=%.6f diff=%.6f\n",
                         name, token, it->second, logit, diff);
@@ -1038,6 +1046,135 @@ static sampler_comparison_stats compare_sampler_outputs(
     printf("%s logits: max_diff=%.6f n_masked=%d n_mismatch=%d\n",
             name, result.max_diff, result.n_masked, result.n_mismatch);
     return result;
+}
+
+static void test_backend_top_k_rows_impl(const test_params & params, uint32_t n_rs_seq, bool hidden = false) {
+    const int32_t k = 8;
+    llama_sampler_ptr chain0(llama_sampler_chain_init(llama_sampler_chain_default_params()));
+    llama_sampler_ptr chain1(llama_sampler_chain_init(llama_sampler_chain_default_params()));
+    llama_sampler_chain_add(chain0.get(), llama_sampler_init_top_k(k));
+    llama_sampler_chain_add(chain1.get(), llama_sampler_init_top_k(k));
+    std::vector<llama_sampler_seq_config> configs = {{0, chain0.get()}, {1, chain1.get()}};
+    std::vector<llama_sampler_seq_config> reference_configs;
+    test_context ctx(params, configs, 2, 6, 8, 3, n_rs_seq);
+    test_context reference(params, reference_configs, 2, 6, 8, 3);
+    if (hidden) {
+        llama_set_embeddings_nextn(ctx.ctx.get(), true, false);
+        llama_set_embeddings_nextn(reference.ctx.get(), true, false);
+    }
+    llama_sampler_ptr cpu_top_k(llama_sampler_init_top_k(k));
+
+    struct batch_case {
+        int counts[2];
+        bool output;
+    };
+    const batch_case cases[] = {{{2, 2}, true}, {{1, 1}, true}, {{2, 0}, false},
+                                {{0, 3}, true}, {{2, 1}, true}, {{1, 1}, true}, {{1, 0}, true}};
+    int32_t positions[2] = {0, 0};
+    int case_index = 0;
+    for (const auto & c : cases) {
+        auto make_batch = [&](llama_context * context) {
+            common_batch batch(context);
+            for (llama_seq_id seq = 0; seq < 2; ++seq) {
+                const int rejected = n_rs_seq > 0 && context == reference.ctx.get() ?
+                    (case_index == 4 && seq == 0 ? 1 : case_index == 3 && seq == 1 ? 2 : 0) : 0;
+                const int count = c.counts[seq] - rejected;
+                for (int i = 0; i < count; ++i) {
+                    const llama_token token = (100 + seq * 100 + positions[seq] + i) % ctx.n_vocab;
+                    batch.add(token, positions[seq] + i, seq, c.output);
+                }
+            }
+            return batch;
+        };
+        auto batch = make_batch(ctx.ctx.get());
+        auto reference_batch = make_batch(reference.ctx.get());
+        GGML_ASSERT(llama_process(ctx.ctx.get(), LLAMA_PROCESS_TYPE_DECODE, batch.get()) == 0);
+        GGML_ASSERT(llama_process(reference.ctx.get(), LLAMA_PROCESS_TYPE_DECODE, reference_batch.get()) == 0);
+        if (hidden) {
+            const int32_t n_embd = llama_model_n_embd(params.model.get());
+            for (int i = 0; i < batch.size(); ++i) {
+                if (n_rs_seq > 0 && ((case_index == 4 && i == 1) || (case_index == 3 && i > 0))) {
+                    continue;
+                }
+                const int reference_row = i - (n_rs_seq > 0 && case_index == 4 && i > 1);
+                const float * actual = llama_get_embeddings_nextn_ith(ctx.ctx.get(), i);
+                const float * expected = llama_get_embeddings_nextn_ith(reference.ctx.get(), reference_row);
+                GGML_ASSERT(actual != nullptr && expected != nullptr);
+                double error = 0.0;
+                double norm = 0.0;
+                float max_diff = 0.0f;
+                for (int j = 0; j < n_embd; ++j) {
+                    GGML_ASSERT(std::isfinite(actual[j]) && std::isfinite(expected[j]));
+                    const float diff = actual[j] - expected[j];
+                    max_diff = std::max(max_diff, std::abs(diff));
+                    error += double(diff) * diff;
+                    norm += double(expected[j]) * expected[j];
+                }
+                const double relative_error = std::sqrt(error / std::max(norm, 1e-12));
+                printf("top_k_rows h_nextn: max_diff=%.6f relative_error=%.6f\n", max_diff, relative_error);
+                GGML_ASSERT(relative_error < 1e-2);
+            }
+        }
+        for (int i = 0; c.output && i < batch.size(); ++i) {
+            if (n_rs_seq > 0 && ((case_index == 4 && i == 1) || (case_index == 3 && i > 0))) {
+                continue;
+            }
+            const int reference_row = i - (n_rs_seq > 0 && case_index == 4 && i > 1);
+            const float * raw = llama_get_logits_ith(reference.ctx.get(), reference_row);
+            GGML_ASSERT(raw != nullptr);
+            const auto expected = apply_cpu_sampler(std::vector<float>(raw, raw + ctx.n_vocab), cpu_top_k.get());
+            const uint32_t n_logits = llama_get_sampled_logits_count_ith(ctx.ctx.get(), i);
+            const uint32_t n_candidates = llama_get_sampled_candidates_count_ith(ctx.ctx.get(), i);
+            GGML_ASSERT(n_logits == (uint32_t) k && n_candidates == (uint32_t) k);
+            const float * logits = llama_get_sampled_logits_ith(ctx.ctx.get(), i);
+            const llama_token * candidates = llama_get_sampled_candidates_ith(ctx.ctx.get(), i);
+            GGML_ASSERT(logits != nullptr && candidates != nullptr);
+            backend_sampler_output actual;
+            actual.logits.assign(logits, logits + n_logits);
+            actual.candidates.assign(candidates, candidates + n_candidates);
+            const float tolerance = 2e-2f;
+            float cutoff = expected.front().logit;
+            for (const auto & candidate : expected) {
+                cutoff = std::min(cutoff, candidate.logit);
+            }
+            std::unordered_map<llama_token, float> selected_logits;
+            for (const auto token : actual.candidates) {
+                GGML_ASSERT(token >= 0 && token < ctx.n_vocab);
+                GGML_ASSERT(raw[token] >= cutoff - tolerance);
+                GGML_ASSERT(selected_logits.emplace(token, raw[token]).second);
+            }
+            for (const auto & candidate : expected) {
+                GGML_ASSERT(candidate.logit <= cutoff + tolerance || selected_logits.count(candidate.id) != 0);
+            }
+            // GPU f16 rounding can exchange candidates at the top-k boundary.
+            GGML_ASSERT(compare_sampler_outputs("top_k_rows", selected_logits, actual, false, tolerance).n_mismatch == 0);
+        }
+        for (int seq = 0; seq < 2; ++seq) {
+            positions[seq] += c.counts[seq];
+        }
+        if (n_rs_seq > 0 && case_index == 4) {
+            GGML_ASSERT(llama_memory_seq_rm(llama_get_memory(ctx.ctx.get()), 0, positions[0] - 1, -1));
+            --positions[0];
+        }
+        if (n_rs_seq > 0 && case_index == 3) {
+            GGML_ASSERT(llama_memory_seq_rm(llama_get_memory(ctx.ctx.get()), 1, positions[1] - 2, -1));
+            positions[1] -= 2;
+        }
+        ++case_index;
+    }
+    printf("backend top-k changing rows test PASSED\n");
+}
+
+static void test_backend_top_k_rows(const test_params & params) {
+    test_backend_top_k_rows_impl(params, 0);
+}
+
+static void test_backend_top_k_rows_rollback(const test_params & params) {
+    test_backend_top_k_rows_impl(params, 2);
+}
+
+static void test_backend_top_k_hidden_rollback(const test_params & params) {
+    test_backend_top_k_rows_impl(params, 2, true);
 }
 
 static float find_backend_logit(const backend_sampler_output & output, llama_token token) {
@@ -1984,6 +2121,9 @@ static const backend_test_case BACKEND_TESTS[] = {
     { "temp",            test_backend_temp_sampling,           true  },
     { "temp_ext",        test_backend_temp_ext_sampling,       true  },
     { "top_k",           test_backend_top_k_sampling,          true  },
+    { "top_k_rows",      test_backend_top_k_rows,              true  },
+    { "top_k_rollback",  test_backend_top_k_rows_rollback,      false },
+    { "top_k_hidden_rollback", test_backend_top_k_hidden_rollback, false },
     { "multi_sequence",  test_backend_multi_sequence_sampling, true  },
     { "dist",            test_backend_dist_sampling,           true  },
     { "dist_and_cpu",    test_backend_dist_sampling_and_cpu,   true  },
@@ -2085,7 +2225,7 @@ static std::vector<const backend_test_case *> collect_tests_to_run(const std::st
             if (test.name == "penalties" || test.name == "set_sampler" ||
                 test.name == "mixed"     || test.name == "top_p"       ||
                 test.name == "multi_output_sampling_chain" ||
-                test.name == "multi_output_cpu") {
+                test.name == "multi_output_cpu" || test.name == "top_k_rows" || test.name == "top_k_rollback" || test.name == "top_k_hidden_rollback") {
                 fprintf(stderr, "Skipping test '%s' on HIP backend (no backend TOP_K support)\n", test.name.c_str());
                 continue;
             }

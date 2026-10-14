@@ -21,8 +21,12 @@
 #include <openvino/op/loop.hpp>
 #include <openvino/op/matmul.hpp>
 #include <openvino/op/multiply.hpp>
+#include <openvino/op/minimum.hpp>
 #include <openvino/op/reduce_mean.hpp>
+#include <openvino/op/range.hpp>
 #include <openvino/op/reshape.hpp>
+#include <openvino/op/shape_of.hpp>
+#include <openvino/op/slice.hpp>
 #include <openvino/op/squeeze.hpp>
 #include <openvino/op/sqrt.hpp>
 #include <openvino/op/subtract.hpp>
@@ -107,6 +111,7 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
     const int64_t H_v = v_shape[2];
     const int64_t S_v = v_shape[3];
     const int64_t H_k = q_shape[2];
+    const int64_t snapshot_count = context.get_output_op_params()[0];
     // const int64_t S_k = q_shape[3];
 
     auto q = context.get_input(0);
@@ -177,7 +182,7 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
     //           << ", v=" << v.get_partial_shape() << ", g=" << g.get_partial_shape()
     //           << ", beta=" << beta.get_partial_shape() << ", state=" << state.get_partial_shape() << std::endl;
 
-    auto gdn = std::make_shared<ov::op::internal::GatedDeltaNet>(q, k, v, state, g, beta, fuse_qk_l2norm, q_eps, k_eps);
+    auto gdn = std::make_shared<ov::op::internal::GatedDeltaNet>(q, k, v, state, g, beta, fuse_qk_l2norm, q_eps, k_eps, snapshot_count);
     auto attn_4d = gdn->output(0);
     auto state_4d = gdn->output(1);  // [B, H_v, key_dim, value_dim]
 
@@ -195,12 +200,34 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
 
     auto flat_shape_1d = ov::op::v0::Constant::create(ov::element::i64, {1}, {-1});
     auto attn = std::make_shared<ov::op::v1::Reshape>(attn_4d, flat_shape_1d, false);
-    auto new_state = std::make_shared<ov::op::v1::Reshape>(state_transposed, flat_shape_1d, false);
+    Output<Node> states = state_transposed;
+    if (snapshot_count > 1) {
+        auto snapshots = std::make_shared<ov::op::v1::Transpose>(
+            gdn->output(2), ov::op::v0::Constant::create(ov::element::i64, {5}, {0, 1, 2, 4, 3}));
+        auto token_count = std::make_shared<ov::op::v8::Gather>(
+            std::make_shared<ov::op::v3::ShapeOf>(attn_4d, ov::element::i64),
+            ov::op::v0::Constant::create(ov::element::i64, {1}, {1}),
+            ov::op::v0::Constant::create(ov::element::i64, {}, {0}));
+        auto valid_count = std::make_shared<ov::op::v1::Minimum>(
+            token_count, ov::op::v0::Constant::create(ov::element::i64, {1}, {snapshot_count}));
+        auto indices = std::make_shared<ov::op::v4::Range>(
+            ov::op::v0::Constant::create(ov::element::i64, {}, {0}),
+            std::make_shared<ov::op::v0::Squeeze>(valid_count),
+            ov::op::v0::Constant::create(ov::element::i64, {}, {1}), ov::element::i64);
+        states = std::make_shared<ov::op::v8::Gather>(
+            snapshots, indices, ov::op::v0::Constant::create(ov::element::i64, {}, {0}));
+    }
+    auto new_state = std::make_shared<ov::op::v1::Reshape>(states, flat_shape_1d, false);
     auto packed = std::make_shared<ov::op::v0::Concat>(ov::OutputVector{attn, new_state}, 0);
     auto out_shape = ov::op::v0::Constant::create(ov::element::i64, {4},
                                                   std::vector<int64_t>{1, 1, -1 /*T * B + S_v * B*/, S_v * H_v});
     auto res = std::make_shared<ov::op::v1::Reshape>(packed, out_shape, false);
 
+    if (context.get_output_names().size() == 3) {
+        auto flat_states = std::make_shared<ov::op::v1::Reshape>(states,
+            ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{1, 1, -1, S_v * S_v * H_v}), false);
+        return rename_outputs_with_suffix({res, attn_4d, flat_states}, context.get_name());
+    }
     return rename_outputs_with_suffix({res}, context.get_name());
 }
 

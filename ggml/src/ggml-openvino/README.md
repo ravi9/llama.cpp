@@ -1,3 +1,9 @@
+# Qwen MTP
+
+Dynamic GPU execution supports Qwen MTP sampling and recurrent state snapshots. Build against the OpenVINO runtime and GPU plugin that provide ordinary `GatedDeltaNet` with `snapshot_count` and a third snapshot output. The backend and runtime must be rebuilt together.
+
+Use `--spec-type draft-mtp --spec-draft-n-max 2` with a GGUF that contains MTP weights. Parallel execution uses `-np` and `--kv-unified`. CPU snapshot execution, NPU execution, and forced static MTP are not supported.
+
 # Compiled model cache
 
 `GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR` exports compiled CPU/GPU graphs with their weights. It bypasses the plugin-level `GGML_OPENVINO_CACHE_DIR` and uses `OPTIMIZE_SPEED`, so weightless caching is disabled.
