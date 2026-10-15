@@ -114,7 +114,7 @@ static uint64_t ggml_openvino_model_cache_extra_cfg(bool stateful, bool recurren
                                         ggml_openvino_getenv_int("GGML_OPENVINO_MANUAL_GQA_ATTN") > 0 :
                                         ggml_openvino_is_gpu();
 
-    uint64_t extra_cfg = 1;  // Graph-ordinal port names (invalidate older disk-cache blobs).
+    uint64_t extra_cfg = 2;  // Generic recurrent reset/reorder/writeback (invalidate older disk-cache blobs).
     extra_cfg = extra_cfg * 131 + (stateful ? (recurrent ? 2u : 1u) : 0u);
     extra_cfg = extra_cfg * 131 + (ggml_openvino_reduce_compile_mem_enabled() ? 1u : 0u);
     extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_KV_SLICE") ? 1u : 0u);
@@ -356,27 +356,6 @@ static void dump_ov_profiling_info(const ov::InferRequest & infer_request) {
 
     GGML_LOG_INFO("ggml-openvino: profile %s: %zu executed nodes, %.3f ms device, %.3f ms CPU\n", path.c_str(),
                   executed_count, total_real_time / 1000.0, total_cpu_time / 1000.0);
-}
-
-static void reset_single_slot_recurrent_cache(ggml_cgraph * cgraph,
-                                              const ModelParams & model_params,
-                                              const ComputeParams & compute_params) {
-    if (model_params.n_rs_slots != 1 || compute_params.cache_rs_reset_len == 0) {
-        return;
-    }
-    GGML_ASSERT(compute_params.cache_rs_reset_idx == 0 && compute_params.cache_rs_reset_len == 1);
-
-    std::set<ggml_backend_buffer_t> buffers;
-    for (int i = 0; i < cgraph->n_nodes; i++) {
-        auto * node = cgraph->nodes[i];
-        if (node->op == GGML_OP_SCALE && GgmlOvDecoder::is_recurrent_cache(node->view_src) &&
-            node->view_src->ne[1] == 1 && node->view_src->buffer != nullptr) {
-            buffers.insert(node->view_src->buffer);
-        }
-    }
-    for (auto * buffer : buffers) {
-        ggml_backend_buffer_clear(buffer, 0);
-    }
 }
 
 ov::Tensor create_ov_output_tensor(const std::shared_ptr<GgmlOvDecoder> & ggml_decoder,
@@ -1325,8 +1304,6 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::share
                     "or disable GGML_OPENVINO_STATEFUL_EXECUTION.\n");
                 return GGML_STATUS_FAILED;
             }
-        } else {
-            reset_single_slot_recurrent_cache(cgraph, m_params, c_params);
         }
 
         for (size_t i = 0; i < ov_input_names.size(); i++) {
@@ -1646,8 +1623,6 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, const std::shared
             }
         }
     }
-
-    reset_single_slot_recurrent_cache(cgraph, m_params, c_params);
 
     if (is_prefill) {
         auto inp_len = get_inp_pos_n_tokens(cgraph, inp_pos);

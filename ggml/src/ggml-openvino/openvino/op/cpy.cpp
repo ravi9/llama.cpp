@@ -114,10 +114,9 @@ OutputVector translate_cpy(const NodeContext & context) {
     // runtime input, so the cached model works for any kv head and active sequence count. The
     // result is the full updated cache.
     // op_case 1: gated-delta-net state, op_case 2: conv state, op_case 3: defrag remainder.
-    if (op_case == 3) {
-        // With -np 1 (and generally whenever there is no defrag remainder) this GET_ROWS gathers
-        // zero rows: nothing to write back, and the cache is unchanged. NPU rejects zero-size
-        // tensors, so short-circuit instead of building a degenerate Slice/Concat chain.
+    if (op_case == 3 && context.is_static()) {
+        // A statically empty remainder leaves the cache unchanged at any slot capacity.
+        // NPU rejects zero-size tensors, so avoid a degenerate Slice/Concat chain.
         bool is_empty = false;
         if (input_shape.rank().is_static()) {
             for (const auto & d : input_shape) {
@@ -131,24 +130,13 @@ OutputVector translate_cpy(const NodeContext & context) {
             return {context.get_input(1)};
         }
     }
-    // op_case 7/8/9 are the single-slot variants; op_case 10 writes native GDN state into a
-    // multi-slot cache without rollback snapshots.
-    const bool single_slot_assign = op_case >= 7 && op_case <= 9;
-    const bool direct_gdn_state = op_case == 7 || op_case == 10;
-    int writeback_case = op_case;
-    if (op_case == 10) {
-        writeback_case = 1;
-    } else if (single_slot_assign) {
-        writeback_case = op_case - 6;
-    }
+    // op_case 10 consumes native GDN state without rollback snapshots.
+    const bool direct_gdn_state = op_case == 10;
+    const int writeback_case = direct_gdn_state ? 1 : op_case;
     const std::string slot_begin_name = "rs_slot_begin_" + context.get_name();
     const bool slice_assign = writeback_case >= 1 && writeback_case <= 3 &&
-                              (single_slot_assign || context.has_input(slot_begin_name));
+                              context.has_input(slot_begin_name);
     if (slice_assign) {
-        if (single_slot_assign && writeback_case == 3) {
-            return {context.get_input(1)};
-        }
-
         const int64_t slot_axis = 2;
         auto zero = ov::op::v0::Constant::create(ov::element::i64, {1}, {0});
         auto one = ov::op::v0::Constant::create(ov::element::i64, {1}, {1});
@@ -158,15 +146,12 @@ OutputVector translate_cpy(const NodeContext & context) {
                                                     std::vector<int64_t>{1, 1, -1, output_shape[3].get_length()});
 
         ov::Output<ov::Node> src;
-        ov::Output<ov::Node> begin;
-        if (!single_slot_assign) {
-            begin = context.get_input(slot_begin_name);
-        }
+        auto begin = context.get_input(slot_begin_name);
         auto base = context.get_input(1);
         if (writeback_case == 1) {
             if (direct_gdn_state) {
                 // Non-rollback GDN publishes state directly as [active_slots, heads, value_dim,
-                // key_dim]. Flatten each active slot before replacing or updating the cache.
+                // key_dim]. Flatten each active slot before updating the cache.
                 src = std::make_shared<ov::op::v1::Reshape>(context.get_input(0), feature, false);
             } else {
                 // Multi-slot rollback still consumes GGML's packed [attention | state snapshots]
@@ -232,10 +217,6 @@ OutputVector translate_cpy(const NodeContext & context) {
                 src = std::make_shared<ov::op::v0::Convert>(src, context.get_output_type());
             }
 
-            if (single_slot_assign) {
-                return rename_outputs_with_suffix({src}, context.get_name());
-            }
-
             auto src_len = std::make_shared<ov::op::v8::Gather>(
                 std::make_shared<ov::op::v3::ShapeOf>(src, ov::element::i64), axis,
                 ov::op::v0::Constant::create(ov::element::i64, {}, {0}));
@@ -253,14 +234,18 @@ OutputVector translate_cpy(const NodeContext & context) {
         } else {
             // op_case 3: gathered remainder rows already have the cache slot layout [1, 1, extra, feature]
             src = context.get_input(0);
+            if (context.get_view_input_size(0) > 0 && !context.is_static()) {
+                // build_rs gathers active and extra rows together. The remainder boundary moves
+                // with the active sequences, so do not capture the first batch's VIEW offset.
+                src = std::make_shared<ov::op::v8::Slice>(src,
+                    context.get_input("rs_src_begin_" + context.get_name()), int_max, one, axis);
+            } else {
+                src = process_view_input_new(context, 0);
+            }
         }
 
         if (src.get_element_type() != context.get_output_type()) {
             src = std::make_shared<ov::op::v0::Convert>(src, context.get_output_type());
-        }
-
-        if (single_slot_assign) {
-            return rename_outputs_with_suffix({src}, context.get_name());
         }
 
         auto src_len =

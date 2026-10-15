@@ -1177,6 +1177,77 @@ static void test_backend_top_k_hidden_rollback(const test_params & params) {
     test_backend_top_k_rows_impl(params, 2, true);
 }
 
+// Compare slot transitions against a fresh, independently replayed sequence. This catches
+// resets of the wrong cache row and writes that clobber inactive or copied sequences.
+static void test_backend_recurrent_slots(const test_params & params) {
+    std::vector<llama_sampler_seq_config> configs;
+    test_context reference(params, configs, 1, 1, 64);
+    for (uint32_t rollback : {0u, 2u}) {
+        test_context ctx(params, configs, 4, 12, 16, 3, rollback);
+        std::vector<std::vector<llama_token>> history(4);
+        int next_token = 100;
+        auto run = [&](std::vector<int> counts) {
+            common_batch batch(ctx.ctx.get());
+            std::vector<int> rows(4, -1);
+            for (int seq = 0; seq < 4; ++seq) {
+                for (int i = 0; i < counts[seq]; ++i) {
+                    const llama_token token = next_token++ % ctx.n_vocab;
+                    batch.add(token, history[seq].size(), seq, i + 1 == counts[seq]);
+                    history[seq].push_back(token);
+                    rows[seq] = batch.size() - 1;
+                }
+            }
+            GGML_ASSERT(llama_process(ctx.ctx.get(), LLAMA_PROCESS_TYPE_DECODE, batch.get()) == 0);
+            for (int seq = 0; seq < 4; ++seq) {
+                if (rows[seq] < 0) {
+                    continue;
+                }
+                llama_memory_clear(llama_get_memory(reference.ctx.get()), true);
+                common_batch replay(reference.ctx.get());
+                for (size_t i = 0; i < history[seq].size(); ++i) {
+                    replay.add(history[seq][i], i, 0, i + 1 == history[seq].size());
+                }
+                GGML_ASSERT(llama_process(reference.ctx.get(), LLAMA_PROCESS_TYPE_DECODE, replay.get()) == 0);
+                const float * actual = llama_get_logits_ith(ctx.ctx.get(), rows[seq]);
+                const float * expected = llama_get_logits_ith(reference.ctx.get(), replay.size() - 1);
+                GGML_ASSERT(actual && expected);
+                double error = 0.0, norm = 0.0;
+                for (int j = 0; j < ctx.n_vocab; ++j) {
+                    GGML_ASSERT(std::isfinite(actual[j]) && std::isfinite(expected[j]));
+                    const double diff = double(actual[j]) - expected[j];
+                    error += diff * diff;
+                    norm += double(expected[j]) * expected[j];
+                }
+                const double relative_error = std::sqrt(error / std::max(norm, 1e-12));
+                printf("recurrent_slots rollback=%u seq=%d tokens=%zu relative_error=%.6f\n",
+                       rollback, seq, history[seq].size(), relative_error);
+                GGML_ASSERT(relative_error < 1e-2);
+            }
+        };
+        auto memory = llama_get_memory(ctx.ctx.get());
+        run({3, 3, 3, 3});
+        run({0, 0, 1, 0});
+        GGML_ASSERT(llama_memory_seq_rm(memory, 1, 0, -1));
+        history[1].clear();
+        run({0, 2, 0, 0});
+        run({3, 1, 1, 3});
+        if (rollback) {
+            for (int seq : {0, 3}) {
+                const int reject = seq == 0 ? 2 : 1;
+                history[seq].resize(history[seq].size() - reject);
+                GGML_ASSERT(llama_memory_seq_rm(memory, seq, history[seq].size(), -1));
+            }
+        }
+        run({1, 1, 1, 1});
+        GGML_ASSERT(llama_memory_seq_rm(memory, 1, 0, -1));
+        llama_memory_seq_cp(memory, 2, 1, 0, -1);
+        history[1] = history[2];
+        run({0, 2, 1, 0});
+        run({1, 1, 1, 1});
+    }
+    printf("backend recurrent slot reset/copy/rollback test PASSED\n");
+}
+
 static float find_backend_logit(const backend_sampler_output & output, llama_token token) {
     for (size_t i = 0; i < output.candidates.size(); ++i) {
         if (output.candidates[i] == token) {
@@ -2124,6 +2195,7 @@ static const backend_test_case BACKEND_TESTS[] = {
     { "top_k_rows",      test_backend_top_k_rows,              true  },
     { "top_k_rollback",  test_backend_top_k_rows_rollback,      false },
     { "top_k_hidden_rollback", test_backend_top_k_hidden_rollback, false },
+    { "recurrent_slots", test_backend_recurrent_slots, false },
     { "multi_sequence",  test_backend_multi_sequence_sampling, true  },
     { "dist",            test_backend_dist_sampling,           true  },
     { "dist_and_cpu",    test_backend_dist_sampling_and_cpu,   true  },

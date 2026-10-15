@@ -4,6 +4,10 @@ Dynamic GPU execution supports Qwen MTP sampling and recurrent state snapshots. 
 
 Use `--spec-type draft-mtp --spec-draft-n-max 2` with a GGUF that contains MTP weights. Parallel execution uses `-np` and `--kv-unified`. CPU snapshot execution, NPU execution, and forced static MTP are not supported.
 
+Stateless recurrent execution uses the same reset, reorder, and partial cache-writeback paths at every slot capacity, including one slot without MTP. `test-backend-sampler --test recurrent_slots` compares four-slot reset, copy, inactive-slot preservation, and rollback against independently replayed sequences.
+
+See the [recurrent-cache report](../../../docs/backend/OPENVINO-RECURRENT-CACHE.md) for the measured baseline and proposed native cache-operation fusions.
+
 # Compiled model cache
 
 `GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR` exports compiled CPU/GPU graphs with their weights. It bypasses the plugin-level `GGML_OPENVINO_CACHE_DIR` and uses `OPTIMIZE_SPEED`, so weightless caching is disabled.
@@ -38,6 +42,8 @@ Cache-only mode allocates backend address space without filling weight pages. On
 Cache-only mode uses the settings provided by the current process. Keep these values exactly the same, including set versus unset: `GGML_OPENVINO_REQUANT_KQUANT`, `GGML_OPENVINO_NATIVE_SOFTPLUS`, `GGML_OPENVINO_DISABLE_KV_SLICE`, `GGML_OPENVINO_MANUAL_GQA_ATTN`, `GGML_OPENVINO_STATEFUL_EXECUTION`, `GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT`, `GGML_OPENVINO_DISABLE_REMOTE_OUTPUTS`, `GGML_OPENVINO_REDUCE_COMPILE_MEM`, `GGML_OPENVINO_MEMORY_OPTIMIZE`, `GGML_OPENVINO_PROFILING`, `GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK`, and `GGML_OPENVINO_DEBUG_NODE`. On GPU, also repeat `GGML_OPENVINO_MOE_OP=0` if used. `GGML_OPENVINO_SPILL_DIR` is optional on the first run and ignored in cache-only mode; host-weight release is disabled in cache-only mode.
 
 A missing or incompatible graph fails with an error instead of compiling with absent weights. The fingerprint uses the dynamic graph's topology, ports, model parameters, weights, settings, and OpenVINO version; changing only dynamic token or KV sizes does not require a new entry. A different workload can still require another graph; populate it first without cache-only mode.
+
+The generic recurrent-cache translation invalidates blobs made with the former single-slot shortcuts. Run once without `GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY` to populate compatible entries before enabling cache-only mode again.
 
 ## Restrictions
 
