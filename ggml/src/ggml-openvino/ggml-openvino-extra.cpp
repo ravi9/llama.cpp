@@ -627,6 +627,13 @@ void ggml_openvino_kv_storage_clear(const void * base, size_t size, uint8_t valu
     }
 }
 
+bool ggml_openvino_manual_gqa_attn_enabled() {
+    if (ggml_openvino_getenv_str("GGML_OPENVINO_MANUAL_GQA_ATTN") != nullptr) {
+        return ggml_openvino_getenv_int("GGML_OPENVINO_MANUAL_GQA_ATTN") > 0;
+    }
+    return ggml_openvino_is_gpu();
+}
+
 bool ggml_openvino_shape_from_mask_enabled() {
     return ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK") == 0;
 }

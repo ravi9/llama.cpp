@@ -7,6 +7,7 @@
 #include "ggml-openvino.h"
 #include "ggml-openvino/ggml-decoder.h"
 #include "ggml.h"
+#include "align-eltwise-ranks.h"
 #include "keep-sum-square-fp32.h"
 #include "kv-state-seq-axis.h"
 #include "model-cache.h"
@@ -233,6 +234,16 @@ static bool rewrite_stateful_masks(const std::shared_ptr<ov::Model> & model) {
 // which registers the KV-cache rewrite (and the mask rewrite that goes with it) as extensions.
 static std::shared_ptr<ov::Model> convert_to_ov_model(const std::shared_ptr<GgmlOvDecoder> & decoder) {
     ov::frontend::gguf::FrontEnd frontend;
+    // Work around a GPU-plugin defect with rank-mismatched eltwise ops fused into `rms` (see the pass). Opt out with
+    // GGML_OPENVINO_DISABLE_ELTWISE_RANK_ALIGN=1.
+    if (ggml_openvino_is_gpu() && !ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_ELTWISE_RANK_ALIGN")) {
+        frontend.add_extension(std::make_shared<ov::frontend::DecoderTransformationExtension>(
+            [](std::shared_ptr<ov::Model> model) {
+                ov::pass::Manager manager;
+                manager.register_pass<ggml_openvino::AlignEltwiseOperandRanks>();
+                return manager.run_passes(model);
+            }));
+    }
     if (decoder->is_stateful()) {
         frontend.add_extension(std::make_shared<ov::frontend::DecoderTransformationExtension>(
             ov::frontend::gguf::pass::GGUFMakeStateful()));
@@ -296,10 +307,7 @@ static size_t get_static_attention_size(std::shared_ptr<GgmlOvDecoder> ggml_deco
 }
 
 static uint64_t ggml_openvino_model_cache_extra_cfg(bool stateful, bool recurrent) {
-    const char * manual_gqa_env = ggml_openvino_getenv_str("GGML_OPENVINO_MANUAL_GQA_ATTN");
-    const bool manual_gqa_enabled = manual_gqa_env != nullptr ?
-                                        ggml_openvino_getenv_int("GGML_OPENVINO_MANUAL_GQA_ATTN") > 0 :
-                                        ggml_openvino_is_gpu();
+    const bool manual_gqa_enabled = ggml_openvino_manual_gqa_attn_enabled();
 
     uint64_t extra_cfg = 16;  // Models are translated by the OpenVINO GGUF frontend.
     extra_cfg = extra_cfg * 131 + (stateful ? (recurrent ? 2u : 1u) : 0u);
@@ -1996,8 +2004,11 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, const std::shared
     ComputeParams c_params;
     std::tie(m_params, c_params) = GgmlOvDecoder::compute_llm_params(cgraph, is_static);
 
-    const auto * inp_pos = get_inp_pos_tensor(cgraph);
     const bool no_kv_cache = m_params.is_cacheless_attn;
+    // Cacheless encoders with learned position embeddings (e.g. BERT/XLM-R) have no ROPE, so no inp_pos;
+    // their token count comes from the input tokens.
+    const auto * inp_pos = no_kv_cache ? find_inp_pos_tensor(cgraph) : get_inp_pos_tensor(cgraph);
+    const int64_t inp_n_tokens = inp_pos ? get_inp_pos_n_tokens(cgraph, inp_pos) : get_inp_tok_n_tokens(cgraph);
     const auto is_prefill = no_kv_cache ? true : get_is_prefill(cgraph, inp_pos);
     const int64_t input_tokens = get_inp_pos_n_tokens(cgraph, inp_pos);
     if (ggml_openvino_getenv_int("GGML_OPENVINO_PROFILING")) {
@@ -2006,7 +2017,7 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, const std::shared
     }
     const ov::AnyMap compile_config = no_kv_cache ? ggml_openvino_npu_without_npuw(config) : config;
     if (m_params.n_heads_kv == -1) {
-        prefill_chunk_size = inp_pos->ne[0];
+        prefill_chunk_size = inp_n_tokens;
     }
     graph_key key(cgraph);
     static const bool cache_enabled = !ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_CACHE");
@@ -2604,7 +2615,7 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, const std::shared
     }
 
     if (is_prefill) {
-        auto inp_len = get_inp_pos_n_tokens(cgraph, inp_pos);
+        auto inp_len = inp_n_tokens;
         // Transposed-V HFA prefill outputs each chunk's V^T rows (see set_rows); they are copied into the cache here.
         const bool vt_rows = ggml_openvino_npu_kv_head_major_enabled() && ggml_openvino_npu_hfa_prefill_enabled();
         auto is_vt_rows_output = [&](const std::string & name) {
@@ -3141,7 +3152,7 @@ void print_output_tensor_info(const std::string & name, const ov::Tensor & tenso
     }
 }
 
-const ggml_tensor * get_inp_pos_tensor(ggml_cgraph * cgraph) {
+const ggml_tensor * find_inp_pos_tensor(ggml_cgraph * cgraph) {
     for (int i = 0; i < cgraph->n_nodes; ++i) {
         auto * op = cgraph->nodes[i];
         for (int j = 0; j < GGML_MAX_SRC; ++j) {
@@ -3154,8 +3165,27 @@ const ggml_tensor * get_inp_pos_tensor(ggml_cgraph * cgraph) {
             }
         }
     }
-    GGML_LOG_ERROR("get_inp_pos_tensor: inp_pos not found in cgraph");
-    throw std::runtime_error("get_inp_pos_tensor: inp_pos not found in cgraph");
+    return nullptr;
+}
+
+const ggml_tensor * get_inp_pos_tensor(ggml_cgraph * cgraph) {
+    const auto * inp_pos = find_inp_pos_tensor(cgraph);
+    if (!inp_pos) {
+        GGML_LOG_ERROR("get_inp_pos_tensor: inp_pos not found in cgraph");
+        throw std::runtime_error("get_inp_pos_tensor: inp_pos not found in cgraph");
+    }
+    return inp_pos;
+}
+
+int64_t get_inp_tok_n_tokens(ggml_cgraph * cgraph) {
+    for (int i = 0; i < cgraph->n_nodes; ++i) {
+        auto * op = cgraph->nodes[i];
+        if (op->src[1] && GgmlOvDecoder::is_inp_tok(op->src[1], op)) {
+            return op->src[1]->ne[0];
+        }
+    }
+    GGML_LOG_ERROR("get_inp_tok_n_tokens: input tokens not found in cgraph");
+    throw std::runtime_error("get_inp_tok_n_tokens: input tokens not found in cgraph");
 }
 
 int64_t get_inp_pos_n_tokens(ggml_cgraph * cgraph, const ggml_tensor * inp_pos) {
