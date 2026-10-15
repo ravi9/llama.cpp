@@ -69,9 +69,10 @@ OutputVector translate_top_k(const NodeContext & context) {
             auto chunked = std::make_shared<ov::op::v1::Reshape>(input,
                 ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{-1, 1, chunks, chunk_size}), false);
             // Each global top-k candidate is in its chunk's top-k set.
+            // Value sorting selects the parallel GPU kernel; ggml allows any index order.
             auto local = std::make_shared<ov::op::v11::TopK>(chunked,
                 ov::op::v0::Constant::create(ov::element::i32, {}, {k}), -1,
-                ov::op::v11::TopK::Mode::MAX, ov::op::v11::TopK::SortType::NONE, ov::element::i32, false);
+                ov::op::v11::TopK::Mode::MAX, ov::op::v11::TopK::SortType::SORT_VALUES, ov::element::i32, false);
             std::vector<int32_t> offsets(chunks);
             for (int64_t i = 0; i < chunks; ++i) {
                 offsets[i] = i * chunk_size;
@@ -83,7 +84,7 @@ OutputVector translate_top_k(const NodeContext & context) {
             auto candidate_indices = std::make_shared<ov::op::v1::Reshape>(indices, candidate_shape, false);
             auto selected = std::make_shared<ov::op::v11::TopK>(values,
                 ov::op::v0::Constant::create(ov::element::i32, {}, {k}), -1,
-                ov::op::v11::TopK::Mode::MAX, ov::op::v11::TopK::SortType::NONE, ov::element::i32, false);
+                ov::op::v11::TopK::Mode::MAX, ov::op::v11::TopK::SortType::SORT_VALUES, ov::element::i32, false);
             auto result = std::make_shared<ov::op::v6::GatherElements>(candidate_indices, selected->output(1), 3);
             auto output_shape = std::make_shared<ov::op::v0::Concat>(OutputVector{
                 get_dimensions(input.get_node_shared_ptr(), {0, 1, 2}),
