@@ -180,7 +180,9 @@ std::vector<T> pad_input(const ggml_tensor * tensor, size_t padded_rows, size_t 
                         padded_rows, padded_cols, pad_value);
 }
 
+const ggml_tensor * find_inp_pos_tensor(struct ggml_cgraph * cgraph);  // nullptr when the graph has no ROPE
 const ggml_tensor * get_inp_pos_tensor(struct ggml_cgraph * cgraph);
+int64_t get_inp_tok_n_tokens(struct ggml_cgraph * cgraph);
 
 int64_t get_inp_pos_n_tokens(struct ggml_cgraph * cgraph, const ggml_tensor * inp_pos);
 

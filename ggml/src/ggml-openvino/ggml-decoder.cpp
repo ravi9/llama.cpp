@@ -27,6 +27,8 @@
 #include <openvino/core/type/float16.hpp>
 #include <openvino/op/constant.hpp>
 #include <openvino/op/convert.hpp>
+#include <openvino/op/shape_of.hpp>
+#include <openvino/op/gather.hpp>
 #include <openvino/runtime/tensor.hpp>
 #include <ostream>
 #include <set>
@@ -1283,6 +1285,27 @@ void GgmlOvDecoder::compute_model_inputs() {
         m_model_input_nodes[input.first] = create_parameter(input.first, input.second);
     }
 
+    // attention_size(_swa) is the key dimension of the KQ mask. Read it from the mask shape inside the model instead
+    // of binding it as a runtime input: the GPU plugin then gets the KV slice shapes from shape inference, rather than
+    // waiting for the input value on the device, and can keep the fused attention and StatelessKV kernels.
+    if (!m_is_static && !m_is_stateful && ggml_openvino_shape_from_mask_enabled()) {
+        const auto from_mask = [this](const std::string & name, const std::string & mask) {
+            const auto input_it = m_model_input_nodes.find(name);
+            const auto mask_it = m_model_input_nodes.find(mask);
+            if (input_it == m_model_input_nodes.end() || mask.empty() || mask_it == m_model_input_nodes.end()) {
+                return;
+            }
+            auto mask_shape = std::make_shared<ov::op::v3::ShapeOf>(mask_it->second, ov::element::i64);
+            auto key_dim = std::make_shared<ov::op::v8::Gather>(
+                mask_shape, ov::op::v0::Constant::create(ov::element::i64, {1}, {3}),
+                ov::op::v0::Constant::create(ov::element::i64, {}, {0}));
+            key_dim->set_friendly_name(name);
+            input_it->second = key_dim;
+        };
+        from_mask("attention_size", m_compute_params.mask_name);
+        from_mask("attention_size_swa", m_compute_params.mask_swa_name);
+    }
+
     // The gguf frontend seeds get_model_inputs() into its tensor map but seeds no weights; it
     // expects the decoder to supply them. This backend already decoded every weight into a ready
     // f32 decompression subgraph at load time (ggml_openvino_*_weight_extra::weight_node, surfaced
@@ -2017,6 +2040,8 @@ ov::Any GgmlOvDecoder::get_attribute(const std::string & name) const {
             if (name == "max_bias") return op_param_float(node, 1);
             if (name == "kq_soft_cap") return op_param_float(node, 2);
             if (name == "has_mask") return node->src[3] != nullptr;
+            // Stateful graphs keep the fused SDPA, which the stateful-SDPA fusion expects.
+            if (name == "manual_gqa_attention") return !m_is_stateful && ggml_openvino_manual_gqa_attn_enabled();
             break;
 
         case GGML_OP_GLU:
