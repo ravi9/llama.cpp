@@ -114,7 +114,17 @@ static uint64_t ggml_openvino_model_cache_extra_cfg(bool stateful, bool recurren
                                         ggml_openvino_getenv_int("GGML_OPENVINO_MANUAL_GQA_ATTN") > 0 :
                                         ggml_openvino_is_gpu();
 
-    uint64_t extra_cfg = 2;  // Generic recurrent reset/reorder/writeback (invalidate older disk-cache blobs).
+    uint64_t extra_cfg = 6;  // Packed native recurrent controls and state layout.
+#ifdef GGML_OPENVINO_HAS_RECURRENT_CACHE
+    extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_RECURRENT_CACHE") ? 0u : 1u);
+#else
+    extra_cfg = extra_cfg * 131;
+#endif
+#ifdef GGML_OPENVINO_HAS_STATE_UPDATE
+    extra_cfg = extra_cfg * 131 + 1u;
+#else
+    extra_cfg = extra_cfg * 131;
+#endif
     extra_cfg = extra_cfg * 131 + (stateful ? (recurrent ? 2u : 1u) : 0u);
     extra_cfg = extra_cfg * 131 + (ggml_openvino_reduce_compile_mem_enabled() ? 1u : 0u);
     extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_KV_SLICE") ? 1u : 0u);
@@ -255,6 +265,10 @@ static std::string dynamic_graph_signature(const ggml_cgraph * graph,
     for (const auto & [name, input] : decoder.get_model_extra_inputs()) {
         append_string(name);
         append_string(input.type.get_type_name());
+        append(input.shape.size());
+        for (auto dim : input.shape) {
+            append(dim);
+        }
         append(input.is_parameter);
         if (!input.is_parameter) {
             append(input.value);
@@ -471,6 +485,12 @@ ov::Tensor make_contiguous_split_input_tensor(const struct ggml_tensor * ggml_te
 ov::Tensor convert_ggml_input_to_ov(const std::shared_ptr<GgmlOvDecoder> & ggml_decoder, const std::string & name) {
     const auto * ggml_tensor = ggml_decoder->get_input_ggml_tensor(name);
 
+    if (name == "rs_active_rows") {
+        const auto count = ggml_decoder->get_compute_params().s_copy_active_slot_len;
+        GGML_ASSERT(count > 0 && count <= ggml_nelements(ggml_tensor));
+        return ov::Tensor(ov::element::i32, ov::Shape{1, 1, 1, size_t(count)}, ggml_tensor->data);
+    }
+
     if (auto sliced = try_make_kv_sliced_tensor(ggml_decoder, name, ggml_tensor)) {
         return *sliced;
     }
@@ -506,8 +526,35 @@ ov::Tensor get_ov_input_tensor(const std::shared_ptr<GgmlOvDecoder> & ggml_decod
     ov::Tensor input_tensor;
     auto extra_input = ggml_decoder->get_model_extra_inputs().find(param_name);
     if (extra_input != ggml_decoder->get_model_extra_inputs().end()) {
-        input_tensor = ov::Tensor(extra_input->second.type, extra_input->second.shape);
-        *input_tensor.data<int64_t>() = extra_input->second.value;
+        auto & cached = ggml_decoder->runtime_input_tensors[param_name];
+        if (!cached || cached.get_element_type() != extra_input->second.type ||
+            cached.get_shape() != extra_input->second.shape) {
+            if (ggml_openvino_is_gpu() && !ggml_decoder->is_static() && !ggml_decoder->is_stateful()) {
+                auto context = ggml_openvino_get_remote_context()->as<ov::intel_gpu::ocl::ClContext>();
+                auto storage = context.create_usm_host_tensor(extra_input->second.type, extra_input->second.shape);
+                cached = ov::Tensor(extra_input->second.type, extra_input->second.shape, storage.get());
+                ggml_decoder->runtime_input_storage[param_name] = storage;
+            } else {
+                cached = ov::Tensor(extra_input->second.type, extra_input->second.shape);
+            }
+        }
+        input_tensor = cached;
+        if (param_name.compare(0, 11, "rs_offsets_") == 0 || param_name.compare(0, 11, "rs_windows_") == 0) {
+            const auto & controls = ggml_decoder->get_compute_params();
+            const auto & values = controls.recurrent_controls.at(param_name);
+            std::copy(values.begin(), values.end(), input_tensor.data<int64_t>());
+        } else if (param_name.compare(0, 10, "rs_update_") == 0) {
+            const auto & controls = ggml_decoder->get_compute_params();
+            const auto & write = controls.rs_writebacks.at(param_name.substr(10));
+            auto data = input_tensor.data<int64_t>();
+            data[0] = write.slot_begin;
+            data[1] = write.seq_count >= 0 ? write.seq_count : controls.s_copy_active_slot_len;
+            data[2] = write.snapshot_stride >= 0 ? write.snapshot_stride : data[1];
+            // Direct GDN states contain no attention prefix.
+            data[3] = 0;
+        } else {
+            *input_tensor.data<int64_t>() = extra_input->second.value;
+        }
     } else {
         input_tensor = convert_ggml_input_to_ov(ggml_decoder, param_name);
     }

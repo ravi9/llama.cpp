@@ -6,7 +6,9 @@ Use `--spec-type draft-mtp --spec-draft-n-max 2` with a GGUF that contains MTP w
 
 Stateless recurrent execution uses the same reset, reorder, and partial cache-writeback paths at every slot capacity, including one slot without MTP. `test-backend-sampler --test recurrent_slots` compares four-slot reset, copy, inactive-slot preservation, and rollback against independently replayed sequences.
 
-See the [recurrent-cache report](../../../docs/backend/OPENVINO-RECURRENT-CACHE.md) for the measured baseline and proposed native cache-operation fusions.
+The current performance target is `~/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf`, using GPU with `GGML_OPENVINO_REQUANT_KQUANT=q4_asym64_all`, `GGML_OPENVINO_NATIVE_SOFTPLUS=1`, and `GGML_OPENVINO_DISABLE_KV_SLICE=1`. See the [performance report](dev_doc/OPENVINO-QWEN35-08B-PERF-RESULTS.md) for measurements; the earlier yamini-model results remain historical references.
+
+See the [recurrent-cache report](dev_doc/OPENVINO-RECURRENT-CACHE.md) for the measured baseline and proposed native cache-operation fusions.
 
 # Compiled model cache
 

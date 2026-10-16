@@ -31,3 +31,30 @@ if (GGML_OPENVINO)
         message(FATAL_ERROR "OpenVINO: OpenVINO toolkit supports x86-64 and arm64 but not ${CMAKE_SYSTEM_PROCESSOR}")
     endif()
 endif()
+
+# Keep released runtimes working through the existing primitive translations.
+include(CheckCXXSourceCompiles)
+unset(GGML_OPENVINO_HAS_RECURRENT_CACHE CACHE)
+set(CMAKE_REQUIRED_LIBRARIES openvino::runtime)
+set(CMAKE_REQUIRED_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/openvino/op")
+check_cxx_source_compiles("#include <recurrent_cache.hpp>
+int main() { auto gather = std::make_shared<ov::op::internal::RecurrentStateGather>(ov::OutputVector{});
+    auto conv = std::make_shared<ov::op::internal::RecurrentConvCache>(ov::OutputVector{}, 3); }"
+    GGML_OPENVINO_HAS_RECURRENT_CACHE)
+unset(CMAKE_REQUIRED_LIBRARIES)
+unset(CMAKE_REQUIRED_INCLUDES)
+if(GGML_OPENVINO_HAS_RECURRENT_CACHE)
+    target_compile_definitions(ggml-openvino PRIVATE GGML_OPENVINO_HAS_RECURRENT_CACHE=1)
+endif()
+
+unset(GGML_OPENVINO_HAS_STATE_UPDATE CACHE)
+set(CMAKE_REQUIRED_LIBRARIES openvino::runtime)
+set(CMAKE_REQUIRED_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/openvino/op")
+check_cxx_source_compiles("#include <recurrent_cache.hpp>
+int main() { auto update = std::make_shared<ov::op::internal::RecurrentStateUpdate>(ov::OutputVector{}); }"
+    GGML_OPENVINO_HAS_STATE_UPDATE)
+unset(CMAKE_REQUIRED_LIBRARIES)
+unset(CMAKE_REQUIRED_INCLUDES)
+if(GGML_OPENVINO_HAS_STATE_UPDATE)
+    target_compile_definitions(ggml-openvino PRIVATE GGML_OPENVINO_HAS_STATE_UPDATE=1)
+endif()

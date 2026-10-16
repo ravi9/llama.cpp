@@ -120,6 +120,7 @@ struct ComputeParams {
     std::map<std::string, RsWriteback> rs_writebacks;
     std::map<std::string, int64_t> sampling_rows;
     std::map<std::string, int64_t> gdn_attention_rows;
+    std::map<std::string, std::vector<int64_t>> recurrent_controls;
     // Destination slot offset of each state cache writeback CPY node, keyed by node name. It
     // changes with the batch (kv head, active sequence count) and, with rollback enabled
     // (cparams.n_rs_seq > 0), the conv state is written back once per snapshot slot. Passed to the
@@ -146,6 +147,8 @@ public:
         int node_op_case = 0;
         void * data_addr;
     };
+
+    const ggml_cgraph * get_cgraph() const { return m_cgraph; }
 
     // Graph decoder
     GgmlOvDecoder(ggml_cgraph * cgraph,
@@ -349,11 +352,16 @@ public:
 
     ModelParams get_model_params() const { return m_model_params; }
 
-    ComputeParams get_compute_params() const { return m_compute_params; }
+    const ComputeParams & get_compute_params() const { return m_compute_params; }
 
     void set_model_params(const ModelParams & model_params) { m_model_params = model_params; }
 
     void set_compute_params(const ComputeParams & compute_params) { m_compute_params = compute_params; }
+
+    // Per-request storage: scalar runtime controls are host-produced and shape inference
+    // may read them. USM host allocations let the GPU consume them without tiny uploads.
+    std::map<std::string, ov::Tensor> runtime_input_storage;
+    std::map<std::string, ov::Tensor> runtime_input_tensors;
 
     bool m_is_static = false;
     bool m_is_stateful = false;

@@ -3,6 +3,9 @@
 #include "../node_context.h"
 #include "../op_table.h"
 #include "../utils.h"
+#ifdef GGML_OPENVINO_HAS_STATE_UPDATE
+#    include "recurrent_cache.hpp"
+#endif
 #include "ggml-openvino/ggml-openvino-extra.h"
 
 #include <cmath>
@@ -20,15 +23,15 @@
 #include <openvino/op/less.hpp>
 #include <openvino/op/loop.hpp>
 #include <openvino/op/matmul.hpp>
-#include <openvino/op/multiply.hpp>
 #include <openvino/op/minimum.hpp>
-#include <openvino/op/reduce_mean.hpp>
+#include <openvino/op/multiply.hpp>
 #include <openvino/op/range.hpp>
+#include <openvino/op/reduce_mean.hpp>
 #include <openvino/op/reshape.hpp>
 #include <openvino/op/shape_of.hpp>
 #include <openvino/op/slice.hpp>
-#include <openvino/op/squeeze.hpp>
 #include <openvino/op/sqrt.hpp>
+#include <openvino/op/squeeze.hpp>
 #include <openvino/op/subtract.hpp>
 #include <openvino/op/tile.hpp>
 #include <openvino/op/transpose.hpp>
@@ -151,7 +154,45 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
     // ggml state layout (OV notation): [B, H_v, value_dim, key_dim]
     // GatedDeltaNet op expects: [B, H_v, key_dim, value_dim]
     auto state_perm = ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{0, 1, 3, 2});
-    state = std::make_shared<ov::op::v1::Transpose>(state, state_perm);
+    bool gathered_native_layout = false;
+#ifdef GGML_OPENVINO_HAS_STATE_UPDATE
+    // The native gather owns an immutable cache read and a separate prepared-cache output.
+    // Bypass the redundant active-prefix slice and transpose only for its active output.
+    const auto reshape = ov::as_type_ptr<ov::op::v1::Reshape>(state.get_node_shared_ptr());
+    auto active = reshape ? reshape->input_value(0) : state;
+    if (auto slice = ov::as_type_ptr<ov::op::v8::Slice>(active.get_node_shared_ptr())) {
+        if (auto producer =
+                ov::as_type_ptr<ov::op::internal::RecurrentStateGather>(slice->get_input_node_shared_ptr(0))) {
+            const auto begin = ov::as_type_ptr<ov::op::v0::Constant>(slice->get_input_node_shared_ptr(1));
+            const auto axis = ov::as_type_ptr<ov::op::v0::Constant>(slice->get_input_node_shared_ptr(4));
+            const auto stride = ov::as_type_ptr<ov::op::v0::Constant>(slice->get_input_node_shared_ptr(3));
+            if (begin && axis && stride && stride->cast_vector<int64_t>() == std::vector<int64_t>{1} &&
+                slice->input_value(2) == context.get_input("s_copy_active_slot_len") &&
+                begin->cast_vector<int64_t>() == std::vector<int64_t>{0} &&
+                axis->cast_vector<int64_t>() == std::vector<int64_t>{2} && slice->input_value(0).get_index() == 0) {
+                active = slice->input_value(0);
+            }
+        }
+    }
+    const auto gather = ov::as_type_ptr<ov::op::internal::RecurrentStateGather>(active.get_node_shared_ptr());
+    const auto shape = state.get_partial_shape();
+    // Changing the gather's layout is safe only when its active output has this one consumer.
+    const auto targets = gather ? gather->output(0).get_target_inputs() : std::set<ov::Input<ov::Node>>{};
+    const bool exclusive = targets.size() == 1;
+    if (gather && exclusive && active.get_index() == 0 && gather->get_key_size() == 0 && reshape && shape.rank() == 4 &&
+        shape[2].is_static() && shape[3].is_static()) {
+        const auto key_size = shape[3].get_length(), value_size = shape[2].get_length();
+        gather->set_matrix_shape(key_size, value_size);
+        gather->validate_and_infer_types();
+        auto pattern =
+            ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{-1, H_v, key_size, value_size});
+        state = std::make_shared<ov::op::v1::Reshape>(gather->output(0), pattern, false);
+        gathered_native_layout = true;
+    }
+#endif
+    if (!gathered_native_layout) {
+        state = std::make_shared<ov::op::v1::Transpose>(state, state_perm);
+    }
 
     g = std::make_shared<ov::op::v0::Squeeze>(g, ov::op::v0::Constant::create(ov::element::i64, {1}, {3}));
     beta = std::make_shared<ov::op::v0::Squeeze>(beta, ov::op::v0::Constant::create(ov::element::i64, {1}, {3}));
@@ -204,18 +245,18 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
     if (snapshot_count > 1) {
         auto snapshots = std::make_shared<ov::op::v1::Transpose>(
             gdn->output(2), ov::op::v0::Constant::create(ov::element::i64, {5}, {0, 1, 2, 4, 3}));
-        auto token_count = std::make_shared<ov::op::v8::Gather>(
-            std::make_shared<ov::op::v3::ShapeOf>(attn_4d, ov::element::i64),
-            ov::op::v0::Constant::create(ov::element::i64, {1}, {1}),
-            ov::op::v0::Constant::create(ov::element::i64, {}, {0}));
+        auto token_count =
+            std::make_shared<ov::op::v8::Gather>(std::make_shared<ov::op::v3::ShapeOf>(attn_4d, ov::element::i64),
+                                                 ov::op::v0::Constant::create(ov::element::i64, {1}, {1}),
+                                                 ov::op::v0::Constant::create(ov::element::i64, {}, {0}));
         auto valid_count = std::make_shared<ov::op::v1::Minimum>(
             token_count, ov::op::v0::Constant::create(ov::element::i64, {1}, {snapshot_count}));
         auto indices = std::make_shared<ov::op::v4::Range>(
             ov::op::v0::Constant::create(ov::element::i64, {}, {0}),
             std::make_shared<ov::op::v0::Squeeze>(valid_count),
             ov::op::v0::Constant::create(ov::element::i64, {}, {1}), ov::element::i64);
-        states = std::make_shared<ov::op::v8::Gather>(
-            snapshots, indices, ov::op::v0::Constant::create(ov::element::i64, {}, {0}));
+        states = std::make_shared<ov::op::v8::Gather>(snapshots, indices,
+                                                      ov::op::v0::Constant::create(ov::element::i64, {}, {0}));
     }
     auto new_state = std::make_shared<ov::op::v1::Reshape>(states, flat_shape_1d, false);
     auto packed = std::make_shared<ov::op::v0::Concat>(ov::OutputVector{attn, new_state}, 0);
@@ -224,8 +265,10 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
     auto res = std::make_shared<ov::op::v1::Reshape>(packed, out_shape, false);
 
     if (context.get_output_names().size() == 3) {
-        auto flat_states = std::make_shared<ov::op::v1::Reshape>(states,
-            ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{1, 1, -1, S_v * S_v * H_v}), false);
+        auto flat_states = std::make_shared<ov::op::v1::Reshape>(
+            states,
+            ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{1, 1, -1, S_v * S_v * H_v}),
+            false);
         return rename_outputs_with_suffix({res, attn_4d, flat_states}, context.get_name());
     }
     return rename_outputs_with_suffix({res}, context.get_name());

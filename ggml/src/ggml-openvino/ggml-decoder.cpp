@@ -1392,6 +1392,13 @@ void GgmlOvDecoder::add_extra_inputs() {
 
     if (m_compute_params.s_copy_active_slot_len != -1) {
         create_1d_input("s_copy_active_slot_len", m_compute_params.s_copy_active_slot_len);
+        if (m_model_inputs.count("rs_active_rows") != 0) {
+            // The row-map prefix is rebound with its current length on every compute.
+            // Shape consumers must not wait for a scalar uploaded to the GPU.
+            auto & active = m_model_extra_inputs.at("s_copy_active_slot_len");
+            active.shape_source = "rs_active_rows";
+            active.shape_axis = 3;
+        }
         if (m_is_static) {
             // Number of real tokens in the current prefill chunk. The last chunk is padded with
             // fabricated token ids; attention masks them out, but the recurrent (GDN/conv) path
@@ -1412,6 +1419,56 @@ void GgmlOvDecoder::add_extra_inputs() {
             create_1d_input("rs_snapshot_stride_" + node_name, writeback.snapshot_stride);
         }
     }
+#ifdef GGML_OPENVINO_HAS_RECURRENT_CACHE
+    m_compute_params.recurrent_controls.clear();
+    if (!m_is_static && !m_is_stateful && !m_model_is_splitted && ggml_openvino_is_gpu() &&
+        !ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_RECURRENT_CACHE")) {
+#ifdef GGML_OPENVINO_HAS_STATE_UPDATE
+        for (int i = 0; i < m_cgraph->n_nodes; ++i) {
+            const auto node = m_cgraph->nodes[i];
+            const auto op_case = m_node_info_list[i].node_op_case;
+            if (node->op == GGML_OP_CPY && (op_case == 10 || op_case == 12)) {
+                m_model_extra_inputs["rs_update_" + get_tensor_ov_name(m_cgraph, node)] =
+                    {ov::element::i64, ov::Shape{1, 1, 1, 4}, 0, true, {}, -1};
+            }
+        }
+#endif
+        for (const auto & [name, write] : m_compute_params.rs_writebacks) {
+            if (write.src_begin >= 0) {
+                auto & values = m_compute_params.recurrent_controls["rs_offsets_" + name];
+                values = {write.slot_begin, write.src_begin};
+                m_model_extra_inputs["rs_offsets_" + name] =
+                    {ov::element::i64, ov::Shape{1, 1, 1, 2}, 0, true, {}, -1};
+            }
+        }
+        for (int i = 0; i < m_cgraph->n_nodes; ++i) {
+            const auto concat = m_cgraph->nodes[i];
+            if (concat->op != GGML_OP_CONCAT || !concat->src[0] || concat->src[0]->op != GGML_OP_RESHAPE ||
+                !concat->src[0]->src[0] || concat->src[0]->src[0]->op != GGML_OP_VIEW ||
+                concat->src[0]->src[0]->src[0]->op != GGML_OP_GET_ROWS) {
+                continue;
+            }
+            std::vector<int64_t> values;
+            for (int j = i + 1; j < m_cgraph->n_nodes; ++j) {
+                const auto write = m_cgraph->nodes[j];
+                if (is_conv_state_writeback(write) && write->src[0]->src[0] == concat) {
+                    const auto it = m_compute_params.rs_writebacks.find(get_tensor_ov_name(m_cgraph, write));
+                    if (it == m_compute_params.rs_writebacks.end()) {
+                        values.clear();
+                        break;
+                    }
+                    values.push_back(it->second.src_begin);
+                    values.push_back(it->second.slot_begin);
+                }
+            }
+            if (!values.empty()) {
+                const auto name = "rs_windows_" + get_tensor_ov_name(m_cgraph, concat);
+                m_model_extra_inputs[name] = {ov::element::i64, ov::Shape{1, 1, values.size() / 2, 2}, 0, true, {}, -1};
+                m_compute_params.recurrent_controls[name] = std::move(values);
+            }
+        }
+    }
+#endif
     for (const auto & [node_name, row] : m_compute_params.sampling_rows) {
         create_1d_input("sampling_row_" + node_name, row);
     }
@@ -1498,6 +1555,22 @@ void GgmlOvDecoder::compute_model_inputs() {
             m_inputs[src_name] = src;
             m_model_inputs[src_name] = {get_ov_type(src),
                                         get_graph_input_shape(node, src, m_node_dynamic_dims[src])};
+        }
+    }
+    if (!m_is_static && !m_is_stateful && !m_model_is_splitted && ggml_openvino_is_gpu() &&
+        m_compute_params.s_copy_active_slot_len > 0) {
+        const ggml_tensor * rows = nullptr;
+        for (const auto & [name, tensor] : m_inputs) {
+            if (tensor->type == GGML_TYPE_I32 && is_s_copy_leaf(tensor)) {
+                if (rows && rows != tensor) {
+                    return;  // Different recurrent row maps cannot share one active shape.
+                }
+                rows = tensor;
+            }
+        }
+        if (rows && m_compute_params.s_copy_active_slot_len <= ggml_nelements(rows)) {
+            m_inputs["rs_active_rows"] = const_cast<ggml_tensor *>(rows);
+            m_model_inputs["rs_active_rows"] = {ov::element::i32, ov::PartialShape{1, 1, 1, -1}};
         }
     }
 }

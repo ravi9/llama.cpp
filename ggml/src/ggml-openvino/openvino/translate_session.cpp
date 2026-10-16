@@ -5,6 +5,9 @@
 #include "ggml-openvino/openvino/node_context.h"
 #include "ggml-openvino/openvino/utils.h"
 #include "input_model.h"
+#ifdef GGML_OPENVINO_HAS_RECURRENT_CACHE
+#include "recurrent_cache_fusion.h"
+#endif
 #include "pass/align_eltwise_ranks.h"
 #include "pass/fuse_argsort_topk.h"
 #include "pass/fuse_moe_compressed.h"
@@ -312,6 +315,9 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
         (*tensor_map)[it.first] = it.second;
     }
 
+#ifdef GGML_OPENVINO_HAS_RECURRENT_CACHE
+    RecurrentCacheFusion recurrent_fusion(ggml_model_decoder, tensor_map);
+#endif
     auto translate_node = [&](const std::shared_ptr<GgmlDecoder> & decoder, int node_idx) {
         auto operation_type = decoder->get_op_type(node_idx);
         if (operation_type == "GGML_OP_NONE") {
@@ -332,7 +338,13 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
         FRONT_END_OP_CONVERSION_CHECK(it != m_translator_map.end(), "Translation for operation type ", operation_type,
                                       " is not implemented.");
         NodeContext node_context(decoder, tensor_map, node_idx, this);
-        ov::OutputVector converted_outputs = it->second(node_context);
+        ov::OutputVector converted_outputs;
+#ifdef GGML_OPENVINO_HAS_RECURRENT_CACHE
+        converted_outputs = recurrent_fusion.translate(node_idx, node_context);
+#endif
+        if (converted_outputs.empty()) {
+            converted_outputs = it->second(node_context);
+        }
 
         FRONT_END_OP_CONVERSION_CHECK(node_output_names.size() == converted_outputs.size(), "Number of ",
                                       operation_type, " outputs greater than number of converted outputs, which are ",

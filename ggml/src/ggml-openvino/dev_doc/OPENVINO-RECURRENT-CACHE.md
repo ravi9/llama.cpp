@@ -116,8 +116,79 @@ Both operations must preserve arbitrary active subsets, inactive slots, repeated
 
 Arbitrary reorders can contain cycles or duplicate sources. A single kernel cannot safely overwrite a buffer that it is still gathering from unless alias safety is proven. Start with an immutable input and separate output allocation; optimize storage reuse only with explicit read-before-write guarantees. Batch metadata can be shared across layers instead of generating redundant per-layer scalar bindings. A frontend custom op without a native GPU implementation would simply expand back into the same operations and would not demonstrate the intended speedup.
 
-First benchmark the two native operations against their existing subgraphs at 1 and 4 slots, 1/2/3 input tokens, with and without snapshots; then rerun the regression and server cases above. These are proposed operations, not implemented or measured speedups in this commit.
+First benchmark the two native operations against their existing subgraphs at 1 and 4 slots, 1/2/3 input tokens, with and without snapshots; then rerun the regression and server cases above. These operations were proposals in the 2026-10-15 baseline commit; the implementation and measurements follow below.
 
 ## Artifacts
 
 Local scratch artifacts are in `tmp/mtp-generic-20261015/`: `run.py`, exact command/environment JSON files, before/after benchmark logs, numerical regression logs, server responses, and synchronized target/draft trace logs. The controlled target and CLI trace harnesses are in `tmp/mtp-gap-20261014/`.
+
+## Native implementation (2026-10-16)
+
+`RecurrentStateGather` and `RecurrentConvCache` now have native OpenVINO GPU implementations. They share a GPU primitive and OpenCL kernel, selected by the history attribute (zero for matrix-state gather, positive for convolution history). Each output element has one writer; all cache reads come from an immutable input allocation. The kernel honors the reset range before reading mapped rows, preserves inactive rows, and applies convolution snapshot windows in the original write order.
+
+The frontend recognizes complete combined-gather `build_rs` groups from their topology. It removes the reset/reorder/remainder chain and routes the convolution CONCAT and all its snapshot CPYs to the native op's two outputs. The convolution-cache gather becomes unreachable and is eliminated. Matrix-state output is still followed by the existing GDN state/snapshot writeback; fusing that later chain is a separate opportunity. Runtime row maps, reset ranges, remainder source/destination offsets, QKV dimensions, and snapshot windows remain dynamic. Short batches use the original runtime window starts, including repeated initial-history windows when fewer than K tokens are available.
+
+The metadata interface uses rank-four integer tensors. The six shared inputs are old cache `[1,1,S,F]`, active source rows `[1,1,1,B]`, extra source row map `[1,1,1,N]`, reset begin `[1,1,1,1]`, reset length `[1,1,1,1]`, and extra offsets `[1,1,1,2]` containing destination begin and source-map begin. Using a suffix offset permits an empty remainder without binding a zero-sized GPU input. Convolution adds QKV `[1,B,C,T]` and window pairs `[1,1,K,2]` containing start column and destination row; history H is an attribute and F=C*H. Outputs are active state `[1,1,B,F]` or convolution input `[1,B,C,H+T]`, followed by the full updated cache `[1,1,S,F]`.
+
+Released runtimes lacking these native classes use the existing translators through a CMake symbol check. CPU, forced-static, stateful, and split graphs retain their previous translations. Set `GGML_OPENVINO_DISABLE_RECURRENT_CACHE=1` to compare against the generic decomposition. The disk-cache translation revision is 3 and includes this switch, so old blobs need regeneration.
+
+Validation completed:
+
+- Native GPU exact-reference checks: f16/f32 data, i32/i64 metadata, dynamic and fixed shapes, changing batch/token counts, empty/nonempty remainder, nonzero reset, duplicate/cyclic maps, inactive rows, overlapping and short snapshot windows, cloned operations, and compiled-model export/import.
+- Large remote-buffer cyclic reorder with caller-bound input/output sharing, repeated four times.
+- Core type/shape validation, including rejection of dynamic rank, incorrect metadata types, incompatible history/channel dimensions, and invalid history.
+- Four-slot model reset/copy/rollback: 40 comparisons, maximum relative logit error 0.006757, matching the generic baseline. Hidden-state/zero-output/rollback sampler check passes with no logit mismatches.
+- Full 35B `llama-server -np 4`: all 12 requests pass without MTP and all 12 pass with two-token MTP under `q4_asym64_all`; MTP accepted 43 of 64 proposals. Cases include concurrent waves, selected-slot reuse, and cached continuation.
+- GPU execution profiles confirm exactly one native convolution-cache op and one native matrix-state gather per recurrent layer. On the small Qwen3.5-2B model, the convolution gather is eliminated. Device profiling here establishes execution and graph structure; its summed durations are not full inference latency.
+- CPU fallback generation passes. The GPU disable switch also executes the original decomposition with no native recurrent-cache ops. Stateful and NPU execution were not tested.
+
+Build/test commands and raw results are in `tmp/mtp-native-20261016/`. Native standalone tests use the permanent OpenVINO sources under `src/core/tests/type_prop/recurrent_cache.cpp` and `src/plugins/intel_gpu/tests/functional/single_layer_tests/recurrent_cache.cpp`.
+
+### Matched full-model benchmark
+
+Same target environment, Release `build/MtpOVPerf`, five repetitions and `-p 1024 -n 512 -d 0,1024` as the generic baseline:
+
+| Workload | Generic cache | Native cache | Change |
+| --- | ---: | ---: | ---: |
+| pp1024 | 1058.21 +/- 7.29 | 1079.26 +/- 7.49 | +2.0% |
+| tg512 | 19.72 +/- 0.03 | 23.05 +/- 0.27 | +16.9% |
+| pp1024 at depth 1024 | 1016.84 +/- 17.64 | 1031.68 +/- 18.71 | +1.5% |
+| tg512 at depth 1024 | 19.10 +/- 0.03 | 22.32 +/- 0.03 | +16.9% |
+
+The native kernels recover part of the generic cache overhead without reintroducing the removed single-slot shortcuts. They do not recover the shortcut baseline's 35.54 tokens/s. Full-cache output writes and the later GDN writeback still remain; changes to those need equally generic slot and rollback semantics.
+
+Controlled forced-token target calls (same prefix 128, eight warmups, 32 measured calls and hidden outputs as the baseline):
+
+| Call | Generic median ms | Native median ms | Latency reduction |
+| --- | ---: | ---: | ---: |
+| 1 token, no snapshots | 49.41 | 42.11 | 14.8% |
+| 3 tokens, no snapshots | 62.55 | 55.43 | 11.4% |
+| 1 token, snapshots | 76.49 | 60.86 | 20.4% |
+| 3 tokens, snapshots | 95.57 | 79.27 | 17.1% |
+| 3 tokens, snapshots, reject 2 | 95.67 | 79.58 | 16.8% |
+
+Actual rejection still adds little: host `seq_rm` median is 0.00746 ms, and rejecting two tokens changes the target median by 0.31 ms. Three-token snapshot-enabled inference is 23.84 ms slower than three-token ordinary inference, down from 33.02 ms before fusion. Increasing ordinary batch width from one to three adds 13.33 ms, essentially unchanged from the earlier 13.14 ms. The speedup therefore primarily removes cache maintenance overhead rather than changing MoE scaling with token count. The final rejection call took 78.55 ms, including 76.91 ms in raw OpenVINO inference.
+
+Against the previously measured Vulkan reference, native OV remains slower on snapshot-enabled calls (79.27 versus 52.59 ms for controlled three-token verification). Remaining opportunities include fusing GDN snapshot transpose/scatter with final cache writeback, reducing repeated full-cache copies while preserving arbitrary maps, and reducing metadata/layout dispatches. The new kernels are one dispatch per cache group, but do not fuse the convolution itself or GDN computation.
+
+End-to-end greeting (`Hi`, temperature zero, one slot, cap 192, same target environment):
+
+| Measurement | Generic | Native |
+| --- | ---: | ---: |
+| Non-MTP generation | 19.45 tokens/s | 22.95 tokens/s |
+| MTP generation, two proposals | 23.21 tokens/s | 27.93 tokens/s |
+| Non-MTP one-token target, median | 49.85 ms | 42.39 ms |
+| MTP three-token verification, median | 95.62 ms | 77.10 ms |
+| MTP draft token, median | 6.09 ms | 6.02 ms |
+| MTP three-token catch-up, median | 1.91 ms | 1.79 ms |
+| MTP proposals accepted | 95/116 | 95/116 |
+
+The native non-MTP and MTP runs generated 159 and 154 tokens, respectively, matching the generic runs. MTP improves by 20.3% over its generic path and runs 21.7% faster than native non-MTP on this greeting. Per-round compute is approximately `(77.10 + 2*6.02 + 1.79)/2.64 = 34.44 ms/token`, before remaining host work; measured generation is 35.81 ms/token. These CLI values are one process run per mode with warmed call medians, not independent repeated trials. Startup/loading and prompt compilation are excluded from generation throughput.
+
+The previous Vulkan greeting reference remains 49.83 tokens/s with 42.56 ms verification, 4.99 ms draft token, and 2.31 ms catch-up. Native OV reduces its verification deficit from approximately 53 to 35 ms per round; it does not yet close the gap. Acceptance differs across the backend runs, so use the forced-token controlled matrix for causal latency comparisons. Vulkan was not rerun for this implementation.
+
+## Further shape/control/state-update optimization (2026-10-16)
+
+The subsequent [small-model investigation and plan](OPENVINO-QWEN35-08B-PERF-PLAN.md) identified runtime shape-inference synchronization around the native kernels. The [implementation results](OPENVINO-QWEN35-08B-PERF-RESULTS.md) document active-row shapes, reusable USM host controls, native `RecurrentStateUpdate`, folded matrix layouts, current cache revision 6, and updated target-model measurements. The earlier revision and throughput tables above remain historical baselines.
+
+The current target is now `~/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf` with the same OpenVINO configuration. Updated tests and performance are in the [performance report](OPENVINO-QWEN35-08B-PERF-RESULTS.md); all yamini results above remain historical.
