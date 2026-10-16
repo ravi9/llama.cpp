@@ -1,17 +1,21 @@
 find_package(OpenVINO REQUIRED COMPONENTS Runtime Threading)
 find_package(OpenCL REQUIRED)
 
+if(NOT TARGET openvino::frontend::gguf)
+    message(FATAL_ERROR "OpenVINO GGUF frontend target openvino::frontend::gguf is required")
+endif()
+
 message(STATUS "Found OpenVINO: ${OpenVINO_DIR} (found version \"${OpenVINO_VERSION}\")")
 
-file(GLOB_RECURSE GGML_HEADERS_OPENVINO "*.h" "*.hpp")
-file(GLOB_RECURSE GGML_SOURCES_OPENVINO "*.cpp")
+file(GLOB GGML_HEADERS_OPENVINO "*.h" "*.hpp")
+file(GLOB GGML_SOURCES_OPENVINO "*.cpp")
 
 ggml_add_backend_library(ggml-openvino
     ${GGML_SOURCES_OPENVINO}
     ${GGML_HEADERS_OPENVINO}
 )
 
-target_link_libraries(ggml-openvino PRIVATE openvino::runtime openvino::threading OpenCL::OpenCL)
+target_link_libraries(ggml-openvino PRIVATE openvino::runtime openvino::threading openvino::frontend::gguf OpenCL::OpenCL)
 
 # the OpenVINO RTTI macros take one argument and leave __VA_ARGS__ empty, which -Wpedantic reports
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")

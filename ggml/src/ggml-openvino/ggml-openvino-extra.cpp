@@ -324,6 +324,13 @@ bool ggml_openvino_is_gpu() {
     return has_prefix(ggml_openvino_get_device_name(), "GPU");
 }
 
+bool ggml_openvino_manual_gqa_attn_enabled() {
+    if (ggml_openvino_getenv_str("GGML_OPENVINO_MANUAL_GQA_ATTN") != nullptr) {
+        return ggml_openvino_getenv_int("GGML_OPENVINO_MANUAL_GQA_ATTN") > 0;
+    }
+    return ggml_openvino_is_gpu();
+}
+
 bool ggml_openvino_shape_from_mask_enabled() {
     return ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK") == 0;
 }

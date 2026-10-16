@@ -120,6 +120,10 @@ bool ggml_openvino_is_npu();
 // Check if running on a GPU (GPU, GPU.0, GPU.1, ...)
 bool ggml_openvino_is_gpu();
 
+// Explicit QK/softmax/V attention for grouped-query models instead of the fused SDPA op. Defaults to on for GPU;
+// GGML_OPENVINO_MANUAL_GQA_ATTN=1/0 forces it on/off. Only stateless graphs use it.
+bool ggml_openvino_manual_gqa_attn_enabled();
+
 // Read n_seq_active and attention_size(_swa) from the KQ mask shape (off with GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK=1)
 bool ggml_openvino_shape_from_mask_enabled();
 
