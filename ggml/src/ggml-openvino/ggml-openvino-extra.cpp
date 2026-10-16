@@ -133,6 +133,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_ENABLE_FALLBACK",
         "GGML_OPENVINO_MANUAL_GQA_ATTN",
         "GGML_OPENVINO_DISABLE_ELTWISE_RANK_ALIGN",
+        "GGML_OPENVINO_DISABLE_SCALE_REORDER",
         "GGML_OPENVINO_MOE_OP",
         "GGML_OPENVINO_MEMORY_OPTIMIZE",
         "GGML_OPENVINO_RELEASE_WEIGHTS",
@@ -329,6 +330,11 @@ bool ggml_openvino_manual_gqa_attn_enabled() {
         return ggml_openvino_getenv_int("GGML_OPENVINO_MANUAL_GQA_ATTN") > 0;
     }
     return ggml_openvino_is_gpu();
+}
+
+bool ggml_openvino_scale_reorder_enabled() {
+    return (ggml_openvino_is_gpu() || ggml_openvino_is_npu()) &&
+           ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_SCALE_REORDER") == 0;
 }
 
 bool ggml_openvino_shape_from_mask_enabled() {

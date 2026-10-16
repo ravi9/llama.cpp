@@ -137,6 +137,7 @@ ov::frontend::gguf::RopeConfig rope_config_from_params(const int32_t * params, b
     memcpy(&config.attn_factor, params + 8, sizeof(float));
     memcpy(&config.beta_fast, params + 9, sizeof(float));
     memcpy(&config.beta_slow, params + 10, sizeof(float));
+    memcpy(config.sections.data(), params + 11, sizeof(int32_t) * config.sections.size());
     config.per_op = per_op;
     config.is_imrope = params[2] == GGML_ROPE_TYPE_IMROPE;
     return config;
@@ -1139,6 +1140,10 @@ std::optional<int64_t> GgmlOvDecoder::get_runtime_input_value(const std::string 
     if (name == "seq_active_start") {
         return m_compute_params.seq_active_start;
     }
+    if (name == "chunk_valid_len") {
+        // Static prefill rebinds this per chunk (see get_ov_input_tensor_static_prefill).
+        return get_static_n_tokens();
+    }
     if (name == "swa_window") {
         // Stateful sliding-window mask (see rewrite_stateful_masks). An unknown window keeps every cached
         // position, which matches ggml as long as the context still fits in the window.
@@ -1273,10 +1278,14 @@ void GgmlOvDecoder::compute_model_inputs() {
             m_model_inputs["cache_rs_reset_idx"] = {ov::element::i64, ov::PartialShape{1}};
             m_model_inputs["cache_rs_reset_len"] = {ov::element::i64, ov::PartialShape{1}};
         }
+        if (m_is_static && m_compute_params.s_copy_active_slot_len != -1) {
+            // Valid tokens of a padded static chunk; keeps padding out of the recurrent state.
+            m_model_inputs["chunk_valid_len"] = {ov::element::i64, ov::PartialShape{1}};
+        }
         for (const auto & entry : m_compute_params.rs_writebacks) {
             m_model_inputs["rs_slot_begin_" + entry.first] = {ov::element::i64, ov::PartialShape{1}};
             // Only a writeback that copies a moving source window has a source offset.
-            if (entry.second.src_begin >= 0) {
+            if (entry.second.src_begin >= 0 && !m_is_static) {
                 m_model_inputs["rs_src_begin_" + entry.first] = {ov::element::i64, ov::PartialShape{1}};
             }
         }
@@ -1828,8 +1837,11 @@ std::vector<std::string> GgmlOvDecoder::get_input_names(int node_idx) const {
         inputs[1] = get_tensor_ov_name(m_cgraph, node->view_src);
         inputs.push_back("rs_slot_begin_" + info.node_name);
         if (info.node_op_case == 2) {
-            inputs.push_back("rs_src_begin_" + info.node_name);
+            // A padded static chunk's conv window ends at its last valid token.
+            inputs.push_back(m_is_static ? std::string("chunk_valid_len") : "rs_src_begin_" + info.node_name);
         }
+    } else if (node->op == GGML_OP_GATED_DELTA_NET && m_model_inputs.count("chunk_valid_len")) {
+        inputs.push_back("chunk_valid_len");
     } else if (node->op == GGML_OP_CPY && info.node_op_case >= 4 && info.node_op_case <= 6) {
         // Flat-buffer writes (conv_states_all, whisper KV): update the whole buffer from a runtime element offset.
         inputs[1] = get_tensor_ov_name(m_cgraph, node->view_src);
@@ -2022,6 +2034,7 @@ ov::Any GgmlOvDecoder::get_attribute(const std::string & name) const {
                     default: throw std::runtime_error("Unsupported GGML RoPE mode: " + std::to_string(node->op_params[2]));
                 }
             }
+            if (name == "rope_offset") return static_cast<int64_t>(node->op_params[15]);
             break;
 
         case GGML_OP_RMS_NORM:
@@ -2042,6 +2055,8 @@ ov::Any GgmlOvDecoder::get_attribute(const std::string & name) const {
             if (name == "has_mask") return node->src[3] != nullptr;
             // Stateful graphs keep the fused SDPA, which the stateful-SDPA fusion expects.
             if (name == "manual_gqa_attention") return !m_is_stateful && ggml_openvino_manual_gqa_attn_enabled();
+            // Fold a small attention scale into Q (see ggml_openvino_scale_reorder_enabled).
+            if (name == "prescale_q") return ggml_openvino_scale_reorder_enabled();
             break;
 
         case GGML_OP_GLU:

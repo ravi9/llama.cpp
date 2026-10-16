@@ -124,6 +124,12 @@ bool ggml_openvino_is_gpu();
 // GGML_OPENVINO_MANUAL_GQA_ATTN=1/0 forces it on/off. Only stateless graphs use it.
 bool ggml_openvino_manual_gqa_attn_enabled();
 
+// Apply a constant scale (Granite's residual and attention multipliers) before the MatMul it follows instead of
+// after it, so an f16 plugin does not overflow on blocks whose unscaled result is out of range. The rewrite is exact
+// but only useful when the device executes in f16 and is overhead on f32, so it defaults to on for GPU and NPU;
+// GGML_OPENVINO_DISABLE_SCALE_REORDER=1 turns it off.
+bool ggml_openvino_scale_reorder_enabled();
+
 // Read n_seq_active and attention_size(_swa) from the KQ mask shape (off with GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK=1)
 bool ggml_openvino_shape_from_mask_enabled();
 

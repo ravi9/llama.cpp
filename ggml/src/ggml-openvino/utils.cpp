@@ -12,6 +12,7 @@
 #include <openvino/frontend/extension/decoder_transformation.hpp>
 #include <openvino/frontend/gguf/frontend.hpp>
 #include <openvino/frontend/gguf/make_stateful.hpp>
+#include <openvino/frontend/gguf/push_scale_before_matmul.hpp>
 
 #include <algorithm>
 #include <cassert>
@@ -206,6 +207,16 @@ static std::shared_ptr<ov::Model> convert_to_ov_model(const std::shared_ptr<Ggml
             [](std::shared_ptr<ov::Model> model) {
                 ov::pass::Manager manager;
                 manager.register_pass<ggml_openvino::AlignEltwiseOperandRanks>();
+                return manager.run_passes(model);
+            }));
+    }
+    // An f16 plugin overflows on blocks whose unscaled result is out of range (Granite's residual multiplier); apply the
+    // scale before the MatMul instead of after it. Opt out with GGML_OPENVINO_DISABLE_SCALE_REORDER=1.
+    if (ggml_openvino_scale_reorder_enabled()) {
+        frontend.add_extension(std::make_shared<ov::frontend::DecoderTransformationExtension>(
+            [](std::shared_ptr<ov::Model> model) {
+                ov::pass::Manager manager;
+                manager.register_pass<ov::frontend::gguf::pass::PushScaleBeforeMatMul>();
                 return manager.run_passes(model);
             }));
     }
@@ -725,6 +736,11 @@ ov::Tensor get_ov_input_tensor_static_prefill(const std::shared_ptr<GgmlOvDecode
     const size_t chunk_valid_size = std::min(chunk_size, input_len - chunk_index * chunk_size);
     const size_t chunk_pad_size = chunk_size - chunk_valid_size;
 
+    if (param_name == "chunk_valid_len") {
+        ov::Tensor input_tensor(ov::element::i64, ov::Shape{1});
+        *input_tensor.data<int64_t>() = static_cast<int64_t>(chunk_valid_size);
+        return input_tensor;
+    }
     if (chunk_index > 0 && param_name == "cache_rs_reset_len") {
         // The recurrent-state clear belongs to the start of the sequence. Re-applying it on every
         // chunk would wipe the state accumulated by the preceding chunks, so disable it (a zero
