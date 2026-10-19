@@ -1,6 +1,6 @@
 # Qwen MTP
 
-Dynamic GPU execution supports Qwen MTP sampling and recurrent state snapshots. Build against the OpenVINO runtime and GPU plugin that provide ordinary `GatedDeltaNet` with `snapshot_count` and a third snapshot output. The backend and runtime must be rebuilt together.
+Dynamic GPU execution supports Qwen MTP sampling and recurrent state snapshots. Build against the OpenVINO runtime and GPU plugin that provide ordinary `GatedDeltaNet` with `snapshot_count` and the two-output contract: output 0 is attention; output 1 is the final state when `snapshot_count=1`, or newest-first snapshots when it is greater than one. Snapshot entry 0 is the final state and entry i is the state after token T-i; only min(K,T) entries are valid. The initial state before the batch is not included. The backend and runtime must be rebuilt together.
 
 Use `--spec-type draft-mtp --spec-draft-n-max 2` with a GGUF that contains MTP weights. Parallel execution uses `-np` and `--kv-unified`. CPU snapshot execution, NPU execution, and forced static MTP are not supported.
 

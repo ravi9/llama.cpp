@@ -225,14 +225,12 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
 
     auto gdn = std::make_shared<ov::op::internal::GatedDeltaNet>(q, k, v, state, g, beta, fuse_qk_l2norm, q_eps, k_eps, snapshot_count);
     auto attn_4d = gdn->output(0);
-    auto state_4d = gdn->output(1);  // [B, H_v, key_dim, value_dim]
 
     // std::cout << "GatedDeltaNet output shapes: attn=" << gdn->output(0).get_partial_shape()
     //           << ", new_state=" << gdn->output(1).get_partial_shape() << std::endl;
 
-    // Transpose output state back to ggml layout [B, H_v, value_dim, key_dim]
-    auto state_transposed = std::make_shared<ov::op::v1::Transpose>(state_4d, state_perm);
-    if (context.get_output_names().size() == 2) {
+    if (snapshot_count == 1 && context.get_output_names().size() == 2) {
+        auto state_transposed = std::make_shared<ov::op::v1::Transpose>(gdn->output(1), state_perm);
         // The canonical graph consumes the packed GGML result only through separate attention
         // and state VIEWs. Publish the native outputs under those VIEW names to avoid
         // flatten -> concat -> reshape -> slice -> reshape chains. This also works for B > 1.
@@ -241,10 +239,10 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
 
     auto flat_shape_1d = ov::op::v0::Constant::create(ov::element::i64, {1}, {-1});
     auto attn = std::make_shared<ov::op::v1::Reshape>(attn_4d, flat_shape_1d, false);
-    Output<Node> states = state_transposed;
+    Output<Node> states;
     if (snapshot_count > 1) {
         auto snapshots = std::make_shared<ov::op::v1::Transpose>(
-            gdn->output(2), ov::op::v0::Constant::create(ov::element::i64, {5}, {0, 1, 2, 4, 3}));
+            gdn->output(1), ov::op::v0::Constant::create(ov::element::i64, {5}, {0, 1, 2, 4, 3}));
         auto token_count =
             std::make_shared<ov::op::v8::Gather>(std::make_shared<ov::op::v3::ShapeOf>(attn_4d, ov::element::i64),
                                                  ov::op::v0::Constant::create(ov::element::i64, {1}, {1}),
@@ -257,6 +255,8 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
             ov::op::v0::Constant::create(ov::element::i64, {}, {1}), ov::element::i64);
         states = std::make_shared<ov::op::v8::Gather>(snapshots, indices,
                                                       ov::op::v0::Constant::create(ov::element::i64, {}, {0}));
+    } else {
+        states = std::make_shared<ov::op::v1::Transpose>(gdn->output(1), state_perm);
     }
     auto new_state = std::make_shared<ov::op::v1::Reshape>(states, flat_shape_1d, false);
     auto packed = std::make_shared<ov::op::v0::Concat>(ov::OutputVector{attn, new_state}, 0);

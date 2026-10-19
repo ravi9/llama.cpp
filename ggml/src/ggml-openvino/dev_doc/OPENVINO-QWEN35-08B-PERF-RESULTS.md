@@ -291,3 +291,29 @@ Commands, environments, profiles, model responses, and intermediate/final logs a
 - Further cache kernel tuning has a limited budget on ordinary 0.8B decode; dense matmul dominates the current profile. Remaining kernel/reorder fusion should be driven by measured latency rather than node count alone.
 - Logits still cross to host for sampling, and hidden/norm outputs remain per the caller's output contract. Removing them requires caller-aware output selection; their presence is not a full-cache host-copy problem.
 - Vulkan's 57.91 t/s remains ahead; the final 56.21 t/s small-model repeat meets the ≥55 t/s target. Target-model MTP also includes draft/catch-up and acceptance effects that cannot be inferred from the 0.8B target-call matrix.
+
+## GatedDeltaNet two-output snapshots (2026-10-19)
+
+The internal OpenVINO `GatedDeltaNet` now has exactly two outputs for every `snapshot_count`. Output 0 is attention. Output 1 is the final recurrent state `[B,H_v,D_k,D_v]` when `K=1`, and the newest-first snapshot tensor `[K,B,H_v,D_k,D_v]` when `K>1`. Snapshot entry `i` contains the state after token `T-i`; entry 0 is the final state. Only `min(K,T)` entries are valid, and the pre-batch state is not included.
+
+In snapshot mode, the GPU kernel writes the final state into snapshot entry 0 and no longer writes a second copy into the input state buffer. This removes one state matrix write and one operator output per GDN layer and active batch. The input state remains unchanged, which is needed when speculative verification later rolls back. The llama.cpp translation consumes output 1 directly and selects the valid newest snapshot for its existing cache update. Ordinary `K=1` execution keeps its existing GPU state update behavior. Transformations that reconstruct GDN preserve `snapshot_count`; paged GDN fusion skips snapshot mode. The model-cache fingerprint revision is now 4.
+
+The UD target was measured with the same GPU, `q4_asym64_all`, native softplus, and disabled KV slicing. The ordinary benchmark uses five repeats. The MTP CLI comparison is one warmed run per mode, and the controlled target-call matrix uses the same forced-token stream, prefix, warmups, and measured calls as the previous UD run.
+
+| Measurement | Previous three-output path | Two-output path |
+| --- | ---: | ---: |
+| `llama-bench` tg512 | 33.17 ± 0.12 t/s | 33.34 ± 0.06 t/s |
+| `llama-bench` tg512 at depth 1024 | 31.55 ± 0.06 t/s | 31.61 ± 0.03 t/s |
+| Greeting, non-MTP | 33.07 t/s | 33.29 t/s |
+| Greeting, MTP with two proposals | 39.04 t/s | 41.63 t/s |
+| Ordinary T3 target call, no snapshots | 38.167 ms | 38.161 ms |
+| T3 target call with snapshots | 53.382 ms | 52.853 ms |
+| T3 target call with snapshots and two rejected tokens | 53.278 ms | 53.005 ms |
+| MTP draft token median | 5.888 ms | 5.892 ms |
+| MTP T3 verification median | 50.520 ms | 48.627 ms |
+| MTP catch-up T3 median | 1.736 ms | 1.773 ms |
+| Accepted proposals | 119 / 143 | 121 / 140 |
+
+Ordinary decode and the controlled snapshot matrix are within run variation. The one MTP CLI run is 6.6% faster, with verification about 1.9 ms shorter and a somewhat higher acceptance rate; treat this as an encouraging run rather than an isolated causal speedup estimate. Draft generation is unchanged. The structural gain is one fewer GDN state-matrix write per layer and active batch, not an expected large change to total model throughput.
+
+Validation for this change: the native GDN reference checks cover `K=1/3`, dynamic batches and token widths, optimized and fallback dimensions, valid snapshot ordering, unchanged initial state, and compiled-model export/import. All 21 native GPU GDN unit cases pass. Core type/visitor and transformation tests pass (17 tests), including `FuseL2NormIntoGDN`, `FuseGroupedQueryIntoGDN`, and paged-fusion snapshot preservation. The native recurrent-cache suite passes 7/7; the Qwen3.5-0.8B GPU slot replay and hidden-output rollback checks pass. UD `llama-server -np 4` passes 12/12 requests both without MTP and with two-token MTP, including concurrent requests, slot reuse/reset, and cached continuation. Logs are in `tmp/gdn-two-output-20261019/`.
