@@ -1,6 +1,6 @@
 # Qwen recurrent-cache optimization results
 
-Date: 2026-10-16. Implementation was measured from the local changes in llama.cpp (`qwen-openvino-generic-cache`, HEAD `73f61e1cb`) and `/home/zijun/openvino` (`qwen-mtp-openvino-checkpoint`, HEAD `21cacac33d`). The matching native OpenVINO changes are committed as `9e08e52ad5` (`intel_gpu: fuse generic recurrent cache maintenance`). Builds use Release `build/MtpOVPerf` and `/home/zijun/openvino-build-mtp`. Unrelated working-tree changes were preserved. Results below exclude load/requantization/graph compilation from generation throughput. No stateful execution is involved.
+Original measurements: 2026-10-16; precision-policy retest: 2026-10-19. The original implementation was measured from the local changes in llama.cpp (`qwen-openvino-generic-cache`, HEAD `73f61e1cb`) and `/home/zijun/openvino` (`qwen-mtp-openvino-checkpoint`, HEAD `21cacac33d`). The matching native OpenVINO changes are committed as `9e08e52ad5` (`intel_gpu: fuse generic recurrent cache maintenance`). Builds use Release `build/MtpOVPerf` and `/home/zijun/openvino-build-mtp`. Unrelated working-tree changes were preserved. Results below exclude load/requantization/graph compilation from generation throughput. No stateful execution is involved.
 
 
 From this retest onward, the target is `~/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf`. GPU, `q4_asym64_all`, native softplus, and disabled KV slicing remain unchanged. The yamini-model tables below retain their original model identity; new measurements are reported separately.
@@ -94,7 +94,110 @@ Five repetitions; mean ± benchmark standard deviation:
 
 UD decode is 8.4% lower at depth zero and 8.0% lower at depth 1024. This compares different GGUF quantizations under the same optimized backend; it is not a before/after optimization measurement on UD. No pre-optimization or Vulkan UD baseline has been measured.
 
-The quantization mix differs substantially: non-expert/non-MTP weights change from 95 Q6_K, 53 Q4_K, 94 Q8_0 and 10 Q5_K tensors to 1 Q6_K and 251 Q8_0 tensors. Those weights grow from 1.87 GB to 2.56 GB. Trunk MoE expert weights change from 20 Q6_K/100 Q4_K to 3 Q6_K/80 Q4_K/37 Q5_K. The full MTP block changes from 11 Q8_0/7 F32/2 BF16 (898 MB) to 8 Q8_0/7 F32/2 BF16/1 Q5_K/2 Q4_K (529 MB): its three expert tensors changed from Q8_0 to K-quants, while its non-expert tensor types remain the same. The same requantization setting does not make all weights identical: K-quants are processed by that setting while existing Q8_0 tensors retain their separate translation. The denser non-expert weights are a plausible contributor to slower decode, but per-op profiling is needed to attribute the gap quantitatively.
+The source quantization mix differs substantially: non-expert/non-MTP weights change from 95 Q6_K, 53 Q4_K, 94 Q8_0 and 10 Q5_K tensors to 1 Q6_K and 251 Q8_0 tensors. Their original GGUF payload grows from 1.87 GB to 2.56 GB; these are source sizes, not converted runtime sizes. Trunk MoE expert weights change from 20 Q6_K/100 Q4_K to 3 Q6_K/80 Q4_K/37 Q5_K. The full MTP block changes from 11 Q8_0/7 F32/2 BF16 (898 MB source payload) to 8 Q8_0/7 F32/2 BF16/1 Q5_K/2 Q4_K (529 MB source payload).
+
+A metadata-only probe on 2026-10-19 calls the built backend's `ggml_openvino_get_extracted_layout` for every quantized tensor with `q4_asym64_all`. **Before the precision-policy correction below**, this setting converts Q4_K/Q5_K/Q6_K and **3D expert** Q8_0/Q5_1 to asymmetric INT4/group-64. Ordinary **2D Q8_0 remains symmetric INT8/group-32**; `_all` adds Q4_K to the K-quant policy, rather than including every quantization type. Embedding/output take the earlier channel-wise INT8 override. The following layout table and the historical throughput measurements use that earlier policy; the corrected-policy retest is labeled separately below.
+
+| Converted quantized weights | yamini | UD |
+| --- | ---: | ---: |
+| Trunk dense INT4/group-64 tensors | 156 | 0 |
+| Trunk dense INT8/group-32 tensors | 94 | 250 |
+| Trunk dense packed weights + scales + zero points | 862,814,208 bytes | 1,492,910,080 bytes |
+| Trunk expert INT4/group-64 tensors | 120 | 120 |
+| Trunk expert packed weights + metadata | 17,364,418,560 bytes | 17,364,418,560 bytes |
+| Embedding/output channel-wise INT8 packed weights + metadata | 1,018,112,000 bytes | 1,018,112,000 bytes |
+| MTP quantized packed weights + metadata | 475,332,608 bytes | 475,332,608 bytes |
+
+The 156 tensors changing from INT4/group-64 to INT8/group-32 are 30 attention gates, 10 attention output projections, 10 attention Q projections, 30 recurrent QKV projections, 60 shared-expert FFN projections and 16 SSM output projections. UD therefore adds **630,095,872 bytes (630 MB, 73%)** to the converted dense trunk. These counts describe extracted packed constants, excluding nonquantized tensors, allocation padding and plugin repacking; they are not a measurement of GPU traffic or the compiled model's footprint. The expert, embedding/output and MTP layouts match, but the numerical weights can still differ because requantization starts from different source quantizations. The extra dense weight traffic and different INT8 kernels are a concrete explanation for a decode gap that is already present without snapshots; a controlled INT4/INT8 comparison and per-op profiling are needed to attribute it quantitatively. Probe input, code and per-tensor results are in `tmp/ud-layout-20261019/`.
+
+### Precision-policy correction, 2026-10-19
+
+The [native OpenVINO model card](https://huggingface.co/OpenVINO/Qwen3.6-35B-A3B-int4-ov) specifies NNCF `INT4_ASYM`, `ratio=1.0`, `group_size=64`, `backup_mode=INT8_SYM`. [NNCF's compression guide](https://github.com/openvinotoolkit/nncf/blob/develop/docs/usage/post_training_compression/weights_compression/Usage.md) defines the ratio over eligible weights excluding special layers; embeddings, convolutions and the last linear layer receive backup precision by default. INT8_SYM is channel-wise. The GGUF backend approximates that precision scheme for supported quantized linear tensors, rather than reproducing compression from the original floating-point model; floating-point tensors remain unchanged.
+
+`q4_asym64_all` now includes ordinary Q8_0/Q5_1 in INT4/group-64 conversion. The default and non-`all` policies keep their existing dense INT8 behavior, including the expert-only GPU workaround. Embedding/output retain channel-wise INT8. Q8_0/Q5_1 rows not divisible by 64 use channel-wise INT8 backup; all affected rows in these Qwen models are divisible by 64. The compiled-model fingerprint version is incremented so old INT8/group-32 blobs cannot silently serve the updated policy.
+
+The updated metadata probe finds matching layouts for **all 383 quantized tensors** between yamini and UD. Both now have **250 trunk dense INT4/group-64 tensors**, occupying **757,432,320 bytes** including scales/zero points. This also reduces yamini's footprint: its 94 previously retained dense Q8_0 tensors now convert to INT4. Equal layouts do not imply equal numerical weights or expert-routing decisions.
+
+Release backend build passes. A targeted conversion/MatMul probe validates Q8_0 and Q5_1 on CPU and GPU against an independent reference decoded from the resulting packed INT4 weights, with dynamic token counts 1, 3 and 32. All 12 comparisons pass (maximum normalized squared error 1.19e-7). Policy checks cover default/native/non-`all` behavior, expert conversion, embedding/output overrides, incompatible-width backup and `no_requant`. Artifacts are `tmp/ud-layout-20261019/{validate.cpp,validation.log,layout-after.tsv}`. These checks validate the conversion path; the full-model performance retest is recorded next. Perplexity has not been evaluated with the corrected policy.
+
+### Full-model retest with corrected dense INT4 policy, 2026-10-19
+
+Release llama.cpp build from HEAD `2a978aa9b` plus the dense Q8_0/Q5_1 policy and cache-fingerprint changes; native OpenVINO HEAD `9e08e52ad5` is unchanged. The exact source diff and command manifests are in `tmp/qwen36-allrequant-20261019/`. Runtime settings are GPU, native softplus, disabled KV slicing and `q4_asym64_all`. Compiled-model caching, stateful execution and profiling are unset for benchmark/CLI runs; the controlled target-call matrix enables host timing instrumentation. GPU workloads run serially.
+
+Five benchmark repetitions, same `-p 1024 -n 512 -d 0,1024` command; mean ± benchmark standard deviation:
+
+| UD workload | Earlier dense INT8 policy tokens/s | Corrected dense INT4 policy tokens/s | Change |
+| --- | ---: | ---: | ---: |
+| pp1024 | 1127.99 ± 7.25 | **1130.09 ± 5.11** | +0.2% |
+| tg512 | 27.41 ± 0.07 | **33.17 ± 0.12** | **+21.0%** |
+| pp1024 at depth 1024 | 1081.64 ± 19.96 | **1082.36 ± 18.15** | +0.1% |
+| tg512 at depth 1024 | 26.19 ± 0.04 | **31.55 ± 0.06** | **+20.5%** |
+
+Both models with the corrected policy:
+
+| Workload | UD tokens/s | yamini tokens/s |
+| --- | ---: | ---: |
+| pp1024 | 1130.09 ± 5.11 | 1133.57 ± 7.88 |
+| tg512 | **33.17 ± 0.12** | **33.21 ± 0.08** |
+| pp1024 at depth 1024 | 1082.36 ± 18.15 | 1074.32 ± 38.38 |
+| tg512 at depth 1024 | **31.55 ± 0.06** | **31.54 ± 0.05** |
+
+The previous 8% UD/yamini decode gap disappears within run variation. Yamini also improves from 29.91 to 33.21 tokens/s (+11.0%) at depth zero and 28.47 to 31.54 (+10.8%) at depth 1024. Together with matching converted layouts, this supports the retained dense INT8/group-32 weights as the main cause of the previous gap. It does not isolate extra weight bandwidth from differences between INT8 and INT4 kernels.
+
+The controlled matrix repeats the original 128-token prefix, eight warmups, 32 measured calls, hidden output and logits for all tokens. UD median milliseconds:
+
+| Target call | Earlier policy ms | Corrected policy ms |
+| --- | ---: | ---: |
+| T1, no snapshots | 35.19 | **29.80** |
+| T3, no snapshots | 44.10 | **38.17** |
+| T1, snapshots | 43.42 | **36.75** |
+| T3, snapshots | 58.83 | **53.38** |
+| T3, reject two | 59.42 | **53.28** |
+
+Ordinary T1→T3 adds **8.37 ms**. Snapshot storage adds **15.21 ms** to T3, versus 14.73 ms previously; these sequential runs do not establish a meaningful change in that overhead. The consistent 5–7 ms target-call improvement comes from the precision-policy change, with recurrent execution unchanged.
+
+The corrected-policy yamini matrix also closely matches UD:
+
+| Target call | UD median ms | yamini median ms |
+| --- | ---: | ---: |
+| T1, no snapshots | 29.80 | 28.79 |
+| T3, no snapshots | 38.17 | 38.06 |
+| T1, snapshots | 36.75 | 36.77 |
+| T3, snapshots | 53.38 | 53.03 |
+| T3, reject two | 53.28 | 53.01 |
+
+The one-slot `Hi` CLI runs use the original context 4096, two CPU threads, greedy sampling and 192-token cap. Each mode is one process run; medians exclude positions below 64.
+
+| UD CLI measurement | Earlier policy | Corrected policy |
+| --- | ---: | ---: |
+| Non-MTP generation tokens/s | 27.15 | **33.07** |
+| MTP generation tokens/s | 35.93 | **39.04** |
+| Non-MTP target T1 median ms | 35.88 | **28.97** |
+| MTP verification T3 median ms | 57.74 | **50.52** |
+| Draft token median ms | 5.980 | **5.888** |
+| Draft catch-up T3 median ms | 1.790 | **1.736** |
+| Draft proposals accepted/generated | 114/136 | **119/143** |
+| Mean emitted tokens per cycle | 2.68 | **2.65** |
+
+MTP generation improves 8.7%, and exceeds the new non-MTP run by 18.1%. The MTP result includes a final two-token verification call (90.77 ms) when reaching the cap; the warmed T3 median describes the usual three-token loop. Both corrected-policy runs reach the 192-token cap, versus 182 tokens previously. Requantization changes the greedy continuation, so the fixed-token matrix is the stronger timing comparison; these CLI runs do not establish unchanged model quality or identical non-MTP/MTP output.
+
+Both models with the corrected policy, same CLI setup:
+
+| CLI measurement | UD | yamini |
+| --- | ---: | ---: |
+| Non-MTP generation tokens/s | **33.07** | **33.26** |
+| MTP generation tokens/s | **39.04** | **40.95** |
+| Non-MTP target T1 median ms | 28.97 | 29.02 |
+| MTP verification T3 median ms | 50.52 | 49.31 |
+| Draft token median ms | 5.888 | 5.863 |
+| Draft catch-up T3 median ms | 1.736 | 1.722 |
+| Draft proposals accepted/generated | 119/143 (83.22%) | 106/126 (84.13%) |
+| Mean emitted tokens per cycle | 2.65 | 2.68 |
+| Generated tokens without/with MTP | 192/192 | 170/170 |
+
+Yamini's MTP run improves from 38.74 to 40.95 tokens/s (+5.7%) and is 23.1% faster than its new non-MTP run. The remaining 4.7% UD/yamini MTP throughput difference is from single runs with different continuations, slightly different verification latency/acceptance and UD's final T2 cap call; it cannot be attributed to a packed-weight layout difference. The controlled T3 matrix and repeated non-MTP benchmark now closely agree. All eight benchmark/matrix/CLI processes exit successfully; raw logs, command manifests, per-call distributions and `comparison.json` are in `tmp/qwen36-allrequant-20261019/`. Four-slot serving and perplexity were not rerun in this performance-only retest.
+
+### Target-call timings with the earlier precision policy
 
 The forced-token matrix uses a 128-token prefix, eight warmups, 32 measured calls, hidden output enabled, and logits on all input tokens. Median milliseconds:
 

@@ -379,12 +379,13 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
     //
     // GGML_OPENVINO_REQUANT_KQUANT selects a 4-bit target instead. Names are
     // q4_<sym|asym><group>[_all]: <sym|asym> says whether a per-group zero point is kept, <group>
-    // is the group size, and the _all suffix sends Q4_K down the same path (without it only
-    // Q6_K/Q5_K are touched):
+    // is the group size. The _all suffix includes Q4_K; q4_asym64_all also includes
+    // ordinary Q8_0/Q5_1 linear weights, matching the INT4_ASYM/group-64 primary precision
+    // used by NNCF with ratio=1.0. Embedding/output retain the channel-wise INT8 overrides above:
     //   q4_sym128      Q6_K/Q5_K -> Q4_0_128 (u4, group 128, symmetric)
     //   q4_sym128_all  and Q4_K too -- drops Q4_K's per-32 zero point, which costs some accuracy
     //   q4_asym64      Q6_K/Q5_K -> Q4_1_64 (u4, group 64, asymmetric)
-    //   q4_asym64_all  Q6_K/Q5_K and Q4_K -> Q4_1_64 (u4, group 64, asymmetric)
+    //   q4_asym64_all  Q6_K/Q5_K/Q4_K/Q8_0/Q5_1 -> Q4_1_64 (u4, group 64, asymmetric)
     //   native         no requantization at all (keep Q6_K/Q5_K as they are)
     //
     // q4_asym64 leaves Q4_K at its native group 32. Use q4_asym64_all to keep the group size uniform.
@@ -404,6 +405,13 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
         if (asym64_all) {
             return ExtraQuantType::Q4_1_64;
         }
+    }
+    // Include dense Q8_0/Q5_1 in the explicit all-asymmetric policy. Keep the default GPU
+    // workaround below restricted to MoE experts: ordinary grouped INT8 MatMul is supported.
+    if (asym64_all && (tensor->type == GGML_TYPE_Q5_1 || tensor->type == GGML_TYPE_Q8_0)) {
+        // A group must fit within each row. Use backup channel-wise INT8 for incompatible
+        // widths (Q8_0/Q5_1 allow rows of 32 weights); every affected Qwen3.6 row is divisible by 64.
+        return tensor->ne[0] % 64 == 0 ? ExtraQuantType::Q4_1_64 : ExtraQuantType::Q8_0_C;
     }
     // MoE expert weights (3D, ne[2] = n_expert) stored as Q5_1/Q8_0 are the expert-side
     // equivalent of Q6_K/Q5_K: kept at 8 bits by default while the rest of the model is at 4
