@@ -294,6 +294,8 @@ Commands, environments, profiles, model responses, and intermediate/final logs a
 
 ## GatedDeltaNet two-output snapshots (2026-10-19)
 
+The GatedDeltaNet snapshot extension was added to support Qwen3.5 (`qwen35`/`qwen35moe`) in llama.cpp's OpenVINO backend, including the current Qwen3.6 target. MTP verification can reject a draft after processing later tokens in the same batch; llama.cpp needs the earlier recurrent `cache_s` state to roll back to the accepted prefix. Snapshots provide that state without recomputing the recurrence.
+
 The internal OpenVINO `GatedDeltaNet` now has exactly two outputs for every `snapshot_count`. Output 0 is attention. Output 1 is the final recurrent state `[B,H_v,D_k,D_v]` when `K=1`, and the newest-first snapshot tensor `[K,B,H_v,D_k,D_v]` when `K>1`. Snapshot entry `i` contains the state after zero-based token `T-1-i`; entry 0 is the final state. Only `min(K,T)` entries are valid, and the pre-batch state is not included.
 
 In snapshot mode, the GPU kernel writes the final state into snapshot entry 0 and no longer writes a second copy into the input state buffer. This removes one state matrix write and one operator output per GDN layer and active batch. The input state remains unchanged, which is needed when speculative verification later rolls back. The llama.cpp translation consumes output 1 directly and selects the valid newest snapshot for its existing cache update. Ordinary `K=1` execution keeps its existing GPU state update behavior. Transformations that reconstruct GDN preserve `snapshot_count`; paged GDN fusion skips snapshot mode. The model-cache fingerprint revision is now 4.

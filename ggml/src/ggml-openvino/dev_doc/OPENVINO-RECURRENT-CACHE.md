@@ -196,6 +196,8 @@ The current target is now `~/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-
 
 ## Native operator contracts (2026-10-20 review)
 
+These native OpenVINO operations and the GatedDeltaNet snapshot extension were introduced specifically to support Qwen3.5 in llama.cpp's OpenVINO backend. The integration covers the GGML `qwen35` and `qwen35moe` architectures used by Qwen3.5 and the current Qwen3.6 target. `cache_r` holds convolution history and `cache_s` holds recurrent matrix state. Fusing their maintenance reduces data-movement overhead while preserving `llama-server` multi-slot reset/reorder and speculative MTP rollback behavior.
+
 The historical graph-node ranges above explain the first prototype. The current native API has three internal OpenVINO operations. They fuse cache data movement; GDN attention and SSM convolution arithmetic remain separate operations. Each cache is a full `[1,1,S,F]` tensor, where `S` is the allocated slot count and `F` is the flattened per-slot state size. Cache/QKV/state inputs support F16/F32; each metadata input supports I32/I64. All input ranks are four, while dimensions and metadata values may change between requests.
 
 | Operation | Ordered input ports (zero-based) | Output ports |
