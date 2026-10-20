@@ -192,3 +192,28 @@ The previous Vulkan greeting reference remains 49.83 tokens/s with 42.56 ms veri
 The subsequent [small-model investigation and plan](OPENVINO-QWEN35-08B-PERF-PLAN.md) identified runtime shape-inference synchronization around the native kernels. The [implementation results](OPENVINO-QWEN35-08B-PERF-RESULTS.md) document active-row shapes, reusable USM host controls, native `RecurrentStateUpdate`, folded matrix layouts, current cache revision 6, and updated target-model measurements. The earlier revision and throughput tables above remain historical baselines.
 
 The current target is now `~/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf` with the same OpenVINO configuration. Updated tests and performance are in the [performance report](OPENVINO-QWEN35-08B-PERF-RESULTS.md); all yamini results above remain historical.
+
+
+## Native operator contracts (2026-10-20 review)
+
+The historical graph-node ranges above explain the first prototype. The current native API has three internal OpenVINO operations. They fuse cache data movement; GDN attention and SSM convolution arithmetic remain separate operations. Each cache is a full `[1,1,S,F]` tensor, where `S` is the allocated slot count and `F` is the flattened per-slot state size. Cache/QKV/state inputs support F16/F32; each metadata input supports I32/I64. All input ranks are four, while dimensions and metadata values may change between requests.
+
+| Operation | Ordered input ports (zero-based) | Output ports |
+| --- | --- | --- |
+| `RecurrentStateGather` | `cache`, `active_rows`, `extra_rows`, `reset_begin`, `reset_length`, `extra_offsets` | 0: active states `[1,1,B,F]`; 1: full reset/reordered cache |
+| `RecurrentConvCache` | the same six inputs, then `qkv [1,B,C,T]`, `windows [1,1,K,2]`; attribute `history=H>0`, `F=C*H` | 0: convolution input `[1,B,C,H+T]`; 1: full cache after window writes |
+| `RecurrentStateUpdate` | `prepared_cache`, `states [1,1,N,F]`, `control [1,1,1,4]` | 0: full updated cache |
+
+Gather logically clears the source interval `[reset_begin, reset_begin+reset_length)` before reading either row map. Active rows are selected from that cleared source, before reorder. `extra_offsets=(destination_begin, source_begin)` selects the suffix `extra_rows[source_begin:]` and copies it to consecutive destination rows. The input allocation stays immutable, which preserves cyclic maps such as `[1,0]` and duplicate sources. Rows outside the reset/reorder ranges are preserved. The active output feeds GDN; the full prepared-cache output feeds StateUpdate.
+
+Convolution-cache output 0 concatenates gathered per-channel history with projected QKV. Each window `(start_column,destination_row)` copies `H` consecutive columns into `B` cache rows. Valid starts lie in `[0,T]`; the caller supplies valid-token windows for short or padded batches. Window writes occur after reset/reorder and later overlapping windows win. Output 0 uses QKV precision; output 1 uses cache precision. A mixed-precision window write rounds through output-0 precision before converting to cache precision, matching a materialized convolution-input slice.
+
+StateUpdate control is `(destination_begin, sequence_count, snapshot_stride, source_begin)`. Selected source row `source_begin+r` writes destination row `destination_begin + (r/sequence_count)*snapshot_stride + r%sequence_count`, using integer division. Later source rows win for overlapping planes, including `snapshot_stride=0`; `source_begin=N` is an empty update. For example, two sequences with stride 4 and destination begin 1 write six source rows to `[1,2,5,6,9,10]`.
+
+Positive `key_size`/`value_size` attributes fold the matrix-layout conversion into gather and update. Gather converts `[head,value,key]` cache matrices to native GDN `[head,key,value]`; StateUpdate converts back. Both attributes default to zero, which disables transpose. They must either both be zero or both positive, with their product dividing `F`.
+
+GDN has two outputs. Output 0 is attention. Output 1 is `[B,H_v,D_k,D_v]` for `snapshot_count=1`, or `[K,B,H_v,D_k,D_v]` for `K>1`. Snapshot entry `i` is the state after zero-based token `T-1-i`; only `min(K,T)` entries are valid. Entry 0 already contains the final state, so no additional final-state output is needed. Snapshot mode leaves the input matrix state unchanged.
+
+All runtime indices, reset ranges, windows, and destination rows must be in bounds. The OpenCL kernels use distinct source/output allocations; the GPU runtime may stage a caller's shared remote input/output tensor to preserve immutable reads. This supports multi-slot reset/reorder and speculative rollback without single-slot assumptions.
+
+The OpenVINO operation specifications are in `docs/articles_en/documentation/openvino-ir-format/operation-sets/operation-specs/internal/`: `recurrent-state-gather.rst`, `recurrent-conv-cache.rst`, `recurrent-state-update.rst`, and `gated-delta-net.rst`. The corresponding C++ developer headers also document every port, attribute, and precedence rule.
