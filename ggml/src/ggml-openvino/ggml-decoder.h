@@ -33,8 +33,6 @@ struct ModelParams {
     bool has_rs_rollback = false;
     bool mixed_rope_params = false;
     bool is_cacheless_attn = false;
-    // the graph writes a transposed V cache (`-fa off`: one value element per row, tokens along the row)
-    bool v_trans = false;
     std::vector<int> swa_layers;
     // The sliding-window mask tensor, identified in compute_llm_params() by grouping attention
     // layers on the mask they consume. Only used to tell the two masks apart when naming OV
@@ -348,10 +346,6 @@ public:
 
     // True if the KV cache is an input of this graph in the 4-D layout (see is_kvcache_4d)
     bool is_kvcache_4d_input(const ggml_tensor * cache) const { return m_kvcache_4d.count(cache) != 0; }
-
-    // True if each row of the KV cache holds one token. With `-fa off`, llama.cpp keeps the V cache transposed
-    // and writes it one element per row, so its first rows do not hold the first tokens.
-    bool is_kvcache_token_rows(const ggml_tensor * cache) const;
 
     const ggml_tensor * get_tensor_from_name(const std::string & name) const;
 
