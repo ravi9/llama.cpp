@@ -1145,10 +1145,10 @@ static ggml_backend_t ggml_backend_openvino_device_init(ggml_backend_dev_t dev, 
     GGML_UNUSED(params);
     ggml_backend_openvino_device_context * ctx = (ggml_backend_openvino_device_context *) dev->context;
     if (ctx->ov_name != ggml_openvino_get_device_name()) {
-        // Not an error: test-backend-ops initializes every device
         GGML_LOG_WARN("%s: %s (OpenVINO %s) is not the selected device, no ops will run on it; "
                       "set GGML_OPENVINO_DEVICE=%s to use it\n",
                       __func__, ctx->name.c_str(), ctx->ov_name.c_str(), ctx->ov_name.c_str());
+        //return nullptr;
     }
     return ggml_backend_openvino_init(ctx->device);
 }
