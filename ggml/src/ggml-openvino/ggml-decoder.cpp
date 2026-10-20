@@ -718,6 +718,16 @@ static int get_swa_window_from_mask(const ggml_tensor * mask) {
     return window > 0 ? (int) window : -1;
 }
 
+// The KQ product that the SOFT_MAX of an attention reads: directly, or through the logit soft-capping of gemma-2
+// (SCALE, TANH, SCALE)
+static const ggml_tensor * softmax_scores_source(const ggml_tensor * scores) {
+    while (scores != nullptr && (scores->op == GGML_OP_SCALE ||
+                                 (scores->op == GGML_OP_UNARY && ggml_get_unary_op(scores) == GGML_UNARY_OP_TANH))) {
+        scores = scores->src[0];
+    }
+    return scores;
+}
+
 std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgraph * cgraph, bool is_static) {
     ModelParams model_params;
     ComputeParams compute_params;
@@ -760,12 +770,12 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
                 break;
             }
             break;
-        case GGML_OP_SOFT_MAX:
-            // case 2: node op is SOFT_MAX, src 0 not null & op is MUL_MAT & the src 0 of MUL_MAT is PERMUTE & the permuted tensor src is the view of cache k
-            if (node->src[0] != nullptr && node->src[1] != nullptr && node->src[0]->op == GGML_OP_MUL_MAT &&
-                node->src[0]->src[0] != nullptr && node->src[0]->src[1] != nullptr &&
-                node->src[0]->src[0]->op == GGML_OP_PERMUTE && node->src[0]->src[0]->src[0] != nullptr &&
-                node->src[0]->src[0]->src[0]->op == GGML_OP_VIEW) {
+        case GGML_OP_SOFT_MAX: {
+            // case 2: node op is SOFT_MAX, its scores come from a MUL_MAT (see softmax_scores_source) & the src 0 of MUL_MAT is PERMUTE & the permuted tensor src is the view of cache k
+            const ggml_tensor * kq = softmax_scores_source(node->src[0]);
+            if (kq != nullptr && node->src[1] != nullptr && kq->op == GGML_OP_MUL_MAT && kq->src[0] != nullptr &&
+                kq->src[1] != nullptr && kq->src[0]->op == GGML_OP_PERMUTE && kq->src[0]->src[0] != nullptr &&
+                kq->src[0]->src[0]->op == GGML_OP_VIEW) {
                 return 2;
             }
             // case 3: node op is SOFT_MAX, src 0 not null & op is ADD & the src 0 of ADD is MUL_MAT & the src 0 of MUL_MAT is PERMUTE
@@ -775,6 +785,7 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
                 return 3;
             }
             break;
+        }
         default:
             break;
         }
@@ -906,6 +917,11 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
             node->src[2]->ne[0] == 1 && is_kvcache(node->src[2]->src[0], nullptr)) {
             model_params.v_trans = true;
         }
+        if (node->op == GGML_OP_FLASH_ATTN_EXT) {
+            float logit_softcap = 0.0f;
+            memcpy(&logit_softcap, (const float *) node->op_params + 2, sizeof(float));
+            model_params.softcap_attn = model_params.softcap_attn || logit_softcap != 0.0f;
+        }
         const int attention_pattern_case = get_attention_pattern_case(node);
         if (attention_pattern_case != -1) {
             ggml_tensor * cache_k_permute = nullptr;
@@ -921,7 +937,7 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
                 mask = node->src[3];
                 break;
             case 2:
-                cache_k_permute = node->src[0]->src[0];
+                cache_k_permute = softmax_scores_source(node->src[0])->src[0];
                 mask = node->src[1];
                 break;
             case 3:
