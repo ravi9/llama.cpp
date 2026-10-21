@@ -129,7 +129,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_ENABLE_CACHE",
         "GGML_OPENVINO_DISABLE_CACHE",
         "GGML_OPENVINO_DISABLE_KV_SLICE",
-        "GGML_OPENVINO_DISABLE_KV_4D",
+        "GGML_OPENVINO_ENABLE_KV_4D",
         "GGML_OPENVINO_ENABLE_FALLBACK",
         "GGML_OPENVINO_MANUAL_GQA_ATTN",
         "GGML_OPENVINO_DISABLE_ELTWISE_RANK_ALIGN",
@@ -422,6 +422,10 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
             return ExtraQuantType::Q4_1_64;
         }
     }
+    if (tensor->type == GGML_TYPE_Q5_0) {
+        //return ExtraQuantType::Q4_0_128;
+        return ExtraQuantType::Q4_0_64;
+    }
     // MoE expert weights (3D, ne[2] = n_expert) stored as Q5_1/Q8_0 are the expert-side
     // equivalent of Q6_K/Q5_K: kept at 8 bits by default while the rest of the model is at 4
     // (gemma-4 26B-A4B keeps its down projection there). Send them to 4 bits under the same
@@ -599,6 +603,11 @@ ggml_openvino_extracted_layout ggml_openvino_get_extracted_layout(const ggml_ten
         break;
 
     case GGML_TYPE_Q8_0:
+        layout.is_symmetric = true;
+        break;
+
+    case GGML_TYPE_Q5_0:
+        // i8 weights (5-bit values minus 16), symmetric (scale only)
         layout.is_symmetric = true;
         break;
 

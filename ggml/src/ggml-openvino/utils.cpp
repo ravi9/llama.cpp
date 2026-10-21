@@ -44,8 +44,9 @@ namespace {
 // for that layer) instead of the fully-allocated ctx_per_seq. Pre-conditions:
 //   * non-static (CPU/GPU) backend, single sequence, seq_active_start == 0
 //   * ggml KV layout is a contiguous [1, 1, ctx_per_seq, n_heads_kv*head_size]
-//     so the first n_kv rows are the live prefix and shrinking the ctx axis
-//     gives a valid tensor over the same host storage
+//     with one token per row (not the transposed V cache of `-fa off`), so the
+//     first n_kv rows are the live prefix and shrinking the ctx axis gives a
+//     valid tensor over the same host storage
 //   * not an SWA layer (ring cache): once the window has wrapped the first
 //     n_kv rows no longer contain the live prefix
 // On any unmet pre-condition returns std::nullopt; the caller falls back to
@@ -64,7 +65,7 @@ std::optional<ov::Tensor> try_make_kv_sliced_tensor(const std::shared_ptr<GgmlOv
         return std::nullopt;
     }
     const auto * op = ggml_decoder->get_tensor_used_op(ggml_tensor);
-    if (!GgmlOvDecoder::is_kvcache(ggml_tensor, op)) {
+    if (!GgmlOvDecoder::is_kvcache(ggml_tensor, op) || !ggml_decoder->is_kvcache_token_rows(ggml_tensor)) {
         return std::nullopt;
     }
 
@@ -137,7 +138,7 @@ static uint64_t ggml_openvino_model_cache_extra_cfg(bool stateful, bool recurren
     extra_cfg = extra_cfg * 131 + (stateful ? (recurrent ? 2u : 1u) : 0u);
     extra_cfg = extra_cfg * 131 + (ggml_openvino_reduce_compile_mem_enabled() ? 1u : 0u);
     extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_KV_SLICE") ? 1u : 0u);
-    extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_KV_4D") ? 1u : 0u);
+    extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_ENABLE_KV_4D") > 0 ? 1u : 0u);
     extra_cfg = extra_cfg * 131 + (manual_gqa_enabled ? 1u : 0u);
     extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_PROFILING") >= 2 ? 1u : 0u);
     extra_cfg = extra_cfg * 131 + (ggml_openvino_shape_from_mask_enabled() ? 1u : 0u);
@@ -889,6 +890,12 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::share
     const int64_t graph_param_compute_time = ggml_time_us() - graph_param_compute_start_time;
 
     const bool cache_enabled = !model_is_splitted && !cache_disabled;
+    if (r_ctx->stateful && m_params.v_trans) {
+        GGML_LOG_WARN(
+            "ggml-openvino: disabling stateful execution for this context: the graph writes a transposed V cache "
+            "(flash attention is off), which the stateful KV cache does not support\n");
+        r_ctx->stateful = false;
+    }
     const bool stateful_recurrent = r_ctx->stateful && m_params.state_size >= 0;
     const bool stateful_kv_only = r_ctx->stateful && !stateful_recurrent;
     if (r_ctx->stateful &&
