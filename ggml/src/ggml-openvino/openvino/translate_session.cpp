@@ -13,6 +13,7 @@
 #include "pass/kv_state_seq_axis.h"
 #include "pass/mark_decompression_convert_constant_folding.h"
 #include "pass/mark_dequantization_subgraph.h"
+#include "pass/rescale_norm_divide.h"
 #include "pass/squeeze_matmul.h"
 #include "rt_info/weightless_caching_attributes.hpp"
 
@@ -496,6 +497,11 @@ std::shared_ptr<Model> TranslateSession::apply_transformations(std::shared_ptr<M
             std::vector<ov::element::Type>{ov::element::u8, ov::element::i8, ov::element::u4, ov::element::i4});
         manager.register_pass<pass::FuseToConv>();
         manager.register_pass<pass::FuseArgsortTopK>();
+        if (ggml_openvino_is_gpu()) {
+            manager.register_pass<pass::RescaleNormDivide>();
+            manager.register_pass<pass::FuseSquareSum>();
+            manager.register_pass<pass::RescaleReduceL2>();
+        }
 
         // MOECompressed has no CPU plugin implementation, so enable it by default only on GPU.
         // GGML_OPENVINO_MOE_OP=0 keeps the unfused GatherMatmul path for fallback/debugging.

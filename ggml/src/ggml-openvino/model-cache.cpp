@@ -345,7 +345,7 @@ uint64_t ggml_openvino_model_fingerprint(const ggml_cgraph * cgraph,
                                          uint64_t extra_cfg,
                                          const std::string & graph_signature) {
     uint64_t h = FNV_OFFSET;
-    h = fnv1a_u64(h, 2);
+    h = fnv1a_u64(h, 3);
     h = fnv1a(h, graph_signature.data(), graph_signature.size());
     for (const char * name : cache_settings) {
         const char * value = ggml_openvino_getenv_str(name, "");
