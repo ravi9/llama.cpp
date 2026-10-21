@@ -25,6 +25,7 @@ ov::Output<ov::Node> translate_circular_pad(ov::Output<ov::Node> input,
 
     const std::array<int32_t, 4> pads_begin = {pads[6], pads[4], pads[2], pads[0]};
     const std::array<int32_t, 4> pads_end = {pads[7], pads[5], pads[3], pads[1]};
+    // input can have rank < 4 (leading dims dropped); align pads to the trailing input axes
     const size_t dropped = input_shape.size() < pads_begin.size() ? pads_begin.size() - input_shape.size() : 0;
 
     for (size_t i = 0; i < dropped; ++i) {

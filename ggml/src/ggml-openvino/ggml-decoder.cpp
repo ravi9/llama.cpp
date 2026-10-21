@@ -2456,6 +2456,7 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
             // a dynamic dim of a source that is not the concat axis stays valid in the result
             const int src0_dynamic_dim = m_node_dynamic_dims[node->src[0]];
             const int src1_dynamic_dim = m_node_dynamic_dims[node->src[1]];
+            // sources should agree; on conflict keep src[0] but show warning
             if (src0_dynamic_dim != -1 && src1_dynamic_dim != -1 && src0_dynamic_dim != src1_dynamic_dim) {
                 GGML_LOG_WARN("ggml-openvino: different dynamic dims for CONCAT node '%s', src[0]: '%s', src[1]: '%s'\n",
                               node->name, node->src[0]->name, node->src[1]->name);
@@ -2471,6 +2472,7 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
                 m_node_dynamic_dims[node] = src_dynamic_dim;
                 break;
             }
+            // no source is dynamic: fall back to the dim that grew (the concat axis)
             for (int i = 0; i < GGML_MAX_DIMS; i++) {
                 if (node->src[0]->ne[i] != node->ne[i]) {
                     m_node_dynamic_dims[node] = i;

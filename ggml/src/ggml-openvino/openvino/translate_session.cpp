@@ -497,6 +497,8 @@ std::shared_ptr<Model> TranslateSession::apply_transformations(std::shared_ptr<M
             std::vector<ov::element::Type>{ov::element::u8, ov::element::i8, ov::element::u4, ov::element::i4});
         manager.register_pass<pass::FuseToConv>();
         manager.register_pass<pass::FuseArgsortTopK>();
+        // GPU computes norms in fp16; x*x overflows for |x| > 256 (e.g. Gemma 3n altup magnitudes)
+        // RescaleNormDivide must run before FuseSquareSum, it matches the unfused Sqrt(ReduceSum(x*x))
         if (ggml_openvino_is_gpu()) {
             manager.register_pass<pass::RescaleNormDivide>();
             manager.register_pass<pass::FuseSquareSum>();

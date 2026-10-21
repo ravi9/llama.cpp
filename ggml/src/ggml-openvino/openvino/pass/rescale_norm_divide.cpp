@@ -23,6 +23,7 @@ namespace ggml {
 namespace pass {
 
 namespace {
+// matched norm ||input|| over axes; wrappers are shape-only nodes (Tile/Broadcast) between the norm and the Divide
 struct NormPattern {
     ov::Output<ov::Node> input;
     ov::Output<ov::Node> axes;
@@ -31,6 +32,7 @@ struct NormPattern {
     std::vector<std::shared_ptr<ov::Node>> nodes;
 };
 
+// accepts ReduceL2(x) or Sqrt(ReduceSum(x*x)), optionally under Tile/Broadcast (ggml_div repeat)
 bool get_norm_pattern(const ov::Output<ov::Node> & denominator, NormPattern & norm) {
     auto node = denominator.get_node_shared_ptr();
     while (true) {
@@ -83,6 +85,7 @@ bool is_max_scaled(const ov::Output<ov::Node> & x) {
 }
 }  // namespace
 
+// Divide(Multiply(x, s), norm(x)) -> Divide(Multiply(x/m, s), norm(x/m)), m = max|x| per row
 RescaleNormDivide::RescaleNormDivide() {
     auto mul = ov::pass::pattern::wrap_type<ov::op::v1::Multiply>();
     auto pattern = ov::pass::pattern::wrap_type<ov::op::v1::Divide>({mul, ov::pass::pattern::any_input()});
@@ -108,6 +111,7 @@ RescaleNormDivide::RescaleNormDivide() {
             return false;
         }
 
+        // eps keeps an all-zero row at 0 instead of 0/0
         auto eps = ov::op::v0::Constant::create(x.get_element_type(), ov::Shape{}, {1e-4f});
         auto abs = std::make_shared<ov::op::v0::Abs>(x);
         auto row_max = std::make_shared<ov::op::v1::Maximum>(std::make_shared<ov::op::v1::ReduceMax>(abs, norm.axes, true), eps);
@@ -120,6 +124,7 @@ RescaleNormDivide::RescaleNormDivide() {
         auto new_l2 = std::make_shared<ov::op::v4::ReduceL2>(x_scaled, norm.axes, norm.keep_dims);
         new_l2->set_friendly_name(norm.nodes.front()->get_friendly_name());
 
+        // rebuild Tile/Broadcast around the new norm to keep the original broadcast shape
         ov::Output<ov::Node> new_denominator = new_l2;
         std::vector<std::shared_ptr<ov::Node>> new_nodes{abs, row_max, x_scaled, new_mul, new_l2};
         for (auto it = norm.wrappers.rbegin(); it != norm.wrappers.rend(); ++it) {
@@ -145,8 +150,9 @@ RescaleNormDivide::RescaleNormDivide() {
                      callback);
 }
 
+// separate pass: a MatcherPass keeps only one matcher, a 2nd register_matcher() replaces the 1st
 FuseSquareSum::FuseSquareSum() {
-    // Canonicalize standalone norms; RescaleNormDivide also handles unfused norms in full normalization patterns.
+    // Sqrt(ReduceSum(x*x)) -> ReduceL2(x), so RescaleReduceL2 can rescale standalone norms
     auto square = ov::pass::pattern::wrap_type<ov::op::v1::Multiply>();
     auto sum = ov::pass::pattern::wrap_type<ov::op::v1::ReduceSum>({square, ov::pass::pattern::any_input()});
     auto sqrt = ov::pass::pattern::wrap_type<ov::op::v0::Sqrt>({sum});
