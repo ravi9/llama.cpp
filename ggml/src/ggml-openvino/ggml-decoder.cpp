@@ -901,6 +901,11 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
     bool rope_seen = false;
     for (int i = 0; i < cgraph->n_nodes; i++) {
         ggml_tensor * node = cgraph->nodes[i];
+        // `-fa off` stores the V cache transposed: SET_ROWS writes it through a [1, n] reshape, one element per row
+        if (node->op == GGML_OP_SET_ROWS && node->src[2] != nullptr && node->src[2]->op == GGML_OP_RESHAPE &&
+            node->src[2]->ne[0] == 1 && is_kvcache(node->src[2]->src[0], nullptr)) {
+            model_params.v_trans = true;
+        }
         const int attention_pattern_case = get_attention_pattern_case(node);
         if (attention_pattern_case != -1) {
             ggml_tensor * cache_k_permute = nullptr;
@@ -1497,6 +1502,11 @@ bool GgmlOvDecoder::is_kvcache_4d(const ggml_tensor * cache) const {
     if (!enabled || m_is_static || m_is_stateful || m_model_is_splitted || !ggml_openvino_is_gpu()) {
         return false;
     }
+    // `-fa off` (transposed V cache): keep the [1, 1, ctx, n_heads_kv * head_size] layout. The 4-D K cache breaks the
+    // MUL_MAT attention of the Phi-3 models (Phi-3.5 mini, Phi-4 mini).
+    if (m_model_params.v_trans) {
+        return false;
+    }
     if (cache->op != GGML_OP_NONE || cache->view_src != nullptr || !is_kvcache(cache, nullptr)) {
         return false;
     }
@@ -1541,6 +1551,21 @@ bool GgmlOvDecoder::is_kvcache_4d(const ggml_tensor * cache) const {
             continue;
         }
         return false;
+    }
+    return true;
+}
+
+bool GgmlOvDecoder::is_kvcache_token_rows(const ggml_tensor * cache) const {
+    for (int i = 0; i < m_cgraph->n_nodes; i++) {
+        const auto * node = m_cgraph->nodes[i];
+        if (node->op != GGML_OP_SET_ROWS) {
+            continue;
+        }
+        // SET_ROWS writes whole rows of src[2], which is the cache or a view of it
+        const auto * dst = node->src[2];
+        if (dst != nullptr && (dst == cache || dst->view_src == cache) && dst->ne[0] != cache->ne[0]) {
+            return false;
+        }
     }
     return true;
 }
@@ -1707,7 +1732,7 @@ std::shared_ptr<ov::Node> GgmlOvDecoder::create_weight_node(ggml_tensor * tensor
 
     // GGML_LOG_DEBUG("%s: creating new weight node for %s\n", __func__, tensor->name);
     static const std::set<ggml_type> weight_types = {GGML_TYPE_F32,  GGML_TYPE_F16,  GGML_TYPE_BF16, GGML_TYPE_Q8_0,
-                                                     GGML_TYPE_Q4_0, GGML_TYPE_Q4_1, GGML_TYPE_Q5_1, GGML_TYPE_Q4_K,
+                                                     GGML_TYPE_Q4_0, GGML_TYPE_Q4_1, GGML_TYPE_Q5_0, GGML_TYPE_Q5_1, GGML_TYPE_Q4_K,
                                                      GGML_TYPE_Q5_K, GGML_TYPE_Q6_K, GGML_TYPE_MXFP4};
     if (weight_types.find(tensor->type) == weight_types.end()) {
         throw std::runtime_error("Unexpected weight tensor type: " + std::string(tensor->name) + " with type " +
