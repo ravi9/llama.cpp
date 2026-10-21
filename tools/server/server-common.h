@@ -15,6 +15,7 @@
 #include <condition_variable>
 #include <cinttypes>
 #include <cstdio>
+#include <filesystem>
 #include <functional>
 #include <mutex>
 #include <queue>
@@ -93,6 +94,9 @@ struct server_grammar_trigger {
 };
 
 json format_error_response(const std::string & message, const enum error_type type);
+
+// path of the running llama-server binary, used to spawn siblings. throws on failure
+std::filesystem::path get_server_exec_path();
 
 //
 // random string / id
@@ -355,9 +359,11 @@ json oaicompat_completion_params_parse(const json & body);
 
 // used by /chat/completions endpoint
 json oaicompat_chat_params_parse(
+    const llama_vocab * vocab,
     json & body, /* openai api json semantics */
     const server_chat_params & opt,
-    std::vector<raw_buffer> & out_files);
+    std::vector<raw_buffer> & out_files,
+    common_chat_session & out_session);
 
 // used by /embeddings endpoint, content has the same format as a chat message content array
 server_tokens tokenize_oai_content_array(
