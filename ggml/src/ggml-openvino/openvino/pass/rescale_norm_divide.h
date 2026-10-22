@@ -16,7 +16,7 @@ public:
     RescaleNormDivide();
 };
 
-// Sqrt(ReduceSum(x*x)) -> ReduceL2(x)
+// Sqrt(ReduceSum(x*x) [* k]) -> ReduceL2(x) [* sqrt(k)]
 class FuseSquareSum : public ov::pass::MatcherPass {
 public:
     OPENVINO_MATCHER_PASS_RTTI("ov::frontend::ggml::pass::FuseSquareSum")

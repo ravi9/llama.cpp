@@ -13,8 +13,10 @@
 #include <openvino/op/reduce_sum.hpp>
 #include <openvino/op/sqrt.hpp>
 #include <openvino/op/tile.hpp>
+#include <openvino/pass/pattern/op/or.hpp>
 #include <openvino/pass/pattern/op/wrap_type.hpp>
 
+#include <cmath>
 #include <vector>
 
 namespace ov {
@@ -152,23 +154,46 @@ RescaleNormDivide::RescaleNormDivide() {
 
 // separate pass: a MatcherPass keeps only one matcher, a 2nd register_matcher() replaces the 1st
 FuseSquareSum::FuseSquareSum() {
-    // Sqrt(ReduceSum(x*x)) -> ReduceL2(x), so RescaleReduceL2 can rescale standalone norms
+    // Sqrt(ReduceSum(x*x) [* k]) -> ReduceL2(x) [* sqrt(k)], so RescaleReduceL2 can rescale standalone norms
+    // k > 0 is a scalar const, e.g. 1/(n-1) in a std (Gemma 3n gaussian_topk)
     auto square = ov::pass::pattern::wrap_type<ov::op::v1::Multiply>();
     auto sum = ov::pass::pattern::wrap_type<ov::op::v1::ReduceSum>({square, ov::pass::pattern::any_input()});
-    auto sqrt = ov::pass::pattern::wrap_type<ov::op::v0::Sqrt>({sum});
-    const auto fuse_callback = [](ov::pass::pattern::Matcher & m) {
+    auto k = ov::pass::pattern::wrap_type<ov::op::v0::Constant>();
+    auto scaled = ov::pass::pattern::wrap_type<ov::op::v1::Multiply>({sum, k});
+    auto sum_or_scaled = std::make_shared<ov::pass::pattern::op::Or>(ov::OutputVector{sum, scaled});
+    auto sqrt = ov::pass::pattern::wrap_type<ov::op::v0::Sqrt>({sum_or_scaled});
+    const auto fuse_callback = [=](ov::pass::pattern::Matcher & m) {
+        const auto & pm = m.get_pattern_value_map();
         auto sqrt_node = m.get_match_root();
-        auto sum_node = ov::as_type_ptr<ov::op::v1::ReduceSum>(sqrt_node->get_input_node_shared_ptr(0));
-        auto square_node = sum_node->get_input_node_shared_ptr(0);
+        auto sum_node = ov::as_type_ptr<ov::op::v1::ReduceSum>(pm.at(sum).get_node_shared_ptr());
+        auto square_node = pm.at(square).get_node_shared_ptr();
         if (square_node->input_value(0) != square_node->input_value(1)) {
             return false;
         }
 
         auto l2 = std::make_shared<ov::op::v4::ReduceL2>(square_node->input_value(0), sum_node->input_value(1),
                                                          sum_node->get_keep_dims());
-        l2->set_friendly_name(sqrt_node->get_friendly_name());
-        ov::copy_runtime_info({sqrt_node, sum_node, square_node}, l2);
-        ov::replace_node(sqrt_node, l2);
+        std::shared_ptr<ov::Node> res = l2;
+        ov::NodeVector source_nodes{sqrt_node, sum_node, square_node};
+        ov::NodeVector new_nodes{l2};
+        if (pm.count(scaled)) {
+            auto k_node = ov::as_type_ptr<ov::op::v0::Constant>(pm.at(k).get_node_shared_ptr());
+            if (ov::shape_size(k_node->get_shape()) != 1) {
+                return false;
+            }
+            const float k_val = k_node->cast_vector<float>()[0];
+            if (!(k_val > 0.0f)) {
+                return false;
+            }
+            auto sqrt_k = ov::op::v0::Constant::create(k_node->get_element_type(), ov::Shape{}, {std::sqrt(k_val)});
+            res = std::make_shared<ov::op::v1::Multiply>(l2, sqrt_k);
+            source_nodes.push_back(pm.at(scaled).get_node_shared_ptr());
+            new_nodes.push_back(res);
+        }
+
+        res->set_friendly_name(sqrt_node->get_friendly_name());
+        ov::copy_runtime_info(source_nodes, new_nodes);
+        ov::replace_node(sqrt_node, res);
         return true;
     };
 
