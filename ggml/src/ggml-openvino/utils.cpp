@@ -40,19 +40,19 @@
 #include <vector>
 
 namespace {
-// For a KV cache input, return an ov::Tensor sized to n_kv (== attention_size
-// for that layer) instead of the fully-allocated ctx_per_seq. Pre-conditions:
+// For an attention K/V input or output, return an ov::Tensor sized to n_kv
+// (== attention_size for that layer) instead of the allocated ctx_per_seq. Pre-conditions:
 //   * non-static (CPU/GPU) backend, single sequence, seq_active_start == 0
 //   * ggml KV layout is a contiguous [1, 1, ctx_per_seq, n_heads_kv*head_size]
 //     so the first n_kv rows are the live prefix and shrinking the ctx axis
-//     gives a valid tensor over the same host storage
+//     gives a valid tensor over the same host/device-USM storage
 //   * not an SWA layer (ring cache): once the window has wrapped the first
 //     n_kv rows no longer contain the live prefix
 // On any unmet pre-condition returns std::nullopt; the caller falls back to
 // the full-size tensor.
 std::optional<ov::Tensor> try_make_kv_sliced_tensor(const std::shared_ptr<GgmlOvDecoder> & ggml_decoder,
-                                                    const std::string & name,
-                                                    const ggml_tensor * ggml_tensor) {
+                                                  const std::string & name,
+                                                  const ggml_tensor * ggml_tensor) {
     static const bool kv_slice_disabled = ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_KV_SLICE");
     if (kv_slice_disabled) {
         return std::nullopt;
@@ -60,7 +60,15 @@ std::optional<ov::Tensor> try_make_kv_sliced_tensor(const std::shared_ptr<GgmlOv
     if (ggml_decoder->is_static() || ggml_decoder->is_stateful()) {
         return std::nullopt;
     }
-    if (ggml_tensor->op != GGML_OP_NONE || ggml_tensor->view_src != nullptr) {
+    if (ggml_tensor->op != GGML_OP_NONE || ggml_tensor->view_src != nullptr || !ggml_is_contiguous(ggml_tensor)) {
+        return std::nullopt;
+    }
+    // USAGE_ANY alone is not proof of an attention cache. Only the ordinary
+    // llama.cpp K/V roots have this prefix layout; recurrent caches (including
+    // rollback snapshots) must always bind their complete stored row bank.
+    if (GgmlOvDecoder::is_recurrent_cache(ggml_tensor) ||
+        (strncmp(ggml_tensor->name, "cache_k_l", strlen("cache_k_l")) != 0 &&
+         strncmp(ggml_tensor->name, "cache_v_l", strlen("cache_v_l")) != 0)) {
         return std::nullopt;
     }
     const auto * op = ggml_decoder->get_tensor_used_op(ggml_tensor);
@@ -127,7 +135,8 @@ static uint64_t ggml_openvino_model_cache_extra_cfg(bool stateful, bool recurren
 #endif
     extra_cfg = extra_cfg * 131 + (stateful ? (recurrent ? 2u : 1u) : 0u);
     extra_cfg = extra_cfg * 131 + (ggml_openvino_reduce_compile_mem_enabled() ? 1u : 0u);
-    extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_KV_SLICE") ? 1u : 0u);
+    // KV slicing changes runtime tensor bindings, not the dynamic compiled graph.
+    // Both full-capacity and live-prefix bindings must share one cache entry.
     extra_cfg = extra_cfg * 131 + (manual_gqa_enabled ? 1u : 0u);
     extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_PROFILING") >= 2 ? 1u : 0u);
     extra_cfg = extra_cfg * 131 + (ggml_openvino_shape_from_mask_enabled() ? 1u : 0u);

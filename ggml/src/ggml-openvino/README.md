@@ -16,7 +16,7 @@ The [integration report](dev_doc/OPENVINO-RECURRENT-FUSION-PERF.md#direct-fronte
 records the required OpenVINO branches and tests. Rebuild both repos and regenerate
 compiled-model blobs after this translation change (revision 10).
 
-The current performance target is `~/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf`, using GPU with `GGML_OPENVINO_REQUANT_KQUANT=q4_asym64_all`, `GGML_OPENVINO_NATIVE_SOFTPLUS=1`, and `GGML_OPENVINO_DISABLE_KV_SLICE=1`. See the [performance report](dev_doc/OPENVINO-QWEN35-08B-PERF-RESULTS.md) for measurements; the earlier yamini-model results remain historical references.
+The current performance target is `~/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf`, using GPU with `GGML_OPENVINO_REQUANT_KQUANT=q4_asym64_all` and `GGML_OPENVINO_NATIVE_SOFTPLUS=1`. Leave `GGML_OPENVINO_DISABLE_KV_SLICE` unset to use live-prefix attention cache bindings where supported. The [large-context comparison](dev_doc/OPENVINO-RECURRENT-FUSION-PERF.md#large-context-attention-kv-slicing-2026-10-22) measures the benefit and documents the single-stream restriction. Earlier [performance measurements](dev_doc/OPENVINO-QWEN35-08B-PERF-RESULTS.md) used disabled slicing; yamini-model results remain historical references.
 
 `q4_asym64_all` converts Q4_K/Q5_K/Q6_K/Q8_0/Q5_1 weights, including dense Q8_0 projections, to asymmetric INT4 with group size 64. `token_embd.weight` and `output.weight` retain symmetric channel-wise INT8. Q8_0/Q5_1 rows whose width is not divisible by 64 also use channel-wise INT8. This follows the primary/backup precision scheme of NNCF `INT4_ASYM`, `ratio=1.0`, `group_size=64`, `backup_mode=INT8_SYM` for these supported source types; it requantizes GGUF values rather than the original floating-point model and leaves floating-point weights unchanged. Earlier versions kept dense Q8_0 at INT8/group-32. Repopulate compiled-model caches without cache-only mode after this change; the cache fingerprint invalidates the old precision policy.
 
@@ -31,7 +31,6 @@ One directory can hold blobs for different models and compilation settings. Run 
 ```sh
 GGML_OPENVINO_DEVICE=GPU \
 GGML_OPENVINO_NATIVE_SOFTPLUS=1 \
-GGML_OPENVINO_DISABLE_KV_SLICE=1 \
 GGML_OPENVINO_REQUANT_KQUANT=q4_asym64_all \
 GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR=/path/to/qwen-cache \
 ./build/ReleaseOV/bin/llama-bench -m /path/to/model.gguf -r 1
@@ -44,7 +43,6 @@ On later runs, supply the same compilation settings and enable `GGML_OPENVINO_CO
 ```sh
 GGML_OPENVINO_DEVICE=GPU \
 GGML_OPENVINO_NATIVE_SOFTPLUS=1 \
-GGML_OPENVINO_DISABLE_KV_SLICE=1 \
 GGML_OPENVINO_REQUANT_KQUANT=q4_asym64_all \
 GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR=/path/to/qwen-cache \
 GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY=1 \
@@ -53,7 +51,9 @@ GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY=1 \
 
 Cache-only mode allocates backend address space without filling weight pages. On Windows, this also uses system commit capacity. The model-buffer size in the loader log is this virtual size. Weight uploads only record source identity; they do not read or requantize the weights. Graph conversion and compilation are skipped. Runtime buffers are still allocated and populated normally.
 
-Cache-only mode uses the settings provided by the current process. Keep these values exactly the same, including set versus unset: `GGML_OPENVINO_REQUANT_KQUANT`, `GGML_OPENVINO_NATIVE_SOFTPLUS`, `GGML_OPENVINO_DISABLE_KV_SLICE`, `GGML_OPENVINO_MANUAL_GQA_ATTN`, `GGML_OPENVINO_STATEFUL_EXECUTION`, `GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT`, `GGML_OPENVINO_DISABLE_REMOTE_OUTPUTS`, `GGML_OPENVINO_REDUCE_COMPILE_MEM`, `GGML_OPENVINO_MEMORY_OPTIMIZE`, `GGML_OPENVINO_PROFILING`, `GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK`, and `GGML_OPENVINO_DEBUG_NODE`. On GPU, also repeat `GGML_OPENVINO_MOE_OP=0` if used. `GGML_OPENVINO_SPILL_DIR` is optional on the first run and ignored in cache-only mode; host-weight release is disabled in cache-only mode.
+Cache-only mode uses the settings provided by the current process. Keep these values exactly the same, including set versus unset: `GGML_OPENVINO_REQUANT_KQUANT`, `GGML_OPENVINO_NATIVE_SOFTPLUS`, `GGML_OPENVINO_MANUAL_GQA_ATTN`, `GGML_OPENVINO_STATEFUL_EXECUTION`, `GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT`, `GGML_OPENVINO_DISABLE_REMOTE_OUTPUTS`, `GGML_OPENVINO_REDUCE_COMPILE_MEM`, `GGML_OPENVINO_MEMORY_OPTIMIZE`, `GGML_OPENVINO_PROFILING`, `GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK`, and `GGML_OPENVINO_DEBUG_NODE`. On GPU, also repeat `GGML_OPENVINO_MOE_OP=0` if used. `GGML_OPENVINO_SPILL_DIR` is optional on the first run and ignored in cache-only mode; host-weight release is disabled in cache-only mode.
+
+`GGML_OPENVINO_DISABLE_KV_SLICE` is a runtime binding option and can differ between cache population and cache-only runs. The same dynamic compiled graph accepts full-capacity and live-prefix attention K/V tensors. Slicing is enabled by default for contiguous ordinary K/V roots with one allocated stream, one active sequence at offset zero, and no sliding-window attention. Recurrent convolution/GDN caches and their rollback snapshots always retain their full stored row bank. Other layouts use full bindings. Repopulate caches made before this option was removed from the fingerprint once without cache-only mode.
 
 A missing or incompatible graph fails with an error instead of compiling with absent weights. The fingerprint uses the dynamic graph's topology, ports, model parameters, weights, settings, and OpenVINO version; changing only dynamic token or KV sizes does not require a new entry. A different workload can still require another graph; populate it first without cache-only mode.
 

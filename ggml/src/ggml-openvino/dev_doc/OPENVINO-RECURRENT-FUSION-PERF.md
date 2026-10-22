@@ -815,3 +815,135 @@ clear, changing batches and rollback depths 0/2. The rotation IR contains 18
 `RecurrentConvCache` and 18 `RecurrentGatedDeltaNet` operations and no standalone
 native gather/update operations. Logs are in `tmp/ov-branch-split-20261022/` and
 `tmp/qwen-finalize-20261022/`.
+
+## Large-context attention KV slicing (2026-10-22)
+
+Leave `GGML_OPENVINO_DISABLE_KV_SLICE` **unset** for the next benchmarks. On the
+target UD model with a 65,536-token allocation and one active sequence, default
+attention K/V slicing improves mean decode from **23.048 to 33.480 tokens/s
+(+45.26%)**. All six measured greedy outputs match exactly. This comparison
+uses non-MTP; it does not establish an MTP gain or throughput at a 64K *filled*
+history.
+
+### Method and results
+
+Same Release `build/MtpOVPerf`, OpenVINO build, device and model as above. Server:
+`-np 1 -c 65536 -t 2`; batch and batch-thread settings retain their defaults.
+Both processes use GPU, `q4_asym64_all`, native softplus, the same standalone
+compiled-model cache, and cache-only loading. Stateful and recurrent in-place
+execution remain unset. Each process handles an eight-token warmup, then three
+sequential requests with the same saved 1,024-token passage, exactly 512 greedy
+generated tokens, ignored EOS and prompt caching disabled (`cache_n=0`).
+Requests reset and reuse the recurrent state. Startup/import and warmup are
+excluded. GPU workloads run serially. The transfer/runtime-graph probe is armed
+only after the three primary requests.
+
+| Attention cache binding | Decode tokens/s, three requests | Mean decode tokens/s | Prompt tokens/s, three requests | Mean prompt tokens/s |
+| --- | ---: | ---: | ---: | ---: |
+| Full capacity (`GGML_OPENVINO_DISABLE_KV_SLICE=1`) | 22.851 / 23.265 / 23.027 | 23.048 | 513.29 / 425.67 / 265.77 | 401.57 |
+| Live prefix (default, variable unset) | 33.565 / 33.422 / 33.452 | 33.480 | 945.60 / 936.54 / 935.69 | 939.28 |
+
+The full-capacity prompt samples vary substantially and memory usage grows
+during the run. The decode difference is stable across the three samples;
+the prompt means should not be treated as an isolated kernel speedup.
+
+The first cold run used `-c 262144`, allocated 5,120 MiB attention KV, exported
+the graph, and completed the eight-token warmup. The next request entered
+heavy memory pressure and stalled in `xe_vm_bind_ioctl`; it was terminated.
+Driver teardown eventually released the allocations without a reset. That
+run supplies the exported blob but **no valid 512-token benchmark sample**.
+Both reported modes instead use a 64K allocation and cache-only loading to
+avoid retaining the requantized host weights. The target's maximum-context
+full-cache performance remains unmeasured.
+
+### Bindings and likely source of the cost
+
+The helper changes the shape of an `ov::Tensor` over the original storage; it
+does not shrink the allocated GGML cache or copy its contents when binding.
+The probe confirms USM bindings in both modes, with each attention root using
+the same input/output address. At the first 508-token prefill chunk:
+
+| Bound cache roots | Full capacity | Live prefix |
+| --- | ---: | ---: |
+| 20 attention K/V inputs, and separately their 20 outputs | `[1,1,65536,512]`, total 1,280 MiB | `[1,1,512,512]`, total 10 MiB |
+| 30 recurrent convolution inputs/outputs | `[1,1,1,24576]`, total 2.8125 MiB | Identical |
+| 30 recurrent GDN inputs/outputs | `[1,1,1,524288]`, total 60 MiB | Identical |
+
+Attention prefix length increases with the live, padded attention length.
+It is not fixed to the initial 512 rows. Recurrent inputs/outputs preserve
+their complete row banks, including rollback storage when present. The
+slicing helper now explicitly admits only contiguous ordinary attention
+`cache_k_l*` / `cache_v_l*` roots and rejects recurrent roots independently of
+the broader cache-buffer classifier.
+
+Steady short-probe trunk decode observes **1,058 kernel submissions** with
+full capacity versus **1,038** with slicing; median raw inference over probe
+indices 8–17 is **38.930 versus 26.759 ms**. These diagnostic timings are
+separate from the table. There is no bulk cache memcpy API call in these
+steady decode traces: both have eight host-metadata uploads totaling 2,608
+bytes, twenty host-USM uploads totaling 320 bytes, and three host-output copies
+totaling 1,009,664 bytes. Shape changes during prefill and the first decode do
+trigger larger transfers and allocations, especially with full bindings.
+
+The extra 20 launches are consistent with a full-sized initialization/copy
+stage for each attention `ScatterUpdate`; the GPU reference implementation
+dispatches that stage over the whole bound cache unless it recognizes an
+in-place update. Copies performed by kernels are not included in memcpy API
+counts. Thus the measured gap is consistent with full-cache GPU work and
+temporary storage rather than a host upload on every token. The present probe
+does not time or attribute each kernel individually. Recurrent cache shapes
+and the compiled graph are unchanged by the toggle.
+
+### Compiled-model sharing and limits
+
+Removed `GGML_OPENVINO_DISABLE_KV_SLICE` from both the raw compilation-settings
+fingerprint in `model-cache.cpp` and the extra translation-settings hash in
+`utils.cpp`. It affects only runtime bindings: dynamic attention Parameters
+already accept either context dimension. The full-cache 262K export and both
+64K cache-only runs use the exact same file:
+`tmp/kv-slice-20261022/model-cache/77952f8eea1a9c89.blob`. Both measured logs
+contain `model cache HIT` for that blob and no new exports. Compilation cache
+entries made before this fingerprint change require one regeneration. MTP,
+different port sets, and different recurrent slot/snapshot layouts may still
+require additional entries independently of attention slicing.
+
+Slicing currently requires **one allocated attention stream**, one active
+sequence at offset zero, the supported contiguous root layout, and a
+non-SWA dynamic/stateless path. Ordinary partitioned `-np 4` has roots shaped
+`[1,4,ctx_per_seq,F]` and falls back to full bindings even with one request;
+removing the variable alone does not optimize that layout. Unified KV can
+have one physical stream, but these measurements do not validate its
+multi-sequence/offset cases. Extending prefix/window binding to partitioned
+streams, or teaching a new attention cache-update op to modify only written
+rows safely, remain separate opportunities. No OpenVINO op was changed in
+this comparison.
+
+### Reproduction
+
+After populating a compatible compiled cache, both modes use:
+
+```sh
+MODEL="$HOME/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+export GGML_OPENVINO_DEVICE=GPU
+export GGML_OPENVINO_NATIVE_SOFTPLUS=1
+export GGML_OPENVINO_REQUANT_KQUANT=q4_asym64_all
+export GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR="$(pwd)/tmp/kv-slice-20261022/model-cache"
+export GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY=1
+
+# Start each server separately, then send the same measured requests.
+GGML_OPENVINO_DISABLE_KV_SLICE=1 \
+  build/MtpOVPerf/bin/llama-server -m "$MODEL" -np 1 -c 65536 -t 2
+
+unset GGML_OPENVINO_DISABLE_KV_SLICE
+build/MtpOVPerf/bin/llama-server -m "$MODEL" -np 1 -c 65536 -t 2
+```
+
+The matched harness, effective commands, all response JSON, buffer tables,
+transfer traces, and summary are saved in `tmp/kv-slice-20261022/`. Reproduce
+the requests and comparison with the existing populated cache:
+
+```sh
+python3 tmp/kv-slice-20261022/bench.py on 65536
+python3 tmp/kv-slice-20261022/bench.py off-cached 65536
+python3 tmp/kv-slice-20261022/summary.py 65536
+```
