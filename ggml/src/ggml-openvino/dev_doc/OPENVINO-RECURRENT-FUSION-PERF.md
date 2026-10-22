@@ -974,3 +974,53 @@ python3 tmp/kv-slice-20261022/bench.py on 65536
 python3 tmp/kv-slice-20261022/bench.py off-cached 65536
 python3 tmp/kv-slice-20261022/summary.py 65536
 ```
+
+
+## MTP regression investigation after branch cleanup (2026-10-22, in progress)
+
+Matched control: target Qwen3.6 UD Q4_K_M, GPU, `q4_asym64_all`, native
+softplus, `-np 4 -c 8192 -t 2 -tb 2`, two MTP drafts, greedy sampling,
+1,024 saved prompt tokens and exactly 512 generated tokens. Three requests
+follow an eight-token warmup. Transfer tracing is disabled during timed requests
+and enabled only for a separate diagnostic request. KV slicing is disabled only
+for this historical control; subsequent large-context measurements enable it.
+
+| Runtime/path | Mean decode t/s | Verification graph reorders |
+|---|---:|---:|
+| Previous rotation | 46.345 | 250 |
+| Current rotation before precision experiment | 44.002 | 250 |
+| Previous in-place | 45.014 | 250 |
+| Current in-place before precision experiment | 40.720 | 310 |
+| In-place with protected cache Reshape precision | 39.021 | 250 |
+| Same precision experiment, cache-only retest | 38.504 | 250 |
+
+All measured requests accepted 340/340 drafts and produced identical text.
+Protecting only the fused operation's input did not protect its upstream FP32
+cache Reshape aliases from FP16 conversion. Protecting those aliases removes
+60 reorders and reduces verification submissions from 1,191 to 1,071, but does
+**not** establish a performance fix: the diagnostic now records roughly 790 MB
+of host-USM-to-device transfers per verification. Matching caller cache input
+and output addresses alone does not demonstrate direct internal execution.
+The subsequent allocation fix below resolves the large transfers. A llama input-binding fallback
+experiment did not remove these transfers or improve decode and was reverted.
+
+Artifacts and effective commands are in `tmp/mtp-regression-20261022/`.
+The default rotation repeat measured 43.820 t/s; the large-context batch/MMLU matrix is pending.
+MMLU uses the `cais/mmlu`, `all`, test split's first 100 question texts, with
+chat templating and 512 generated tokens per request; question lengths are
+measured rather than padded to exact targets. Native server timing JSON is
+saved separately from stream-arrival plots. The benchmark counts native token
+IDs and excludes empty begin/progress and stop events.
+
+
+The recovered in-place path measured **46.610 t/s** over three matched
+requests. The GPU cache Result binding previously accepted only device USM;
+accepting host USM under the same exact-layout and exclusive-alias checks
+removes the full-cache staging transfers on this iGPU. Combined with preserving
+cache Reshape precision, the warmed diagnostic records only 320 bytes of
+host-USM-to-device transfers per verification, rather than 790 MB. Verification
+kernel submissions are 1,131 (including the gather stage), and the sampled
+verification call takes 44.838 ms. This is a measured recovery of the in-place
+regression; default rotation remains approximately 5% below its historical
+46.345 t/s. Raw responses and traces are in the `copy-stack/inplace-mtp`
+subdirectory. Temporary upload-site logging was removed.
