@@ -1227,6 +1227,15 @@ static void test_backend_recurrent_slots(const test_params & params) {
         auto memory = llama_get_memory(ctx.ctx.get());
         run({3, 3, 3, 3});
         run({0, 0, 1, 0});
+        // Export/import after both cache banks have been used. Checkpoint reads
+        // and writes must resolve the current storage rather than logical data.
+        const size_t checkpoint_size = llama_state_seq_get_size(ctx.ctx.get(), 2);
+        GGML_ASSERT(checkpoint_size > 0);
+        std::vector<uint8_t> checkpoint(checkpoint_size);
+        GGML_ASSERT(llama_state_seq_get_data(ctx.ctx.get(), checkpoint.data(), checkpoint.size(), 2) == checkpoint_size);
+        GGML_ASSERT(llama_memory_seq_rm(memory, 2, 0, -1));
+        GGML_ASSERT(llama_state_seq_set_data(ctx.ctx.get(), checkpoint.data(), checkpoint.size(), 2) == checkpoint_size);
+        run({0, 0, 1, 0});
         GGML_ASSERT(llama_memory_seq_rm(memory, 1, 0, -1));
         history[1].clear();
         run({0, 2, 0, 0});
@@ -1243,6 +1252,10 @@ static void test_backend_recurrent_slots(const test_params & params) {
         llama_memory_seq_cp(memory, 2, 1, 0, -1);
         history[1] = history[2];
         run({0, 2, 1, 0});
+        run({1, 1, 1, 1});
+        llama_memory_clear(memory, true);
+        for (auto & tokens : history)
+            tokens.clear();
         run({1, 1, 1, 1});
     }
     printf("backend recurrent slot reset/copy/rollback test PASSED\n");

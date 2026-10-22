@@ -1419,11 +1419,10 @@ void GgmlOvDecoder::add_extra_inputs() {
             create_1d_input("rs_snapshot_stride_" + node_name, writeback.snapshot_stride);
         }
     }
-#ifdef GGML_OPENVINO_HAS_RECURRENT_CACHE
+#ifdef GGML_OPENVINO_HAS_FUSED_RECURRENCE
     m_compute_params.recurrent_controls.clear();
     if (!m_is_static && !m_is_stateful && !m_model_is_splitted && ggml_openvino_is_gpu() &&
-        !ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_RECURRENT_CACHE")) {
-#ifdef GGML_OPENVINO_HAS_STATE_UPDATE
+        !ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_FUSED_RECURRENCE")) {
         for (int i = 0; i < m_cgraph->n_nodes; ++i) {
             const auto node = m_cgraph->nodes[i];
             const auto op_case = m_node_info_list[i].node_op_case;
@@ -1432,7 +1431,6 @@ void GgmlOvDecoder::add_extra_inputs() {
                     {ov::element::i64, ov::Shape{1, 1, 1, 4}, 0, true, {}, -1};
             }
         }
-#endif
         for (const auto & [name, write] : m_compute_params.rs_writebacks) {
             if (write.src_begin >= 0) {
                 auto & values = m_compute_params.recurrent_controls["rs_offsets_" + name];

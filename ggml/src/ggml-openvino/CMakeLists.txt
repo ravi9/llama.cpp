@@ -32,29 +32,35 @@ if (GGML_OPENVINO)
     endif()
 endif()
 
-# Keep released runtimes working through the existing primitive translations.
+# Released runtimes retain the ordinary cache translators.
 include(CheckCXXSourceCompiles)
-unset(GGML_OPENVINO_HAS_RECURRENT_CACHE CACHE)
+unset(GGML_OPENVINO_HAS_FUSED_RECURRENCE CACHE)
 set(CMAKE_REQUIRED_LIBRARIES openvino::runtime)
 set(CMAKE_REQUIRED_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/openvino/op")
 check_cxx_source_compiles("#include <recurrent_cache.hpp>
-int main() { auto gather = std::make_shared<ov::op::internal::RecurrentStateGather>(ov::OutputVector{});
-    auto conv = std::make_shared<ov::op::internal::RecurrentConvCache>(ov::OutputVector{}, 3); }"
-    GGML_OPENVINO_HAS_RECURRENT_CACHE)
+int main() {
+    auto conv = std::make_shared<ov::op::internal::RecurrentConvCache>(ov::OutputVector{}, 3);
+    auto gdn = std::make_shared<ov::op::internal::RecurrentGatedDeltaNet>(ov::OutputVector{});
+}"
+    GGML_OPENVINO_HAS_FUSED_RECURRENCE)
 unset(CMAKE_REQUIRED_LIBRARIES)
 unset(CMAKE_REQUIRED_INCLUDES)
-if(GGML_OPENVINO_HAS_RECURRENT_CACHE)
-    target_compile_definitions(ggml-openvino PRIVATE GGML_OPENVINO_HAS_RECURRENT_CACHE=1)
+if(GGML_OPENVINO_HAS_FUSED_RECURRENCE)
+    target_compile_definitions(ggml-openvino PRIVATE GGML_OPENVINO_HAS_FUSED_RECURRENCE=1)
 endif()
 
-unset(GGML_OPENVINO_HAS_STATE_UPDATE CACHE)
+# Separate Update ops permit staged in-place cache mutation on compatible runtimes.
+unset(GGML_OPENVINO_HAS_CACHE_UPDATE CACHE)
 set(CMAKE_REQUIRED_LIBRARIES openvino::runtime)
 set(CMAKE_REQUIRED_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/openvino/op")
-check_cxx_source_compiles("#include <recurrent_cache.hpp>
-int main() { auto update = std::make_shared<ov::op::internal::RecurrentStateUpdate>(ov::OutputVector{}); }"
-    GGML_OPENVINO_HAS_STATE_UPDATE)
+check_cxx_source_compiles("#include <recurrent_cache_update.hpp>
+int main() {
+    auto conv = std::make_shared<ov::op::internal::RecurrentConvCacheUpdate>(ov::OutputVector{}, 3);
+    auto gdn = std::make_shared<ov::op::internal::RecurrentGatedDeltaNetUpdate>(ov::OutputVector{});
+}"
+    GGML_OPENVINO_HAS_CACHE_UPDATE)
 unset(CMAKE_REQUIRED_LIBRARIES)
 unset(CMAKE_REQUIRED_INCLUDES)
-if(GGML_OPENVINO_HAS_STATE_UPDATE)
-    target_compile_definitions(ggml-openvino PRIVATE GGML_OPENVINO_HAS_STATE_UPDATE=1)
+if(GGML_OPENVINO_HAS_CACHE_UPDATE)
+    target_compile_definitions(ggml-openvino PRIVATE GGML_OPENVINO_HAS_CACHE_UPDATE=1)
 endif()

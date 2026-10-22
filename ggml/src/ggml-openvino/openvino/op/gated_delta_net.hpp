@@ -76,6 +76,14 @@ public:
         m_snapshot_count = snapshot_count;
     }
 
+protected:
+    // Initialize the inherited attributes before validating the cache-aware variant.
+    void initialize_attributes(bool norm, float qe, float ke, int64_t count) {
+        m_fuse_qk_l2norm = norm;
+        m_q_l2_norm_eps = qe;
+        m_k_l2_norm_eps = ke;
+        m_snapshot_count = count;
+    }
 private:
     bool m_fuse_qk_l2norm = false;
     float m_q_l2_norm_eps = 1e-6F;

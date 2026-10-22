@@ -1,12 +1,6 @@
 #include "../node_context.h"
 #include "../op_table.h"
 #include "../utils.h"
-#ifdef GGML_OPENVINO_HAS_STATE_UPDATE
-#    include "recurrent_cache.hpp"
-
-#    include <openvino/op/transpose.hpp>
-#endif
-
 #include <climits>
 #include <cstdint>
 #include <cstdio>
@@ -41,52 +35,6 @@ OutputVector translate_cpy(const NodeContext & context) {
     auto input_shape = context.get_input_shape(0);
     auto output_shape = context.get_input_shape(1);
 
-#ifdef GGML_OPENVINO_HAS_STATE_UPDATE
-    if ((op_case == 10 || op_case == 12) && context.has_input("rs_update_" + context.get_name())) {
-        auto feature = ov::op::v0::Constant::create(ov::element::i64, {4},
-                                                    std::vector<int64_t>{1, 1, -1, output_shape[3].get_length()});
-        auto source = context.get_input(0);
-        int64_t key_size = 0, value_size = 0;
-        // Direct non-snapshot state is the native GDN state followed by its GGML-layout transpose.
-        const auto transpose = ov::as_type_ptr<ov::op::v1::Transpose>(source.get_node_shared_ptr());
-        if (op_case == 10 && transpose) {
-            const auto order = ov::as_type_ptr<ov::op::v0::Constant>(transpose->get_input_node_shared_ptr(1));
-            const auto shape = transpose->get_input_partial_shape(0);
-            if (order && order->cast_vector<int64_t>() == std::vector<int64_t>{0, 1, 3, 2} && shape.rank() == 4 &&
-                shape[2].is_static() && shape[3].is_static()) {
-                source = transpose->input_value(0);
-                key_size = shape[2].get_length();
-                value_size = shape[3].get_length();
-            }
-        }
-        if (op_case == 12) {
-            const auto flat = ov::as_type_ptr<ov::op::v1::Reshape>(source.get_node_shared_ptr());
-            const auto selected =
-                flat ? ov::as_type_ptr<ov::op::v8::Gather>(flat->get_input_node_shared_ptr(0)) : nullptr;
-            const auto permute =
-                selected ? ov::as_type_ptr<ov::op::v1::Transpose>(selected->get_input_node_shared_ptr(0)) : nullptr;
-            if (permute) {
-                const auto order = ov::as_type_ptr<ov::op::v0::Constant>(permute->get_input_node_shared_ptr(1));
-                const auto axis = ov::as_type_ptr<ov::op::v0::Constant>(selected->get_input_node_shared_ptr(2));
-                const auto shape = permute->get_input_partial_shape(0);
-                if (order && axis && axis->cast_vector<int64_t>() == std::vector<int64_t>{0} &&
-                    selected->get_batch_dims() == 0 &&
-                    order->cast_vector<int64_t>() == std::vector<int64_t>{0, 1, 2, 4, 3} && shape.rank() == 5 &&
-                    shape[3].is_static() && shape[4].is_static()) {
-                    source = std::make_shared<ov::op::v8::Gather>(permute->input_value(0), selected->input_value(1),
-                                                                  selected->input_value(2));
-                    key_size = shape[3].get_length();
-                    value_size = shape[4].get_length();
-                }
-            }
-        }
-        auto states = std::make_shared<ov::op::v1::Reshape>(source, feature, false);
-        auto update = std::make_shared<ov::op::internal::RecurrentStateUpdate>(
-            ov::OutputVector{context.get_input(1), states, context.get_input("rs_update_" + context.get_name())},
-            key_size, value_size);
-        return rename_outputs_with_suffix({update}, context.get_name());
-    }
-#endif
     if (op_case == 11 || op_case == 12) {
         auto base = context.get_input(1);
         auto axis = ov::op::v0::Constant::create(ov::element::i64, {1}, {2});

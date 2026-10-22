@@ -6,6 +6,16 @@ Use `--spec-type draft-mtp --spec-draft-n-max 2` with a GGUF that contains MTP w
 
 Stateless recurrent execution uses the same reset, reorder, and partial cache-writeback paths at every slot capacity, including one slot without MTP. `test-backend-sampler --test recurrent_slots` compares four-slot reset, copy, inactive-slot preservation, and rollback against independently replayed sequences.
 
+The matched stateless GPU path emits two fused operations per recurrent layer:
+`RecurrentConvCache` and `RecurrentGatedDeltaNet`. Each computes its result and
+returns the full updated cache. Device-USM cache banks rotate by default;
+`GGML_OPENVINO_RECURRENT_CACHE_INPLACE=1` selects the separate staged Update ops
+on a compatible runtime. `GGML_OPENVINO_DISABLE_FUSED_RECURRENCE=1` selects the
+ordinary GGML decomposition. The older three-op native path is removed.
+The [integration report](dev_doc/OPENVINO-RECURRENT-FUSION-PERF.md#direct-frontend-integration-and-branch-split-2026-10-22)
+records the required OpenVINO branches and tests. Rebuild both repos and regenerate
+compiled-model blobs after this translation change (revision 10).
+
 The current performance target is `~/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf`, using GPU with `GGML_OPENVINO_REQUANT_KQUANT=q4_asym64_all`, `GGML_OPENVINO_NATIVE_SOFTPLUS=1`, and `GGML_OPENVINO_DISABLE_KV_SLICE=1`. See the [performance report](dev_doc/OPENVINO-QWEN35-08B-PERF-RESULTS.md) for measurements; the earlier yamini-model results remain historical references.
 
 `q4_asym64_all` converts Q4_K/Q5_K/Q6_K/Q8_0/Q5_1 weights, including dense Q8_0 projections, to asymmetric INT4 with group size 64. `token_embd.weight` and `output.weight` retain symmetric channel-wise INT8. Q8_0/Q5_1 rows whose width is not divisible by 64 also use channel-wise INT8. This follows the primary/backup precision scheme of NNCF `INT4_ASYM`, `ratio=1.0`, `group_size=64`, `backup_mode=INT8_SYM` for these supported source types; it requantizes GGUF values rather than the original floating-point model and leaves floating-point weights unchanged. Earlier versions kept dense Q8_0 at INT8/group-32. Repopulate compiled-model caches without cache-only mode after this change; the cache fingerprint invalidates the old precision policy.

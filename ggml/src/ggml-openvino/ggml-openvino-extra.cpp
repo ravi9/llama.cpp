@@ -129,7 +129,9 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_ENABLE_CACHE",
         "GGML_OPENVINO_DISABLE_CACHE",
         "GGML_OPENVINO_DISABLE_KV_SLICE",
-        "GGML_OPENVINO_DISABLE_RECURRENT_CACHE",
+        "GGML_OPENVINO_DISABLE_FUSED_RECURRENCE",
+        "GGML_OPENVINO_DISABLE_CACHE_ROTATION",
+        "GGML_OPENVINO_RECURRENT_CACHE_INPLACE",
         "GGML_OPENVINO_ENABLE_FALLBACK",
         "GGML_OPENVINO_MANUAL_GQA_ATTN",
         "GGML_OPENVINO_DISABLE_ELTWISE_RANK_ALIGN",
@@ -673,7 +675,8 @@ ggml_openvino_tensor_extra * ggml_openvino_create_tensor_extra(const ggml_tensor
     if (is_remote) {
         GGML_ASSERT(ggml_openvino_is_gpu());
         auto gpu_context = remote_context->as<ov::intel_gpu::ocl::ClContext>();
-        auto usm_tensor = gpu_context.create_tensor(element_type, shape, tensor->data);
+        auto usm_tensor = gpu_context.create_tensor(element_type, shape,
+                                                    ggml_openvino_buffer_resolve_data(tensor, 0, ggml_nbytes(tensor)));
         ov_tensor = std::make_shared<ov::intel_gpu::ocl::USMTensor>(std::move(usm_tensor));
     } else {
         ov_tensor = std::make_shared<ov::Tensor>(element_type, shape, tensor->data);

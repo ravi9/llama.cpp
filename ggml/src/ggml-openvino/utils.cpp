@@ -114,14 +114,14 @@ static uint64_t ggml_openvino_model_cache_extra_cfg(bool stateful, bool recurren
                                         ggml_openvino_getenv_int("GGML_OPENVINO_MANUAL_GQA_ATTN") > 0 :
                                         ggml_openvino_is_gpu();
 
-    uint64_t extra_cfg = 6;  // Packed native recurrent controls and state layout.
-#ifdef GGML_OPENVINO_HAS_RECURRENT_CACHE
-    extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_RECURRENT_CACHE") ? 0u : 1u);
+    uint64_t extra_cfg = 10;  // Direct fused recurrent computation and full-cache writeback.
+#ifdef GGML_OPENVINO_HAS_FUSED_RECURRENCE
+    extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_FUSED_RECURRENCE") ? 0u : 1u);
 #else
     extra_cfg = extra_cfg * 131;
 #endif
-#ifdef GGML_OPENVINO_HAS_STATE_UPDATE
-    extra_cfg = extra_cfg * 131 + 1u;
+#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
+    extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_RECURRENT_CACHE_INPLACE") ? 1u : 0u);
 #else
     extra_cfg = extra_cfg * 131;
 #endif
@@ -405,18 +405,25 @@ ov::Tensor create_ov_output_tensor(const std::shared_ptr<GgmlOvDecoder> & ggml_d
         }
     }
 
-    // The sliced path above covers eligible KV outputs. This also covers recurrent state and full-size KV fallbacks.
+    // Resolve rotated roots/views before consulting an extra built for another bank.
     if (!ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_REMOTE_OUTPUTS") && !ggml_decoder->is_static() &&
-        !ggml_decoder->is_splited_model() && ggml_openvino_buffer_is_remote(ggml_tensor) &&
-        ggml_tensor->extra != nullptr) {
-        auto * extra_base = static_cast<ggml_openvino_extra_base *>(ggml_tensor->extra);
-        if (extra_base->type == ggml_openvino_extra_base::Type::TENSOR) {
-            auto * tensor_extra = static_cast<ggml_openvino_tensor_extra *>(extra_base);
-            if (tensor_extra->tensor != nullptr && tensor_extra->tensor->get_element_type() == output_type &&
-                tensor_extra->tensor->get_shape() == output_shape) {
-                return *tensor_extra->tensor;
+        !ggml_decoder->is_splited_model() && ggml_openvino_buffer_is_remote(ggml_tensor)) {
+        auto resolved = ggml_openvino_buffer_resolve_address(ggml_tensor, output_data,
+                                                             ov::shape_size(output_shape) * output_type.size());
+        if (ggml_tensor->extra != nullptr) {
+            auto * base = static_cast<ggml_openvino_extra_base *>(ggml_tensor->extra);
+            if (base->type == ggml_openvino_extra_base::Type::TENSOR) {
+                auto & cached = static_cast<ggml_openvino_tensor_extra *>(base)->tensor;
+                if (cached && cached->get_element_type() == output_type && cached->get_shape() == output_shape) {
+                    auto remote = cached->as<ov::intel_gpu::ocl::USMTensor>();
+                    if (remote.get() == resolved) {
+                        return *cached;
+                    }
+                }
             }
         }
+        auto context = ggml_openvino_get_remote_context()->as<ov::intel_gpu::ocl::ClContext>();
+        return context.create_tensor(output_type, output_shape, resolved);
     }
 
     ov::Tensor output_tensor(output_type, output_shape, output_data);
@@ -500,6 +507,24 @@ ov::Tensor convert_ggml_input_to_ov(const std::shared_ptr<GgmlOvDecoder> & ggml_
         if (extra_base->type == ggml_openvino_extra_base::Type::TENSOR) {
             // GGML_LOG_DEBUG("Using ggml_tensor->extra as ov::Tensor for input: %s\n", name.c_str());
             auto * tensor_extra = static_cast<ggml_openvino_tensor_extra *>(extra_base);
+            if (ggml_openvino_buffer_is_remote(ggml_tensor)) {
+                auto tensor = tensor_extra->tensor->as<ov::intel_gpu::ocl::USMTensor>();
+                // Extras may retain a prior bank after a checkpoint write.
+                const auto shape = tensor.get_shape();
+                const auto type = tensor.get_element_type();
+                // Noncontiguous views can share a base extra. Preserve that
+                // binding's original base/window while selecting its current bank.
+                const auto * bound_tensor = ggml_tensor;
+                while (bound_tensor->view_src && bound_tensor->extra == bound_tensor->view_src->extra) {
+                    bound_tensor = bound_tensor->view_src;
+                }
+                auto resolved = ggml_openvino_buffer_resolve_data(bound_tensor, 0, tensor.get_byte_size());
+                if (tensor.get() == resolved) {
+                    return *tensor_extra->tensor;
+                }
+                auto context = ggml_openvino_get_remote_context()->as<ov::intel_gpu::ocl::ClContext>();
+                return context.create_tensor(type, shape, resolved);
+            }
             return *tensor_extra->tensor;
         }
     }
@@ -1363,6 +1388,11 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::share
             }
         }
 
+        bool recurrent_cache_inplace = false;
+#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
+        recurrent_cache_inplace = ggml_openvino_getenv_int("GGML_OPENVINO_RECURRENT_CACHE_INPLACE") != 0;
+#endif
+        std::vector<ggml_tensor *> rotated_outputs;
         for (size_t i = 0; i < ov_output_names.size(); i++) {
             // Debug-only outputs added via GGML_OPENVINO_DEBUG_NODE (see
             // translate_session.cpp) have no corresponding ggml tensor; leave
@@ -1378,12 +1408,28 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::share
             if (ggml_nbytes(ggml_tensor) == 0) {
                 continue;
             }
-            auto output_tensor = create_ov_output_tensor(ggml_decoder, infer_request, i, ggml_tensor);
+            std::optional<ov::Tensor> rotated;
+            if (cache_enabled && !is_static && !r_ctx->stateful && !ggml_decoder->is_splited_model() &&
+                !ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_REMOTE_OUTPUTS") &&
+                !ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_CACHE_ROTATION") &&
+                (!recurrent_cache_inplace || ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_FUSED_RECURRENCE")) &&
+                ggml_decoder->get_model_inputs().count(ov_output_names[i]) &&
+                ggml_decoder->get_input_ggml_tensor(ov_output_names[i]) == ggml_tensor) {
+                rotated = ggml_openvino_buffer_prepare_cache_output(ggml_tensor);
+            }
+            auto output_tensor =
+                rotated ? *rotated : create_ov_output_tensor(ggml_decoder, infer_request, i, ggml_tensor);
+            if (rotated) {
+                rotated_outputs.push_back(ggml_tensor);
+            }
             infer_request->set_output_tensor(i, output_tensor);
         }
 
         ov_raw_infer_start = ggml_time_us();
         infer_request->infer();
+        for (auto * tensor : rotated_outputs) {
+            ggml_openvino_buffer_commit_cache_output(tensor);
+        }
         infer_end_time = ggml_time_us();
         if (stateful_recurrent) {
             const auto * inp_pos = get_inp_pos_tensor(cgraph);

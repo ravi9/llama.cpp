@@ -189,7 +189,7 @@ The previous Vulkan greeting reference remains 49.83 tokens/s with 42.56 ms veri
 
 ## Further shape/control/state-update optimization (2026-10-16)
 
-The subsequent [small-model investigation and plan](OPENVINO-QWEN35-08B-PERF-PLAN.md) identified runtime shape-inference synchronization around the native kernels. The [implementation results](OPENVINO-QWEN35-08B-PERF-RESULTS.md) document active-row shapes, reusable USM host controls, native `RecurrentStateUpdate`, folded matrix layouts, current cache revision 6, and updated target-model measurements. The earlier revision and throughput tables above remain historical baselines.
+The subsequent [small-model investigation and plan](OPENVINO-QWEN35-08B-PERF-PLAN.md) identified runtime shape-inference synchronization around the native kernels. The [implementation results](OPENVINO-QWEN35-08B-PERF-RESULTS.md) document active-row shapes, reusable USM host controls, native `RecurrentStateUpdate`, folded matrix layouts, historical cache revision 6, and updated target-model measurements. The earlier revision and throughput tables above remain historical baselines.
 
 The current target is now `~/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf` with the same OpenVINO configuration. Updated tests and performance are in the [performance report](OPENVINO-QWEN35-08B-PERF-RESULTS.md); all yamini results above remain historical.
 
@@ -219,3 +219,154 @@ GDN has two outputs. Output 0 is attention. Output 1 is `[B,H_v,D_k,D_v]` for `s
 All runtime indices, reset ranges, windows, and destination rows must be in bounds. The OpenCL kernels use distinct source/output allocations; the GPU runtime may stage a caller's shared remote input/output tensor to preserve immutable reads. This supports multi-slot reset/reorder and speculative rollback without single-slot assumptions.
 
 The OpenVINO operation specifications are in `docs/articles_en/documentation/openvino-ir-format/operation-sets/operation-specs/internal/`: `recurrent-state-gather.rst`, `recurrent-conv-cache.rst`, `recurrent-state-update.rst`, and `gated-delta-net.rst`. The corresponding C++ developer headers also document every port, attribute, and precedence rule.
+
+## Fused computation and cache writeback (2026-10-21)
+
+The dynamic stateless GPU path now optionally emits **two recurrent operations per
+Qwen3.5/Qwen3.6 layer**, covering both ordinary multi-slot serving and MTP:
+
+- `RecurrentConvCache` with optional input 8 (depthwise weights) performs reset,
+  active-history reads, convolution, reorder and ordered history writeback. Output 0
+  is `[1,B,T,C]`; output 1 is the complete updated `cache_r`.
+- `RecurrentGatedDeltaNet` performs active-state reads from the logically reset
+  original cache, GDN computation, reorder and ordered snapshot writeback. Output 0
+  is attention `[B,T,H,V]`; output 1 is the complete updated `cache_s`.
+
+The fused GDN has inputs Q, K, V, original cache, gate, beta, active rows, extra rows,
+reset begin, reset length, extra offsets, and write control, in that order. Row maps
+and controls retain the contracts above. It inherits GDN's normalization attributes
+and `snapshot_count`; only the newest `min(snapshot_count,T)` states are written.
+Later source planes win overlaps. No active-state, prepared-cache or standalone
+snapshot intermediate is allocated. All reads use immutable original cache storage,
+so cyclic maps, duplicate rows, inactive slots and rollback remain supported.
+
+The GPU precision pass preserves cache I/O precision. The kernels perform the
+original computation-precision rounding internally, including preserved cache rows,
+so a global FP16 execution policy does not require whole-cache F32→F16→F32
+conversions. Convolution uses FP32 accumulation, with small differences possible
+from the standard convolution kernel's accumulation order. The existing six-input
+GDN contract and eight-input convolution-cache contract remain available.
+
+The frontend matches exclusive state consumers and the exact depthwise convolution
+layout. For snapshots it matches only the valid newest-first prefix. Unmatched
+graphs keep the generic path. `GGML_OPENVINO_DISABLE_FUSED_RECURRENCE=1` disables
+the computation fusion; `GGML_OPENVINO_DISABLE_CACHE_PREPARE_FUSION=1` also disables
+the preceding prepared-cache elimination in that historical implementation. Capability checks preserve the old path
+with runtimes lacking these extensions. Translation cache revision is 8; regenerate
+compiled blobs once rather than loading old cache-only artifacts.
+
+Caller caches already use device USM allocations. The fused cache output ports now
+also request device USM for internal GPU staging, while retaining lockable memory
+when a CPU consumer needs it. Previously the dynamic iGPU output policy selected
+host USM, introducing a full host-USM→device cache copy. A full device→device
+writeback copy can still occur; binding the same allocation as input and output
+requires immutable source reads. Fewer IR `Result` kernels does not establish
+zero-copy execution. The detailed measurements
+and remaining opportunities are in [the fusion performance report](OPENVINO-RECURRENT-FUSION-PERF.md).
+
+## Device cache output ownership
+
+The Qwen3.5/Qwen3.6 stateless GPU backend uses two device-USM allocations for
+each eligible full recurrent cache root. GGML tensor addresses remain logical
+and stable. Tensor I/O and cache views resolve the current allocation; the next
+inference binds that allocation as input and the spare allocation as output.
+Only successful inference swaps current and spare. Checkpoint export/import,
+sequence copies and full-buffer clears use the same buffer-owned mapping.
+
+The GPU plugin binds fused cache output port 1 directly only when the output is
+a compatible dynamic device-USM Result with no overlap with kernel or graph inputs.
+Aliased callers retain private staging and final copying, preserving immutable
+reads for cyclic maps and duplicate sources. Returning from direct binding to
+aliasing detaches borrowed output storage before allocation reuse. Static,
+stateful, split, noncontiguous and partial-root cases retain their existing path.
+`GGML_OPENVINO_DISABLE_CACHE_ROTATION=1` disables backend rotation for comparison.
+The extra spare capacity equals the full eligible recurrent cache size.
+
+This removes a final output copy; it does not remove the full-cache kernel
+read/write needed to materialize reset, reorder and retained rows, nor change
+computation-precision rounding. See
+[the performance report](OPENVINO-RECURRENT-FUSION-PERF.md) for measurements.
+
+
+## Separate in-place Update operations (2026-10-22)
+
+The experimental `GGML_OPENVINO_RECURRENT_CACHE_INPLACE=1` path adds independent
+`RecurrentConvCacheUpdate` and `RecurrentGatedDeltaNetUpdate` operations for
+Qwen3.5/Qwen3.6 in llama.cpp. This round adds no changes to existing OpenVINO
+operation contracts or computation kernels. Shared plugin changes register the
+new operations, preserve their cache precision, and allow their safe output
+binding. Earlier local changes to existing ops remain separate prior work.
+
+Each recurrent layer still emits two operations and two full-cache Results.
+Eligible caches bind **one device-USM allocation as both Parameter and Result**;
+there is no spare bank or final full-cache copy. The plugin accepts this binding
+only for a compatible dynamic cache layout with an exclusive reader and no
+other overlapping inputs. Static/stateful/split cases retain their existing
+paths. If the new op capability is unavailable, the opt-in has no effect on
+normal cache rotation.
+
+Each new GPU operation uses two kernel launches when aliased:
+
+1. Gather active source rows and nonidentity reorder sources into private
+   **device** scratch, applying logical source reset and compute-precision
+   rounding. The stage completes before any cache writes. Identity suffix rows
+   require no scratch write. Scratch capacity still uses the active-map plus
+   full extra-map lengths; total memory is not guaranteed to shrink merely by
+   removing the spare bank. Arbitrary cycles and duplicate rows remain safe.
+2. Compute convolution/GDN and write the cache in its original allocation.
+   Destination elements have one owner, with the original reset → reorder →
+   ordered writeback precedence. GDN retained-row workers skip destinations
+   written by recurrence/snapshot owners. Already rounded retained values need
+   no write, but retained rows are still read to preserve existing rounding.
+
+Distinct allocations use one immutable-source compute/writeback kernel. Shared
+cache readers and incompatible/overlapping output bindings use private output
+storage and any required final copy. The alias optimization is therefore an
+allocation choice; it does not require single-slot/no-rollback assumptions.
+Checkpoint operations continue to access the buffer-owned current allocation.
+A failed GPU inference can leave an aliased cache partly updated; callers must
+clear or restore it before retrying.
+
+The computation retains the established fused FP32 accumulation, FP16/F32
+conversion, GDN K128/vector-four path, and sequential token recurrence. These
+new operations do not yet substitute the optimized paged GDN/causal-convolution
+implementations. Command replay is conservatively disabled for these ops;
+the normal dynamic graph already cannot use full command replay.
+
+Capability detection and cache revision **9** distinguish the new translation.
+Regenerate old compiled-model blobs. The full contracts, buffer conditions,
+shape rules, and snapshot precedence are documented in OpenVINO's new
+`recurrent-conv-cache-update.rst` and `recurrent-gated-delta-net-update.rst`.
+
+For the target UD model with `q4_asym64_all`, `llama-server -np 4 -c 8192`,
+1,024 prompt tokens and 512 generated tokens, three-request means are:
+
+| Path | Non-MTP decode tokens/s | Two-token MTP decode tokens/s |
+| --- | ---: | ---: |
+| Default rotation | 27.875 | 46.345 |
+| In-place Update | 29.001 | 45.014 |
+
+Both modes eliminate all full-cache device copies on the eligible alias path,
+and output/acceptance match the rotation controls. Ten new native/core/visitor
+tests, twelve existing regressions, and fifty four-slot replay comparisons pass.
+The MTP slowdown keeps this path experimental and opt-in. See
+[the performance report](OPENVINO-RECURRENT-FUSION-PERF.md) for prompt timings,
+transfer evidence, measurement limits, and remaining work.
+
+## Current frontend path (2026-10-22 cleanup)
+
+llama.cpp now emits nine-input `RecurrentConvCache` and twelve-input
+`RecurrentGatedDeltaNet` directly, or their separate Update counterparts when
+in-place execution is requested. The standalone native gather/update path and
+its declaration mirrors, capability checks and prepared-cache pass are removed.
+The historical contracts above explain the earlier experiments.
+
+Complete reset/reorder/compute/writeback groups must match before any cache
+mutation is replaced. Shared state readers and unsupported groups retain ordinary
+GGML translations. Only the full updated caches become Results; intermediate
+state and snapshot outputs are eliminated. Rotation still publishes a spare USM
+bank only after successful inference; the opt-in Update path stages original rows
+before writing the caller's allocation. Translation revision is **10**.
+
+The [fusion report](OPENVINO-RECURRENT-FUSION-PERF.md#direct-frontend-integration-and-branch-split-2026-10-22)
+records the stacked OpenVINO branches and validation.

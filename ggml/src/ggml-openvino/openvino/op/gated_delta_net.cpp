@@ -3,8 +3,11 @@
 #include "../node_context.h"
 #include "../op_table.h"
 #include "../utils.h"
-#ifdef GGML_OPENVINO_HAS_STATE_UPDATE
-#    include "recurrent_cache.hpp"
+#ifdef GGML_OPENVINO_HAS_FUSED_RECURRENCE
+#include "recurrent_cache.hpp"
+#endif
+#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
+#include "recurrent_cache_update.hpp"
 #endif
 #include "ggml-openvino/ggml-openvino-extra.h"
 
@@ -99,7 +102,7 @@ static bool match_gdn_l2_norm(const Output<Node> & normalized, Output<Node> & in
     return true;
 }
 
-OutputVector translate_gated_delta_net(const NodeContext & context) {
+static OutputVector translate_gdn(const NodeContext & context, const OutputVector * cache_inputs) {
     auto v_shape = context.get_input_shape(2).to_shape();  // [B, T, H_v, S_v]
     auto q_shape = context.get_input_shape(0).to_shape();  // [B, T, H_k, S_k]
 
@@ -154,43 +157,7 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
     // ggml state layout (OV notation): [B, H_v, value_dim, key_dim]
     // GatedDeltaNet op expects: [B, H_v, key_dim, value_dim]
     auto state_perm = ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{0, 1, 3, 2});
-    bool gathered_native_layout = false;
-#ifdef GGML_OPENVINO_HAS_STATE_UPDATE
-    // The native gather owns an immutable cache read and a separate prepared-cache output.
-    // Bypass the redundant active-prefix slice and transpose only for its active output.
-    const auto reshape = ov::as_type_ptr<ov::op::v1::Reshape>(state.get_node_shared_ptr());
-    auto active = reshape ? reshape->input_value(0) : state;
-    if (auto slice = ov::as_type_ptr<ov::op::v8::Slice>(active.get_node_shared_ptr())) {
-        if (auto producer =
-                ov::as_type_ptr<ov::op::internal::RecurrentStateGather>(slice->get_input_node_shared_ptr(0))) {
-            const auto begin = ov::as_type_ptr<ov::op::v0::Constant>(slice->get_input_node_shared_ptr(1));
-            const auto axis = ov::as_type_ptr<ov::op::v0::Constant>(slice->get_input_node_shared_ptr(4));
-            const auto stride = ov::as_type_ptr<ov::op::v0::Constant>(slice->get_input_node_shared_ptr(3));
-            if (begin && axis && stride && stride->cast_vector<int64_t>() == std::vector<int64_t>{1} &&
-                slice->input_value(2) == context.get_input("s_copy_active_slot_len") &&
-                begin->cast_vector<int64_t>() == std::vector<int64_t>{0} &&
-                axis->cast_vector<int64_t>() == std::vector<int64_t>{2} && slice->input_value(0).get_index() == 0) {
-                active = slice->input_value(0);
-            }
-        }
-    }
-    const auto gather = ov::as_type_ptr<ov::op::internal::RecurrentStateGather>(active.get_node_shared_ptr());
-    const auto shape = state.get_partial_shape();
-    // Changing the gather's layout is safe only when its active output has this one consumer.
-    const auto targets = gather ? gather->output(0).get_target_inputs() : std::set<ov::Input<ov::Node>>{};
-    const bool exclusive = targets.size() == 1;
-    if (gather && exclusive && active.get_index() == 0 && gather->get_key_size() == 0 && reshape && shape.rank() == 4 &&
-        shape[2].is_static() && shape[3].is_static()) {
-        const auto key_size = shape[3].get_length(), value_size = shape[2].get_length();
-        gather->set_matrix_shape(key_size, value_size);
-        gather->validate_and_infer_types();
-        auto pattern =
-            ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{-1, H_v, key_size, value_size});
-        state = std::make_shared<ov::op::v1::Reshape>(gather->output(0), pattern, false);
-        gathered_native_layout = true;
-    }
-#endif
-    if (!gathered_native_layout) {
+    if (!cache_inputs) {
         state = std::make_shared<ov::op::v1::Transpose>(state, state_perm);
     }
 
@@ -222,6 +189,31 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
     // std::cout << "GatedDeltaNet input shapes: q=" << q.get_partial_shape() << ", k=" << k.get_partial_shape()
     //           << ", v=" << v.get_partial_shape() << ", g=" << g.get_partial_shape()
     //           << ", beta=" << beta.get_partial_shape() << ", state=" << state.get_partial_shape() << std::endl;
+
+#ifdef GGML_OPENVINO_HAS_FUSED_RECURRENCE
+    if (cache_inputs) {
+        OutputVector args{q, k, v, (*cache_inputs)[0], g, beta};
+        args.insert(args.end(), cache_inputs->begin() + 1, cache_inputs->end());
+        std::shared_ptr<Node> fused;
+#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
+        if (ggml_openvino_getenv_int("GGML_OPENVINO_RECURRENT_CACHE_INPLACE")) {
+            fused = std::make_shared<ov::op::internal::RecurrentGatedDeltaNetUpdate>(
+                args, fuse_qk_l2norm, q_eps, k_eps, snapshot_count);
+        } else
+#endif
+        {
+            fused = std::make_shared<ov::op::internal::RecurrentGatedDeltaNet>(
+                args, fuse_qk_l2norm, q_eps, k_eps, snapshot_count);
+        }
+        fused->set_friendly_name(context.get_name() + "/RecurrentGatedDeltaNet");
+        // The matched state VIEW is consumed only by the overridden full-cache
+        // writeback. Route that cache directly instead of materializing snapshots.
+        if (context.get_output_names().size() == 3) {
+            return {fused->output(0), fused->output(0), fused->output(1)};
+        }
+        return {fused->output(0), fused->output(1)};
+    }
+#endif
 
     auto gdn = std::make_shared<ov::op::internal::GatedDeltaNet>(q, k, v, state, g, beta, fuse_qk_l2norm, q_eps, k_eps, snapshot_count);
     auto attn_4d = gdn->output(0);
@@ -273,6 +265,16 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
     }
     return rename_outputs_with_suffix({res}, context.get_name());
 }
+
+OutputVector translate_gated_delta_net(const NodeContext & context) {
+    return translate_gdn(context, nullptr);
+}
+
+#ifdef GGML_OPENVINO_HAS_FUSED_RECURRENCE
+OutputVector translate_recurrent_gated_delta_net(const NodeContext & context, const OutputVector & cache_inputs) {
+    return translate_gdn(context, &cache_inputs);
+}
+#endif
 
 static OutputVector translate_gated_delta_net_ref(const NodeContext & context) {
     num_inputs_check(context, 6, 6);

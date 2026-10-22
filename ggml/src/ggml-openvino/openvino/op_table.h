@@ -49,6 +49,9 @@ GGML_OP_CONVERTER(translate_clamp);
 GGML_OP_CONVERTER(translate_pad);
 GGML_OP_CONVERTER(translate_ssm_conv);
 GGML_OP_CONVERTER(translate_gated_delta_net);
+#ifdef GGML_OPENVINO_HAS_FUSED_RECURRENCE
+OutputVector translate_recurrent_gated_delta_net(const NodeContext & context, const OutputVector & cache_inputs);
+#endif
 GGML_OP_CONVERTER(translate_repeat);
 GGML_OP_CONVERTER(translate_cumsum);
 GGML_OP_CONVERTER(translate_fill);

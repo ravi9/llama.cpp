@@ -5,7 +5,7 @@
 #include "ggml-openvino/openvino/node_context.h"
 #include "ggml-openvino/openvino/utils.h"
 #include "input_model.h"
-#ifdef GGML_OPENVINO_HAS_RECURRENT_CACHE
+#ifdef GGML_OPENVINO_HAS_FUSED_RECURRENCE
 #include "recurrent_cache_fusion.h"
 #endif
 #include "pass/align_eltwise_ranks.h"
@@ -315,7 +315,7 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
         (*tensor_map)[it.first] = it.second;
     }
 
-#ifdef GGML_OPENVINO_HAS_RECURRENT_CACHE
+#ifdef GGML_OPENVINO_HAS_FUSED_RECURRENCE
     RecurrentCacheFusion recurrent_fusion(ggml_model_decoder, tensor_map);
 #endif
     auto translate_node = [&](const std::shared_ptr<GgmlDecoder> & decoder, int node_idx) {
@@ -339,7 +339,7 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
                                       " is not implemented.");
         NodeContext node_context(decoder, tensor_map, node_idx, this);
         ov::OutputVector converted_outputs;
-#ifdef GGML_OPENVINO_HAS_RECURRENT_CACHE
+#ifdef GGML_OPENVINO_HAS_FUSED_RECURRENCE
         converted_outputs = recurrent_fusion.translate(node_idx, node_context);
 #endif
         if (converted_outputs.empty()) {

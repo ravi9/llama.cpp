@@ -319,3 +319,17 @@ The UD target was measured with the same GPU, `q4_asym64_all`, native softplus, 
 Ordinary decode and the controlled snapshot matrix are within run variation. The one MTP CLI run is 6.6% faster, with verification about 1.9 ms shorter and a somewhat higher acceptance rate; treat this as an encouraging run rather than an isolated causal speedup estimate. Draft generation is unchanged. The structural gain is one fewer GDN state-matrix write per layer and active batch, not an expected large change to total model throughput.
 
 Validation for this change: the native GDN reference checks cover `K=1/3`, dynamic batches and token widths, optimized and fallback dimensions, valid snapshot ordering, unchanged initial state, and compiled-model export/import. All 21 native GPU GDN unit cases pass. Core type/visitor and transformation tests pass (17 tests), including `FuseL2NormIntoGDN`, `FuseGroupedQueryIntoGDN`, and paged-fusion snapshot preservation. The native recurrent-cache suite passes 7/7; the Qwen3.5-0.8B GPU slot replay and hidden-output rollback checks pass. UD `llama-server -np 4` passes 12/12 requests both without MTP and with two-token MTP, including concurrent requests, slot reuse/reset, and cached continuation. Logs are in `tmp/gdn-two-output-20261019/`.
+
+
+## Generic convolution/GDN fusion (2026-10-21)
+
+The subsequent [fusion report](OPENVINO-RECURRENT-FUSION-PERF.md) implements two
+native GPU computation/cache operations per recurrent layer for Qwen3.5/Qwen3.6
+in llama.cpp. It includes matched four-slot UD server results, runtime copy/kernel
+profiling, MTP rejection/rollback validation, and remaining cache-output traffic.
+The small-model vectorization experiment's GPU `llama-bench -p 1024 -n 128 -r 3`
+run measured **58.71 ± 0.09 decode tokens/s** and **7,375.10 ± 82.23 prompt tokens/s**.
+GDN vectorization was subsequently reverted; these are experiment results, not a
+measurement of the final retained kernel. This is
+a different workload from the original `-p 0` table above and has no freshly rerun
+Vulkan control. The older measurements retain their original meaning.
