@@ -816,6 +816,33 @@ clear, changing batches and rollback depths 0/2. The rotation IR contains 18
 native gather/update operations. Logs are in `tmp/ov-branch-split-20261022/` and
 `tmp/qwen-finalize-20261022/`.
 
+### Target UD validation after cleanup
+
+The cleaned frontend passes the target UD GGUF through `llama-server -np 4
+-c 8192 -t 2 -tb 2` with GPU, native softplus, `q4_asym64_all` and disabled
+KV slicing. Each process runs an eight-token warmup, one uncached saved
+1,024-token passage with 512 greedy generated tokens, then four distinct
+concurrent prompts with 96 generated tokens each. Startup, requantization and
+warmup are excluded from the reported native request timings.
+
+| Validated path | Prompt tokens/s | Decode tokens/s | Accepted / generated drafts |
+| --- | ---: | ---: | ---: |
+| Rotation, non-MTP | 925.47 | 28.455 | — |
+| In-place, two-token MTP | 830.53 | 41.429 | 340 / 340 |
+
+The two primary outputs match exactly. All eight concurrent functional requests
+complete without truncation. The four MTP requests accept 53/83, 55/78, 53/82
+and 51/87 drafts, exercising rejection as well as parallel slot use. These are
+one-request sanity measurements using different cache/speculation modes, not a
+controlled rotation-versus-in-place speedup estimate or representative MTP gain.
+
+A clean detached checkout at `6cb21a72e` also builds `llama-server`, `llama-bench`
+and `test-backend-sampler` in Release without the local Vulkan/debugging edits.
+The Qwen pruning fix is checked by retaining one layer of the 0.8B F16 GGUF:
+its block count and recurrent-layer metadata match the retained layer, and CPU
+prefill/decode complete. Validation artifacts are in
+`tmp/qwen-finalize-20261022/`.
+
 ## Large-context attention KV slicing (2026-10-22)
 
 Leave `GGML_OPENVINO_DISABLE_KV_SLICE` **unset** for the next benchmarks. On the
