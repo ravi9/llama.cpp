@@ -72,6 +72,20 @@ Raw log: `tmp/mtp-regression-20261022/pool-v2-np4.log`. These low one-active
 results are measured with four physical split cache streams allocated and the
 current full-cache binding fallback. They are not the one-slot baseline.
 
+Completed Vulkan one-slot matrix (`-npl 1 -c 131072`):
+
+| Prompt/sequence | Active sequences | Aggregate prefill t/s | Aggregate decode t/s |
+|---:|---:|---:|---:|
+| 1,024 | 1 | 683.62 | 32.49 |
+| 8,192 | 1 | 436.10 | 30.59 |
+| 32,768 | 1 | 128.25 | 25.99 |
+| 65,536 | 1 | 64.64 | 19.80 |
+
+Raw log: `tmp/ud-backend-matrix-20261023/batch-vulkan-split-npl1.log`.
+The 64K prefill takes 1,013.906 seconds, versus 25.865 seconds for decode.
+The four-slot Vulkan split/unified matrices and remaining OpenVINO matrices
+are still running; partial rows are excluded from final matrix tables.
+
 ## Server benchmark
 
 The matrix has two backends, split/unified KV, MTP off/on, and request concurrency
@@ -99,11 +113,10 @@ and separates server slot count (always four) from client concurrency (one or
 four). Native request timing JSON and stream arrival times are saved. Server SSE
 errors fail the run immediately. A completed case must have eight responses,
 each with native `predicted_n=512` and a final cumulative
-`tokens_predicted=512`, and no
-draft-computation failure or missing compiled-model signature in the server log.
+`tokens_predicted=512`, and no draft-computation failure or missing compiled-model signature in the server log.
 The first concurrent unified-MTP attempt completed output by falling back after
-missing draft signatures; that attempt is invalid and excluded. Cache population exercises explicit active-slot subsets and full-length
-requests before repeating the test. Backend draft sampling adds ports for the
+missing draft signatures; that attempt is invalid and excluded. Cache population
+exercises explicit active-slot subsets and full-length requests before repeating the test. Backend draft sampling adds ports for the
 active sequence IDs, so a four-request startup alone does not populate every
 valid intermediate graph signature.
 
@@ -189,8 +202,8 @@ across backends, since OpenVINO requantizes them.
 OpenVINO's split four-slot MTP result is much lower than its unified result at
 this allocation. Its sequential split run accepts 90.6% of drafts, close to
 the unified 89.8%, yet reaches only 8.62 native decode t/s versus 51.35.
-Thus poor acceptance does not explain the sequential gap. Full-capacity attention-cache binding remains a candidate
-cost: slicing currently handles only one physical stream. Recurrent state size
+Thus poor acceptance does not explain the sequential gap. Full-capacity
+attention-cache binding remains a candidate cost: slicing currently handles only one physical stream. Recurrent state size
 is determined by sequence count and snapshot capacity, not attention-context
 length, so the large context does not itself enlarge the recurrent caches.
 The split concurrent run also accepts 72.0% of drafts versus 89.7% for unified;
@@ -205,7 +218,8 @@ hurts the split serving configuration in this large-allocation sample.
 Vulkan's two layouts have almost identical non-MTP aggregate throughput with four
 concurrent requests (31.00 versus 31.06 t/s). Its concurrent MTP case gains from
 unified KV (31.08 to 46.84 t/s), while its sequential MTP results are close
-(23.23 split and 22.62 unified). Vulkan's large-allocation rates are below the earlier small-context controls.
+(23.23 split and 22.62 unified). Vulkan's large-allocation rates are below the
+earlier small-context controls.
 Untimed verbose diagnostics expose a major confound: default `--fit on` can
 move expert tensors to `Vulkan_Host` even while reporting all 42/42 layers as
 GPU-offloaded. The diagnostic unified-MTP startup reported 43,108 MiB free and
@@ -225,7 +239,9 @@ which varied substantially across successive process starts. The lower Vulkan
 server rates must be interpreted as configured-default end-to-end results, not
 a controlled all-GPU kernel comparison. `llama-batched-bench` loads the model
 and context directly and does not call `common_fit_params`; its results do not
-have this server-specific automatic-fit confound.
+have this server-specific automatic-fit confound. A separate server control
+with `UD_FORCE_GPU=1` (explicit `-ngl 99 -fit off`) is queued after the requested
+matrix; it will be reported separately from the default-fit results.
 
 This is an eight-request throughput sample, with one pass per case. MMLU question
 texts average 53.25 templated tokens in this sample. It tests MTP on natural short

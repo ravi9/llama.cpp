@@ -84,6 +84,9 @@ os.environ.update({
     'LLAMA_ARG_PORT': '18931',
     'LLAMA_ARG_TEMPERATURE': '0',
 })
+if os.environ.get('UD_FORCE_GPU') == '1':
+    os.environ['LLAMA_ARG_N_GPU_LAYERS'] = '99'
+    os.environ['LLAMA_ARG_FIT'] = '0'
 if os.environ.get('UD_LOG_VERBOSITY'):
     os.environ['LLAMA_ARG_LOG_VERBOSITY'] = os.environ['UD_LOG_VERBOSITY']
 if backend == 'ov':
