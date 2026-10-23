@@ -134,11 +134,23 @@ def send_prompt(data: dict) -> tuple[float, list[float]]:
 
     events = []
     token_arrival_times: list[float] = []
+    native_tokens_predicted = 0
     for line in response.iter_lines(decode_unicode=False):
         if not line.startswith(b"data: ") or line[6:] == b"[DONE]":
             continue
         event = json.loads(line[6:])
+        if "error" in event:
+            raise RuntimeError(f"Server stream error: {event['error']}")
         events.append(event)
+        # Native streams can withhold token IDs while buffering incomplete UTF-8.
+        # Their cumulative counter includes that work, including the final event.
+        if not data["external_server"] and "tokens_predicted" in event:
+            predicted = event["tokens_predicted"]
+            if predicted < native_tokens_predicted:
+                raise RuntimeError("Server token counter decreased during streaming")
+            token_arrival_times.extend([time()] * (predicted - native_tokens_predicted))
+            native_tokens_predicted = predicted
+            continue
         if event.get("stop"):
             continue
         # Count native token IDs, excluding empty begin/progress events.
@@ -151,7 +163,8 @@ def send_prompt(data: dict) -> tuple[float, list[float]]:
         Path(data["results_dir"]).mkdir(parents=True, exist_ok=True)
         Path(data["results_dir"], f"request-{data['request_index']:04d}.json").write_text(
             json.dumps({"prompt": data["prompt"], "request": json_data, "timings": timing,
-                        "events": events, "token_arrival_times": token_arrival_times}, indent=2))
+                        "events": events, "token_arrival_times": token_arrival_times,
+                        "submitted_at": t_submit, "completed_at": time()}, indent=2))
     return (t_submit, token_arrival_times)
 
 
