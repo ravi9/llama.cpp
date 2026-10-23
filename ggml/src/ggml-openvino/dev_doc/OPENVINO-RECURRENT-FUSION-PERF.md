@@ -1024,3 +1024,61 @@ verification call takes 44.838 ms. This is a measured recovery of the in-place
 regression; default rotation remains approximately 5% below its historical
 46.345 t/s. Raw responses and traces are in the `copy-stack/inplace-mtp`
 subdirectory. Temporary upload-site logging was removed.
+
+
+### Initial large-context matrix attempts (2026-10-22/23)
+
+Cache-only import accepts a 128K context allocation with blobs populated at
+2K/8K. KV slicing is left enabled. The first `-npl 1` run used the default
+`-ub 512`, 128K allocated context, independent random-token prompts, and 512
+decode tokens:
+
+| Prompt tokens | Prefill t/s | Decode t/s |
+|---:|---:|---:|
+| 1,024 | 832.26 | 35.06 |
+| 8,192 | 905.83 | 27.40 |
+| 32,768 | 324.48 | 13.64 |
+| 65,536 | no completed sample | no completed sample |
+
+The 64K case was terminated when system available memory fell below 1 GB.
+Attempts with `-ub 64`, including a fresh-process 32K case, also exhibited
+large allocation growth and were terminated under memory pressure. These are
+not kernel-reported OOM errors; they are incomplete tests. Reducing microbatch
+size did not resolve memory growth. Isolated `-ub 64` runs completed 1K and
+8K at 35.21 and 27.92 decode t/s respectively.
+
+This is not evidence that a 32K persistent KV cache requires 64 GB. The
+problematic one-sequence tests allocate 128K context, whose 20 FP16 attention
+K/V roots total 2.5 GiB; the recurrent caches are about 63 MiB without MTP.
+Compiled weights are approximately 18 GiB. Runtime temporaries, retained
+allocations, and shape-dependent execution therefore need investigation.
+The np4 MMLU MTP startup confirmed 131,072 context per slot with a total
+524,288 allocation; it produced no completed responses before exiting.
+No valid four-slot MMLU aggregate or complete batch matrix is available yet.
+An allocation audit is being added temporarily to identify growing buffers.
+
+
+The default `-b 2048 -ub 512` allocation audit completed 32K prefill/decode.
+It recorded 25.8 GB in the GPU non-padded memory pool, including multiple old
+allocations attributed to individual attention `ScatterUpdate` nodes (over
+1 GB owned by one node whose current requested output was about 33 MB).
+Persistent KV capacity does not explain that retained pool volume.
+The caller-output rebinding paths replace pooled producer outputs; experimental
+fixes release previous ownership and update capacity before adopting borrowed
+Result storage. The first matched 32K experiment completed at 384.03 prefill
+and 13.91 decode t/s, but its 64K run still exhausted memory and was terminated.
+A second rebinding path is now corrected and under validation. These memory
+fixes are not yet committed. All subsequent measurements use default batch and
+microbatch sizes, as requested; no additional alternate-UB experiments are planned.
+
+
+The second caller-output bookkeeping fix completed the formerly failing 64K
+prompt with default batch/microbatch and 128K context: 503.80 prefill t/s,
+6.37 decode t/s (130.083 s prefill, 80.362 s decode). System memory fluctuated
+around 30–34 GiB during much of the run instead of monotonically reaching the
+62 GiB limit. All eight existing remote-output lifecycle tests passed. The
+fix releases a primitive's pooled output ownership before replacing its buffer
+in `set_output_memory`, and also handles direct producer borrowing from an
+optimized Result while refreshing its capacity. No existing operation contract
+or kernel arithmetic changes. Four-stream validation is now running with
+524,288 total context and default batch/microbatch sizes.
