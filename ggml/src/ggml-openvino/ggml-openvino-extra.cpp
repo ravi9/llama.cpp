@@ -7,10 +7,10 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <openvino/runtime/intel_gpu/ocl/ocl.hpp>
 #include <openvino/runtime/intel_npu/level_zero/level_zero.hpp>
 #include <openvino/runtime/properties.hpp>
-#include <mutex>
 #include <optional>
 
 ov::Core & ov_singleton_core() {
@@ -54,7 +54,8 @@ std::string ggml_openvino_get_device_description(const std::string & device_name
 
     if (has_prefix(device_name, "NPU")) {
         try {
-            const std::string arch = ov_singleton_core().get_property(device_name, "DEVICE_ARCHITECTURE").as<std::string>();
+            const std::string arch =
+                ov_singleton_core().get_property(device_name, "DEVICE_ARCHITECTURE").as<std::string>();
             if (!arch.empty()) {
                 description += " (NPU " + arch + ")";
             }
@@ -81,9 +82,10 @@ static std::string resolve_openvino_device_name(const std::vector<std::string> &
         for (const std::string & name : available_devices) {
             list += "\n  " + name + ": " + ggml_openvino_get_device_description(name);
         }
-        GGML_ABORT("GGML OpenVINO Backend: GGML_OPENVINO_DEVICE=%s is not available. "
-                   "Set it to one of the available OpenVINO devices:%s",
-                   requested, list.c_str());
+        GGML_ABORT(
+            "GGML OpenVINO Backend: GGML_OPENVINO_DEVICE=%s is not available. "
+            "Set it to one of the available OpenVINO devices:%s",
+            requested, list.c_str());
     }
     return requested;
 }
@@ -140,6 +142,8 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_LOG_UNSUPPORTED_OPS",
         "GGML_OPENVINO_LOG_SWA_LAYERS",
         "GGML_OPENVINO_NATIVE_SOFTPLUS",
+        "GGML_OPENVINO_NPU_TOKEN_EMBD_QUANT",
+        "GGML_OPENVINO_GATHER_BEFORE_DEQUANT",
         "GGML_OPENVINO_DISABLE_REMOTE_OUTPUTS",
         "GGML_OPENVINO_REQUANT_KQUANT",
         "GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT",
@@ -179,8 +183,7 @@ void ggml_openvino_device_config::init() {
             compile_config["NPUW_CACHE_DIR"] = cache_dir;
             compile_config.insert(ov::cache_mode(ov::CacheMode::OPTIMIZE_SIZE));
         }
-        const char * compilation_mode_params =
-            ggml_openvino_getenv_str("GGML_OPENVINO_NPU_COMPILE_CONFIG");
+        const char * compilation_mode_params = ggml_openvino_getenv_str("GGML_OPENVINO_NPU_COMPILE_CONFIG");
         if (compilation_mode_params && strlen(compilation_mode_params) > 0) {
             compile_config["NPU_COMPILATION_MODE_PARAMS"] = compilation_mode_params;
         }
@@ -380,9 +383,25 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
         return std::nullopt;
     }
     if (strncmp(tensor->name, "token_embd.weight", 17) == 0) {
-        return ((ggml_openvino_is_npu() && tensor->type == GGML_TYPE_Q6_K) ? ExtraQuantType::F16 :
-                                                                             ExtraQuantType::Q8_0_C);
+        if (ggml_openvino_is_npu() && tensor->type == GGML_TYPE_Q6_K) {
+            // q4_0_c: per-channel u4, q4_0_128: group 128, default: F16
+            const char * q = ggml_openvino_getenv_str("GGML_OPENVINO_NPU_TOKEN_EMBD_QUANT");
+            ExtraQuantType type = ExtraQuantType::F16;
+            if (q && strcmp(q, "q4_0_c") == 0) {
+                type = ExtraQuantType::Q4_0_C;
+            } else if (q && strcmp(q, "q4_0_128") == 0) {
+                type = ExtraQuantType::Q4_0_128;
+            }
+            static std::once_flag logged;
+            std::call_once(logged, [&] {
+                GGML_LOG_INFO("ggml-openvino: NPU token_embd.weight requant type: %s",
+                          (type == ExtraQuantType::F16 ? "F16" : q));
+            });
+            return type;
+        }
+        return ExtraQuantType::Q8_0_C;
     }
+
     if (strncmp(tensor->name, "output.weight", 13) == 0) {
         return ExtraQuantType::Q8_0_C;
     }
