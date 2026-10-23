@@ -976,7 +976,7 @@ python3 tmp/kv-slice-20261022/summary.py 65536
 ```
 
 
-## MTP regression investigation after branch cleanup (2026-10-22, in progress)
+## MTP regression investigation after branch cleanup (2026-10-22)
 
 Matched control: target Qwen3.6 UD Q4_K_M, GPU, `q4_asym64_all`, native
 softplus, `-np 4 -c 8192 -t 2 -tb 2`, two MTP drafts, greedy sampling,
@@ -1005,8 +1005,9 @@ The subsequent allocation fix below resolves the large transfers. A llama input-
 experiment did not remove these transfers or improve decode and was reverted.
 
 Artifacts and effective commands are in `tmp/mtp-regression-20261022/`.
-The default rotation repeat measured 43.820 t/s; the large-context batch/MMLU matrix is pending.
-MMLU uses the `cais/mmlu`, `all`, test split's first 100 question texts, with
+The default rotation repeat measured 43.820 t/s. The expanded large-context
+batch/MMLU matrix is documented in [QWEN36-UD-MULTISLOT-BENCHMARK.md](QWEN36-UD-MULTISLOT-BENCHMARK.md).
+MMLU uses the `cais/mmlu`, `all`, test split's first eight question texts, with
 chat templating and 512 generated tokens per request; question lengths are
 measured rather than padded to exact targets. Native server timing JSON is
 saved separately from stream-arrival plots. The benchmark counts native token
@@ -1054,8 +1055,9 @@ Compiled weights are approximately 18 GiB. Runtime temporaries, retained
 allocations, and shape-dependent execution therefore need investigation.
 The np4 MMLU MTP startup confirmed 131,072 context per slot with a total
 524,288 allocation; it produced no completed responses before exiting.
-No valid four-slot MMLU aggregate or complete batch matrix is available yet.
-An allocation audit is being added temporarily to identify growing buffers.
+That initial attempt supplied no valid four-slot MMLU aggregate. The temporary
+allocation audit below identified the growing buffers; the completed split
+batch matrix is in the expanded benchmark report linked above.
 
 
 The default `-b 2048 -ub 512` allocation audit completed 32K prefill/decode.
@@ -1067,12 +1069,12 @@ The caller-output rebinding paths replace pooled producer outputs; experimental
 fixes release previous ownership and update capacity before adopting borrowed
 Result storage. The first matched 32K experiment completed at 384.03 prefill
 and 13.91 decode t/s, but its 64K run still exhausted memory and was terminated.
-A second rebinding path is now corrected and under validation. These memory
-fixes are not yet committed. All subsequent measurements use default batch and
+The second rebinding path was subsequently corrected and committed as
+`38aaf24a07`; its validation is described below. All subsequent measurements use default batch and
 microbatch sizes, as requested; no additional alternate-UB experiments are planned.
 
 
-The second caller-output bookkeeping fix completed the formerly failing 64K
+Committed OpenVINO fix `38aaf24a07` (pushed to `zijun`) completed the formerly failing 64K
 prompt with default batch/microbatch and 128K context: 503.80 prefill t/s,
 6.37 decode t/s (130.083 s prefill, 80.362 s decode). System memory fluctuated
 around 30–34 GiB during much of the run instead of monotonically reaching the
@@ -1080,5 +1082,7 @@ around 30–34 GiB during much of the run instead of monotonically reaching the
 fix releases a primitive's pooled output ownership before replacing its buffer
 in `set_output_memory`, and also handles direct producer borrowing from an
 optimized Result while refreshing its capacity. No existing operation contract
-or kernel arithmetic changes. Four-stream validation is now running with
-524,288 total context and default batch/microbatch sizes.
+or kernel arithmetic changes. Four-stream validation completed all 1K/8K/32K/64K cases with
+524,288 total context and default batch/microbatch sizes. Four active 64K
+prompts measured 448.62 aggregate prefill t/s and 5.20 aggregate decode t/s.
+The full table and comparison methodology are in the expanded benchmark report.
