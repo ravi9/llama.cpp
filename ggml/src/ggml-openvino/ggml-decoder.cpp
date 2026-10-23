@@ -1540,11 +1540,6 @@ bool GgmlOvDecoder::is_kvcache_4d(const ggml_tensor * cache) const {
     if (m_model_params.v_trans) {
         return false;
     }
-    // `-fa off` (transposed V cache): keep the [1, 1, ctx, n_heads_kv * head_size] layout. The 4-D K cache breaks the
-    // MUL_MAT attention of the Phi-3 models (Phi-3.5 mini, Phi-4 mini).
-    if (m_model_params.v_trans) {
-        return false;
-    }
     if (cache->op != GGML_OP_NONE || cache->view_src != nullptr || !is_kvcache(cache, nullptr)) {
         return false;
     }
