@@ -170,14 +170,14 @@ static uint64_t ggml_openvino_model_cache_extra_cfg(bool stateful, bool recurren
                                         ggml_openvino_getenv_int("GGML_OPENVINO_MANUAL_GQA_ATTN") > 0 :
                                         ggml_openvino_is_gpu();
 
-    uint64_t extra_cfg = 10;  // Direct fused recurrent computation and full-cache writeback.
-#ifdef GGML_OPENVINO_HAS_FUSED_RECURRENCE
+    uint64_t extra_cfg = 11;  // Stable in-place caches and optional separate convolution.
+#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
     extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_FUSED_RECURRENCE") ? 0u : 1u);
 #else
     extra_cfg = extra_cfg * 131;
 #endif
 #ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
-    extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_RECURRENT_CACHE_INPLACE") ? 1u : 0u);
+    extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_SEPARATE_RECURRENT_CONV") ? 1u : 0u);
 #else
     extra_cfg = extra_cfg * 131;
 #endif
@@ -479,11 +479,10 @@ ov::Tensor create_ov_output_tensor(const std::shared_ptr<GgmlOvDecoder> & ggml_d
         }
     }
 
-    // Resolve rotated roots/views before consulting an extra built for another bank.
+    // Reuse the caller-owned full-cache binding when its shape and storage match.
     if (!ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_REMOTE_OUTPUTS") && !ggml_decoder->is_static() &&
         !ggml_decoder->is_splited_model() && ggml_openvino_buffer_is_remote(ggml_tensor)) {
-        auto resolved = ggml_openvino_buffer_resolve_address(ggml_tensor, output_data,
-                                                             ov::shape_size(output_shape) * output_type.size());
+        auto resolved = output_data;
         if (ggml_tensor->extra != nullptr) {
             auto * base = static_cast<ggml_openvino_extra_base *>(ggml_tensor->extra);
             if (base->type == ggml_openvino_extra_base::Type::TENSOR) {
@@ -601,24 +600,6 @@ ov::Tensor convert_ggml_input_to_ov(const std::shared_ptr<GgmlOvDecoder> & ggml_
         if (extra_base->type == ggml_openvino_extra_base::Type::TENSOR) {
             // GGML_LOG_DEBUG("Using ggml_tensor->extra as ov::Tensor for input: %s\n", name.c_str());
             auto * tensor_extra = static_cast<ggml_openvino_tensor_extra *>(extra_base);
-            if (ggml_openvino_buffer_is_remote(ggml_tensor)) {
-                auto tensor = tensor_extra->tensor->as<ov::intel_gpu::ocl::USMTensor>();
-                // Extras may retain a prior bank after a checkpoint write.
-                const auto shape = tensor.get_shape();
-                const auto type = tensor.get_element_type();
-                // Noncontiguous views can share a base extra. Preserve that
-                // binding's original base/window while selecting its current bank.
-                const auto * bound_tensor = ggml_tensor;
-                while (bound_tensor->view_src && bound_tensor->extra == bound_tensor->view_src->extra) {
-                    bound_tensor = bound_tensor->view_src;
-                }
-                auto resolved = ggml_openvino_buffer_resolve_data(bound_tensor, 0, tensor.get_byte_size());
-                if (tensor.get() == resolved) {
-                    return *tensor_extra->tensor;
-                }
-                auto context = ggml_openvino_get_remote_context()->as<ov::intel_gpu::ocl::ClContext>();
-                return context.create_tensor(type, shape, resolved);
-            }
             return *tensor_extra->tensor;
         }
     }

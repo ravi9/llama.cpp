@@ -248,13 +248,6 @@ ggml_openvino_tensor_extra * ggml_openvino_create_tensor_extra(const ggml_tensor
 // Check if a tensor's buffer uses remote (device) memory (e.g. GPU USM)
 bool ggml_openvino_buffer_is_remote(const ggml_tensor * tensor);
 
-// Logical GGML addresses remain stable when recurrent GPU cache allocations rotate.
-// Resolve root/view ranges through the owning buffer, including checkpoint I/O.
-void * ggml_openvino_buffer_resolve_data(const ggml_tensor * tensor, size_t offset = 0, size_t size = 0);
-void * ggml_openvino_buffer_resolve_address(const ggml_tensor * tensor, const void * logical, size_t size);
-std::optional<ov::Tensor> ggml_openvino_buffer_prepare_cache_output(ggml_tensor * tensor);
-void ggml_openvino_buffer_commit_cache_output(ggml_tensor * tensor);
-
 // Register an extra with the tensor's OpenVINO buffer context for proper lifetime management.
 // This sets tensor->extra and tracks the extra in the buffer context for cleanup.
 void ggml_openvino_buffer_register_extra(ggml_tensor * tensor, ggml_openvino_extra_base * extra);

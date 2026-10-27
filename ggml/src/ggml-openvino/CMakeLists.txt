@@ -34,22 +34,6 @@ endif()
 
 # Released runtimes retain the ordinary cache translators.
 include(CheckCXXSourceCompiles)
-unset(GGML_OPENVINO_HAS_FUSED_RECURRENCE CACHE)
-set(CMAKE_REQUIRED_LIBRARIES openvino::runtime)
-set(CMAKE_REQUIRED_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/openvino/op")
-check_cxx_source_compiles("#include <recurrent_cache.hpp>
-int main() {
-    auto conv = std::make_shared<ov::op::internal::RecurrentConvCache>(ov::OutputVector{}, 3);
-    auto gdn = std::make_shared<ov::op::internal::RecurrentGatedDeltaNet>(ov::OutputVector{});
-}"
-    GGML_OPENVINO_HAS_FUSED_RECURRENCE)
-unset(CMAKE_REQUIRED_LIBRARIES)
-unset(CMAKE_REQUIRED_INCLUDES)
-if(GGML_OPENVINO_HAS_FUSED_RECURRENCE)
-    target_compile_definitions(ggml-openvino PRIVATE GGML_OPENVINO_HAS_FUSED_RECURRENCE=1)
-endif()
-
-# Separate Update ops permit staged in-place cache mutation on compatible runtimes.
 unset(GGML_OPENVINO_HAS_CACHE_UPDATE CACHE)
 set(CMAKE_REQUIRED_LIBRARIES openvino::runtime)
 set(CMAKE_REQUIRED_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/openvino/op")

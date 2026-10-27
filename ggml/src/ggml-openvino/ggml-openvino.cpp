@@ -87,31 +87,6 @@ struct ggml_backend_openvino_buffer_context {
     // Wrapping of the buffer
     std::shared_ptr<ov::Tensor> ov_buffer;
 
-    // Stable logical GGML address -> current/spare immutable device cache storage.
-    // Kept by the buffer, not an InferRequest, so checkpoints, views and a newly
-    // compiled graph all see the latest state. Publish only after successful infer.
-    struct cache_storage {
-        size_t size;
-        ov::intel_gpu::ocl::USMTensor current;
-        ov::intel_gpu::ocl::USMTensor spare;
-        bool pending = false;
-    };
-
-    std::map<uintptr_t, cache_storage> cache_allocations;
-
-    void * resolve(const void * logical, size_t bytes) {
-        const auto address = reinterpret_cast<uintptr_t>(logical);
-        auto it = cache_allocations.upper_bound(address);
-        if (it != cache_allocations.begin()) {
-            --it;
-            const auto delta = address - it->first;
-            if (delta <= it->second.size && bytes <= it->second.size - delta) {
-                return static_cast<char *>(it->second.current.get()) + delta;
-            }
-        }
-        return const_cast<void *>(logical);
-    }
-
     // Track all extras for cleanup
     std::map<ggml_tensor *, ggml_openvino_extra_base *> tensor_extras;
     std::map<const void *, uint64_t> weight_fingerprints;
@@ -482,7 +457,7 @@ static void ggml_backend_openvino_buffer_memset_tensor(ggml_backend_buffer_t buf
         auto mem_fill_fn = ggml_openvino_get_clEnqueueMemFillINTEL();
         if (mem_fill_fn != nullptr) {
             uint8_t pattern = value;
-            cl_int err = mem_fill_fn(queue, ctx->resolve((char *) tensor->data + offset, size), &pattern,
+            cl_int err = mem_fill_fn(queue, (char *) tensor->data + offset, &pattern,
                                      sizeof(pattern), size, 0, nullptr, nullptr);
             if (err != CL_SUCCESS) {
                 GGML_LOG_ERROR("%s: clEnqueueMemFillINTEL failed with error %d\n", __func__, err);
@@ -619,7 +594,7 @@ static void ggml_backend_openvino_buffer_set_tensor(ggml_backend_buffer_t buffer
             cl_command_queue queue = ggml_openvino_get_cl_queue();
             auto mem_cpy_fn = ggml_openvino_get_clEnqueueMemcpyINTEL();
             if (mem_cpy_fn != nullptr) {
-                cl_int err = mem_cpy_fn(queue, CL_TRUE, ctx->resolve((char *) tensor->data + offset, size), data, size,
+                cl_int err = mem_cpy_fn(queue, CL_TRUE, (char *) tensor->data + offset, data, size,
                                         0, nullptr, nullptr);
                 if (err != CL_SUCCESS) {
                     GGML_LOG_ERROR("%s: clEnqueueMemcpyINTEL failed with error %d\n", __func__, err);
@@ -667,7 +642,7 @@ static void ggml_backend_openvino_buffer_get_tensor(ggml_backend_buffer_t buffer
         cl_command_queue queue = ggml_openvino_get_cl_queue();
         auto mem_cpy_fn = ggml_openvino_get_clEnqueueMemcpyINTEL();
         if (mem_cpy_fn != nullptr) {
-            cl_int err = mem_cpy_fn(queue, CL_TRUE, data, ctx->resolve((const char *) tensor->data + offset, size),
+            cl_int err = mem_cpy_fn(queue, CL_TRUE, data, (const char *) tensor->data + offset,
                                     size, 0, nullptr, nullptr);
             if (err != CL_SUCCESS) {
                 GGML_LOG_ERROR("%s: clEnqueueMemcpyINTEL failed with error %d\n", __func__, err);
@@ -697,7 +672,7 @@ static bool ggml_backend_openvino_buffer_cpy_tensor(ggml_backend_buffer_t buffer
         }
         // Can copy from host to device
         if (ggml_backend_buffer_is_host(src->buffer)) {
-            cl_int err = mem_cpy_fn(queue, CL_TRUE, ggml_openvino_buffer_resolve_data(dst, 0, ggml_nbytes(src)),
+            cl_int err = mem_cpy_fn(queue, CL_TRUE, dst->data,
                                     src->data, ggml_nbytes(src), 0, nullptr, nullptr);
             if (err != CL_SUCCESS) {
                 GGML_LOG_ERROR("%s: clEnqueueMemcpyINTEL (host-to-device) failed with error %d\n", __func__, err);
@@ -710,8 +685,8 @@ static bool ggml_backend_openvino_buffer_cpy_tensor(ggml_backend_buffer_t buffer
             ggml_backend_openvino_buffer_context * src_ctx =
                 (ggml_backend_openvino_buffer_context *) src->buffer->context;
             if (src_ctx->is_remote) {
-                cl_int err = mem_cpy_fn(queue, CL_TRUE, ggml_openvino_buffer_resolve_data(dst, 0, ggml_nbytes(src)),
-                                        ggml_openvino_buffer_resolve_data(src, 0, ggml_nbytes(src)), ggml_nbytes(src),
+                cl_int err = mem_cpy_fn(queue, CL_TRUE, dst->data,
+                                        src->data, ggml_nbytes(src),
                                         0, nullptr, nullptr);
                 if (err != CL_SUCCESS) {
                     GGML_LOG_ERROR("%s: clEnqueueMemcpyINTEL (device-to-device) failed with error %d\n", __func__, err);
@@ -744,17 +719,6 @@ static void ggml_backend_openvino_buffer_clear(ggml_backend_buffer_t buffer, uin
                 GGML_LOG_WARN("%s: clEnqueueMemFillINTEL failed with error %d\n", __func__, err);
             }
             clFinish(queue);
-            // The original allocation remains the logical address space, while
-            // current rotated roots may live elsewhere. Clear both banks too.
-            for (auto & [address, storage] : ctx->cache_allocations) {
-                for (auto bank : {storage.current, storage.spare}) {
-                    mem_fill_fn(queue, bank.get(), &pattern, sizeof(pattern), storage.size, 0, nullptr, nullptr);
-                }
-                storage.pending = false;
-            }
-            if (!ctx->cache_allocations.empty()) {
-                clFinish(queue);
-            }
         } else {
             GGML_LOG_WARN("%s: clEnqueueMemFillINTEL not available for GPU buffer clear\n", __func__);
         }
@@ -948,60 +912,6 @@ bool ggml_openvino_buffer_is_remote(const ggml_tensor * tensor) {
     }
     auto * ctx = static_cast<ggml_backend_openvino_buffer_context *>(tensor->buffer->context);
     return ctx->is_remote;
-}
-
-void * ggml_openvino_buffer_resolve_data(const ggml_tensor * tensor, size_t offset, size_t size) {
-    const auto * logical = static_cast<const char *>(tensor->data) + offset;
-    return ggml_openvino_buffer_resolve_address(tensor, logical, size);
-}
-
-void * ggml_openvino_buffer_resolve_address(const ggml_tensor * tensor, const void * logical, size_t size) {
-    if (!ggml_openvino_buffer_is_remote(tensor)) {
-        return const_cast<void *>(logical);
-    }
-    auto * ctx = static_cast<ggml_backend_openvino_buffer_context *>(tensor->buffer->context);
-    return ctx->resolve(logical, size);
-}
-
-std::optional<ov::Tensor> ggml_openvino_buffer_prepare_cache_output(ggml_tensor * tensor) {
-    if (!ggml_openvino_buffer_is_remote(tensor) || tensor->view_src || !ggml_is_contiguous(tensor) ||
-        !GgmlOvDecoder::is_recurrent_cache(tensor) || ggml_nbytes(tensor) == 0) {
-        return std::nullopt;
-    }
-    auto * ctx = static_cast<ggml_backend_openvino_buffer_context *>(tensor->buffer->context);
-    const auto address = reinterpret_cast<uintptr_t>(tensor->data);
-    const auto bytes = ggml_nbytes(tensor);
-    auto found = ctx->cache_allocations.find(address);
-    if (found == ctx->cache_allocations.end()) {
-        // Reject overlapping logical roots; views are resolved within one root.
-        for (const auto & [begin, storage] : ctx->cache_allocations) {
-            if (address <= begin ? begin - address < bytes : address - begin < storage.size) {
-                return std::nullopt;
-            }
-        }
-        auto context = ggml_openvino_get_remote_context()->as<ov::intel_gpu::ocl::ClContext>();
-        const auto type = GgmlOvDecoder::get_ov_type(tensor);
-        const auto shape = GgmlOvDecoder::get_shape(tensor);
-        auto current = context.create_tensor(type, shape, tensor->data);
-        auto spare = context.create_usm_device_tensor(type, shape);
-        found = ctx->cache_allocations
-                    .emplace(address, ggml_backend_openvino_buffer_context::cache_storage{bytes, current, spare})
-                    .first;
-    }
-    auto & storage = found->second;
-    if (storage.size != bytes) {
-        return std::nullopt;
-    }
-    storage.pending = true;
-    return storage.spare;
-}
-
-void ggml_openvino_buffer_commit_cache_output(ggml_tensor * tensor) {
-    auto * ctx = static_cast<ggml_backend_openvino_buffer_context *>(tensor->buffer->context);
-    auto & storage = ctx->cache_allocations.at(reinterpret_cast<uintptr_t>(tensor->data));
-    GGML_ASSERT(storage.pending);
-    std::swap(storage.current, storage.spare);
-    storage.pending = false;
 }
 
 void ggml_openvino_buffer_register_extra(ggml_tensor * tensor, ggml_openvino_extra_base * extra) {

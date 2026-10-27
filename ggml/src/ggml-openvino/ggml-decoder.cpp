@@ -356,7 +356,8 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
                 }
                 if (norm->op == GGML_OP_RMS_NORM && norm->src[0]->op == GGML_OP_VIEW &&
                     norm->src[0]->src[0]->op == GGML_OP_GATED_DELTA_NET) {
-                    return 6;
+                    // The post-GDN projection rejoins the flat token stream.
+                    return node->ne[2] == 1 ? 5 : 6;
                 }
             }
         }
@@ -1521,7 +1522,7 @@ void GgmlOvDecoder::add_extra_inputs() {
             create_1d_input("rs_snapshot_stride_" + node_name, writeback.snapshot_stride);
         }
     }
-#ifdef GGML_OPENVINO_HAS_FUSED_RECURRENCE
+#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
     m_compute_params.recurrent_controls.clear();
     if (!m_is_static && !m_is_stateful && !m_model_is_splitted && ggml_openvino_is_gpu() &&
         !ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_FUSED_RECURRENCE")) {

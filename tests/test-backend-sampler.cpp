@@ -1316,8 +1316,8 @@ static void test_backend_recurrent_slots(const test_params & params) {
         auto memory = llama_get_memory(ctx.ctx.get());
         run({3, 3, 3, 3});
         run({0, 0, 1, 0});
-        // Export/import after both cache banks have been used. Checkpoint reads
-        // and writes must resolve the current storage rather than logical data.
+        // Export/import after recurrent state changes. Restoring one sequence
+        // must preserve the other sequences and their stable cache allocations.
         const size_t checkpoint_size = llama_state_seq_get_size(ctx.ctx.get(), 2);
         GGML_ASSERT(checkpoint_size > 0);
         std::vector<uint8_t> checkpoint(checkpoint_size);

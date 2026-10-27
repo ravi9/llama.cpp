@@ -1,3 +1,17 @@
+# Current recurrent-cache implementation (2026-10-27)
+
+Dynamic stateless GPU graphs use the independent `RecurrentConvCacheUpdate` and
+`RecurrentGatedDeltaNetUpdate` ops for Qwen3.5/Qwen3.6 in llama.cpp. In-place USM
+bindings are primary; private output and copy-back handle incompatible bindings.
+There are no rotation banks. `GGML_OPENVINO_SEPARATE_RECURRENT_CONV=1` selects
+history/QKV output plus ordinary GroupConvolution. See the backend README for
+current settings and the multislot report for the new benchmark campaign.
+
+The remaining sections are historical measurements and design notes. Their
+rotation ops, opt-in in-place flag and branch layout describe earlier versions.
+
+---
+
 # Generic recurrent-cache baseline for Qwen MTP
 
 Date: 2026-10-15. Branch: `qwen-openvino-generic-cache`. Model: Qwen3.6-35B-A3B-Q4_K_M_yamini.gguf.

@@ -1,9 +1,8 @@
-#ifdef GGML_OPENVINO_HAS_FUSED_RECURRENCE
+#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
 #    include "recurrent_cache_fusion.h"
 
 #    include "../ggml-openvino-extra.h"
 #    include "ggml-impl.h"
-#    include "op/recurrent_cache.hpp"
 #    include "op_table.h"
 #    ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
 #        include "op/recurrent_cache_update.hpp"
@@ -285,25 +284,21 @@ OutputVector RecurrentCacheFusion::translate(int index, const NodeContext & cont
         const auto history = context.get_input_shape(0)[3].get_length();
         NodeContext compute_context(m_decoder, m_tensors, group.compute);
         const auto channels = context.get_input_shape(0)[2].get_length();
-        inputs.push_back(std::make_shared<v1::Reshape>(compute_context.get_input(1),
-                                                       constant({4}, {1, 1, channels, history + 1}), false));
-        std::shared_ptr<Node> fused;
-#    ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
-        if (ggml_openvino_getenv_int("GGML_OPENVINO_RECURRENT_CACHE_INPLACE")) {
-            fused = std::make_shared<internal::RecurrentConvCacheUpdate>(inputs, history);
-        } else
-#    endif
-        {
-            fused = std::make_shared<internal::RecurrentConvCache>(inputs, history);
+        const bool separate = ggml_openvino_getenv_int("GGML_OPENVINO_SEPARATE_RECURRENT_CONV") > 0;
+        if (!separate) {
+            inputs.push_back(std::make_shared<v1::Reshape>(compute_context.get_input(1),
+                                                         constant({4}, {1, 1, channels, history + 1}), false));
         }
-        fused->set_friendly_name(compute_context.get_name() + "/RecurrentConvCache");
+        auto fused = std::make_shared<internal::RecurrentConvCacheUpdate>(inputs, history);
+        fused->set_friendly_name(compute_context.get_name() + "/RecurrentConvCacheUpdate");
         group.conv = fused->output(0);
         group.updated = fused->output(1);
-        return op::translate_concat(context);
+        return separate ? OutputVector{group.conv} : op::translate_concat(context);
     }
     if (index == group.compute) {
         if (group.concat >= 0) {
-            return {group.conv};
+            return ggml_openvino_getenv_int("GGML_OPENVINO_SEPARATE_RECURRENT_CONV") > 0 ?
+                       op::translate_ssm_conv(context) : OutputVector{group.conv};
         }
         inputs.push_back(context.get_input("rs_update_" + m_decoder->get_op_name(group.writeback)));
         auto outputs = op::translate_recurrent_gated_delta_net(context, inputs);

@@ -3,9 +3,6 @@
 #include "../node_context.h"
 #include "../op_table.h"
 #include "../utils.h"
-#ifdef GGML_OPENVINO_HAS_FUSED_RECURRENCE
-#include "recurrent_cache.hpp"
-#endif
 #ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
 #include "recurrent_cache_update.hpp"
 #endif
@@ -196,22 +193,13 @@ static OutputVector translate_gdn(const NodeContext & context, const OutputVecto
     //           << ", v=" << v.get_partial_shape() << ", g=" << g.get_partial_shape()
     //           << ", beta=" << beta.get_partial_shape() << ", state=" << state.get_partial_shape() << std::endl;
 
-#ifdef GGML_OPENVINO_HAS_FUSED_RECURRENCE
+#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
     if (cache_inputs) {
         OutputVector args{q, k, v, (*cache_inputs)[0], g, beta};
         args.insert(args.end(), cache_inputs->begin() + 1, cache_inputs->end());
-        std::shared_ptr<Node> fused;
-#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
-        if (ggml_openvino_getenv_int("GGML_OPENVINO_RECURRENT_CACHE_INPLACE")) {
-            fused = std::make_shared<ov::op::internal::RecurrentGatedDeltaNetUpdate>(
-                args, fuse_qk_l2norm, q_eps, k_eps, snapshot_count);
-        } else
-#endif
-        {
-            fused = std::make_shared<ov::op::internal::RecurrentGatedDeltaNet>(
-                args, fuse_qk_l2norm, q_eps, k_eps, snapshot_count);
-        }
-        fused->set_friendly_name(context.get_name() + "/RecurrentGatedDeltaNet");
+        auto fused = std::make_shared<ov::op::internal::RecurrentGatedDeltaNetUpdate>(
+            args, fuse_qk_l2norm, q_eps, k_eps, snapshot_count);
+        fused->set_friendly_name(context.get_name() + "/RecurrentGatedDeltaNetUpdate");
         // The matched state VIEW is consumed only by the overridden full-cache
         // writeback. Route that cache directly instead of materializing snapshots.
         if (context.get_output_names().size() == 3) {
@@ -276,7 +264,7 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
     return translate_gdn(context, nullptr);
 }
 
-#ifdef GGML_OPENVINO_HAS_FUSED_RECURRENCE
+#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
 OutputVector translate_recurrent_gated_delta_net(const NodeContext & context, const OutputVector & cache_inputs) {
     return translate_gdn(context, &cache_inputs);
 }
