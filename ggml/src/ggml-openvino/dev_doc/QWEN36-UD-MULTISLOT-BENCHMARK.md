@@ -236,6 +236,94 @@ sources, with private output/copy-back for incompatible caller bindings.
 
 ---
 
+## Default-batch completion of the OV 32K cases (2026-10-27)
+
+This continuation measures the four unified-KV rows left unfinished by the
+30-minute large-batch campaign. The initial plan also included three split-KV
+rows, but the user skipped those comparisons until the split KV cache bottleneck
+is addressed. Vulkan and 64K cases are outside this continuation. Model,
+context allocation, in-place caches and requantization are unchanged. The
+llama.cpp source is `3d9b2fb78` and OpenVINO is `40d69210bf`; only the benchmark
+runner and reporting options change. Default logical batch size is 2048 and
+microbatch size is 512. No `-b` or `-ub` flag is passed, and their environment
+overrides are cleared. The compiled-model blobs from the earlier campaign are
+reused in cache-only mode. GPU workloads run serially.
+
+Raw commands, logs, timing rows and sampled memory:
+`tmp/inplace-kv-default-batch-20261027/target/` in the original llama.cpp workspace.
+
+```sh
+BINARY=/home/zijun/llama.cpp-inplace-perf/build/MtpOVPerf/bin/llama-batched-bench
+MODEL="$HOME/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+OUT=/home/zijun/llama.cpp/tmp/inplace-kv-default-batch-20261027/target
+CACHE=/home/zijun/llama.cpp/tmp/inplace-kv-retest-20261027/target/model-cache
+RUNNER=ggml/src/ggml-openvino/dev_doc/benchmarks/qwen36_ud_inplace_batched.py
+python3 "$RUNNER" --binary "$BINARY" --model "$MODEL" --output "$OUT" \
+  --cache-dir "$CACHE" --phase timed --default-batch --prompts 32768 \
+  --mode fused --layout unified
+python3 "$RUNNER" --binary "$BINARY" --model "$MODEL" --output "$OUT" \
+  --cache-dir "$CACHE" --phase timed --default-batch --prompts 32768 \
+  --mode separate --layout unified
+python3 ggml/src/ggml-openvino/dev_doc/benchmarks/qwen36_ud_inplace_summary.py \
+  --output "$OUT" --report ggml/src/ggml-openvino/dev_doc/QWEN36-UD-MULTISLOT-BENCHMARK.md \
+  --default-continuation --finished
+```
+
+The equivalent raw benchmark commands use the same environment as the earlier
+in-place rerun: GPU, native softplus, `q4_asym64_all`, `ENABLE_KV_4D=1` and
+compiled-model cache-only loading. Only the separate variant sets
+`GGML_OPENVINO_SEPARATE_RECURRENT_CONV=1`.
+
+```sh
+"$BINARY" -m "$MODEL" -c 524288 -npp 32768 -ntg 512 -npl 1,4 --kv-unified
+```
+
+Each of the two processes measures one then four active sequences. Batched-bench
+uses random token IDs and does not test MTP acceptance. Split-KV batch/convolution
+comparisons are deferred because full-cache handling dominates their decode;
+this does not establish that convolution or batch size has no prefill cost.
+
+<!-- default-continuation:start -->
+Finished: 4/4 previously unfinished OV unified-KV 32K rows measured with default batch sizes. The three split-KV continuation rows were skipped at user request.
+
+These are separate continuation measurements with `-b 2048 -ub 512` defaults; neither flag is passed. They do not replace the historical `-b 8192 -ub 8192` rows. Each sequence has 32,768 prompt tokens and 512 decode tokens; four slots and 524,288 total context tokens are allocated in every case. MTP is off. All rates below are aggregate; prefill seconds exclude startup and are not streaming TTFT.
+
+| Convolution | KV | Active sequences | Prefill seconds | Prefill t/s | Decode t/s | Peak process RSS GiB | Status |
+|---|---|---:|---:|---:|---:|---:|---|
+| Fused | Unified | 1 | 31.029 | 1056.05 | 24.57 | 21.29 | Complete |
+| Fused | Unified | 4 | 175.468 | 746.98 | 40.79 | 21.29 | Complete |
+| Separate | Unified | 1 | 31.405 | 1043.40 | 24.40 | 21.31 | Complete |
+| Separate | Unified | 4 | 184.804 | 709.25 | 40.72 | 21.31 | Complete |
+
+Peak process RSS is shared by both rows from a process. It does not include all GPU/system allocations.
+
+<!-- default-continuation:end -->
+
+All four retained rows finished successfully in approximately 10.2 minutes,
+including both process starts. The three split-KV continuation rows are deferred
+at user request; none were measured. No Vulkan tests were run and no benchmark
+is running. Completed rows confirm the effective defaults `n_batch=2048` and
+`n_ubatch=512`, with exactly 512 decode tokens per sequence. Both processes reused
+the existing compiled cache without recompilation. Minimum system `MemAvailable`
+was 27.19 GiB for fused convolution and 25.45 GiB for separate convolution; peak
+process RSS was 21.29 and 21.31 GiB respectively.
+
+At 32K, separate convolution does not improve this default-batch sample. One-active
+decode is 24.57 versus 24.40 t/s, and four-active aggregate decode is 40.79 versus
+40.72 t/s for fused versus separate. Fused prefill takes 31.03 versus 31.40 seconds
+with one active sequence and 175.47 versus 184.80 with four. These are single
+passes, so the small decode differences are not a repeatability claim.
+
+Against the earlier default-batch unified-KV campaign, the current fused path's
+32K four-active decode improves from 7.72 to 40.79 aggregate t/s, approximately
+5.28 times, and prefill falls from 1279.25 to 175.47 seconds. This measures the
+combined upstream/backend changes, not the in-place KV update in isolation.
+The existing Vulkan split-KV four-active reference is 41.53 t/s, about 1.8% above
+the current OV unified result. Vulkan's unified four-active 32K row remains
+unmeasured, so this is a comparison with its split layout and older source.
+
+---
+
 
 Status of the earlier 2026-10-23 campaign: finished. All 16 original server cases and all eight
 Vulkan full-GPU server reruns completed. Of 40 batched timing rows, 32 completed

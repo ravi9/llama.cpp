@@ -6,12 +6,59 @@ from pathlib import Path
 import re
 
 
+def summarize_continuation(args):
+    cases = [('fused', 'unified', (1, 4)), ('separate', 'unified', (1, 4))]
+    observations = []
+    complete = 0
+    for mode, layout, parallel in cases:
+        name = f'timed-{mode}-{layout}-32768'
+        path = args.output / f'{name}.result.json'
+        result = json.loads(path.read_text()) if path.exists() else None
+        rows = result['rows'] if result else []
+        log = args.output / f'{name}.log'
+        if result is None and log.exists():
+            rows = [json.loads(line) for line in log.read_text(errors='replace').splitlines()
+                    if line.startswith('{"n_kv_max"')]
+        by_parallel = {row['pl']: row for row in rows}
+        for pl in parallel:
+            row = by_parallel.get(pl)
+            complete += row is not None
+            status = 'Complete' if row else ('Incomplete' if args.finished else ('Running' if log.exists() else 'Pending'))
+            if result and result['exit_code'] != 0 and row is None:
+                status = f'Failed ({result["exit_code"]})'
+            observations.append((mode, layout, pl, row, result, status))
+    status = 'Finished' if args.finished else 'In progress'
+    lines = [f'{status}: {complete}/4 previously unfinished OV unified-KV 32K rows measured with default batch sizes. The three split-KV continuation rows were skipped at user request.', '',
+             'These are separate continuation measurements with `-b 2048 -ub 512` defaults; neither flag is passed. They do not replace the historical `-b 8192 -ub 8192` rows. Each sequence has 32,768 prompt tokens and 512 decode tokens; four slots and 524,288 total context tokens are allocated in every case. MTP is off. All rates below are aggregate; prefill seconds exclude startup and are not streaming TTFT.', '',
+             '| Convolution | KV | Active sequences | Prefill seconds | Prefill t/s | Decode t/s | Peak process RSS GiB | Status |',
+             '|---|---|---:|---:|---:|---:|---:|---|']
+    for mode, layout, pl, row, result, state in observations:
+        values = [f'{row[key]:.{digits}f}' if row else '-' for key, digits in [('t_pp', 3), ('speed_pp', 2), ('speed_tg', 2)]]
+        rss = f'{result["peak_process_rss_kib"] / 1048576:.2f}' if result else '-'
+        lines.append(f'| {mode.capitalize()} | {layout.capitalize()} | {pl} | ' + ' | '.join(values) + f' | {rss} | {state} |')
+    lines.extend(['', 'Peak process RSS is shared by both rows from a process. It does not include all GPU/system allocations.', ''])
+    section = '\n'.join(lines)
+    (args.output / 'matrix.md').write_text(section + '\n')
+    if args.report:
+        text = args.report.read_text()
+        pattern = r'(?s)(<!-- default-continuation:start -->\n).*?(<!-- default-continuation:end -->)'
+        text, count = re.subn(pattern, lambda match: match[1] + section + '\n' + match[2], text)
+        if count != 1:
+            raise SystemExit('Report must contain exactly one default-continuation marker pair.')
+        args.report.write_text(text)
+    print(f'Updated default-batch continuation: {complete}/4 rows, {status.lower()}.')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--report', type=Path)
     parser.add_argument('--finished', action='store_true')
+    parser.add_argument('--default-continuation', action='store_true', help='Summarize the four default-batch OV unified-KV 32K continuation rows.')
     args = parser.parse_args()
+    if args.default_continuation:
+        summarize_continuation(args)
+        return
     results = [json.loads(path.read_text()) for path in args.output.glob('timed-*.result.json')]
     results = [result for result in results if result['prompt'] in (1024, 8192, 32768)]
     lookup = {(r['mode'], r['layout'], r['prompt']): r for r in results}

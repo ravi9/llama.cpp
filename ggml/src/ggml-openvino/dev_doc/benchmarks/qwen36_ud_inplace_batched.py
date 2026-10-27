@@ -16,13 +16,17 @@ def memory_available_kib():
     return None
 
 
-def run_case(binary, model, output, mode, layout, prompt, decode, cache_only, deadline=None, probe=None):
+def run_case(binary, model, output, mode, layout, prompt, decode, cache_only, deadline=None, probe=None,
+             default_batch=False, cache_dir=None):
     name = f'{"timed" if cache_only else "prime"}-{mode}-{layout}-{prompt}'
-    cache = output / 'model-cache'
+    cache = cache_dir if cache_dir is not None else output / 'model-cache'
     spill = output / 'spill'
     cache.mkdir(exist_ok=True)
     spill.mkdir(exist_ok=True)
     env = os.environ.copy()
+    if default_batch:
+        env.pop('LLAMA_ARG_BATCH', None)
+        env.pop('LLAMA_ARG_UBATCH', None)
     for key in ('GGML_OPENVINO_DISABLE_KV_SLICE', 'GGML_OPENVINO_RECURRENT_CACHE_INPLACE',
                 'GGML_OPENVINO_SEPARATE_RECURRENT_CONV', 'GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY'):
         env.pop(key, None)
@@ -36,11 +40,14 @@ def run_case(binary, model, output, mode, layout, prompt, decode, cache_only, de
     if probe:
         env['LD_PRELOAD'] = str(probe)
     cmd = [str(binary), '-m', str(model), '-c', '131072' if layout == 'one' else '524288',
-           '-npp', str(prompt), '-ntg', str(decode), '-npl', '1' if layout == 'one' else '1,4',
-           '-b', '8192', '-ub', '8192', '--output-format', 'jsonl']
+           '-npp', str(prompt), '-ntg', str(decode), '-npl', '1' if layout == 'one' else '1,4']
+    if not default_batch:
+        cmd.extend(['-b', '8192', '-ub', '8192'])
+    cmd.extend(['--output-format', 'jsonl'])
     if layout == 'unified':
         cmd.append('--kv-unified')
     meta = dict(name=name, mode=mode, layout=layout, prompt=prompt, decode=decode, command=cmd,
+                default_batch=default_batch, requested_parallel=cmd[cmd.index('-npl') + 1],
                 environment={k: v for k, v in env.items() if k.startswith('GGML_OPENVINO_')},
                 initial_available_kib=memory_available_kib())
     (output / f'{name}.command.json').write_text(json.dumps(meta, indent=2) + '\n')
@@ -93,20 +100,25 @@ def main():
     parser.add_argument('--minutes', type=float, default=30)
     parser.add_argument('--mode', choices=('fused', 'separate'))
     parser.add_argument('--layout', choices=('one', 'split', 'unified'))
+    parser.add_argument('--default-batch', action='store_true', help='Omit batch flags and use the binary defaults.')
+    parser.add_argument('--prompts', type=int, nargs='+', help='Prompt lengths to run instead of the phase defaults.')
+    parser.add_argument('--cache-dir', type=Path, help='Reuse an existing compiled-model cache directory.')
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     modes = [args.mode] if args.mode else ['fused', 'separate']
     layouts = [args.layout] if args.layout else ['one', 'split', 'unified']
     deadline = time.monotonic() + args.minutes * 60 if args.phase == 'timed' else None
-    for prompt in ([16] if args.phase == 'prime' else [1024, 8192, 32768]):
+    cache_dir = args.cache_dir.resolve() if args.cache_dir else None
+    for prompt in (args.prompts or ([16] if args.phase == 'prime' else [1024, 8192, 32768])):
         for layout in layouts:
             for mode in modes:
                 if deadline is not None and time.monotonic() >= deadline:
                     print('Benchmark deadline reached; remaining cases are skipped.', flush=True)
                     return
                 result = run_case(args.binary.resolve(), args.model.resolve(), output, mode, layout, prompt,
-                                  1 if args.phase == 'prime' else 512, args.phase == 'timed', deadline)
+                                  1 if args.phase == 'prime' else 512, args.phase == 'timed', deadline,
+                                  default_batch=args.default_batch, cache_dir=cache_dir)
                 if result['exit_code'] != 0 and not result['timed_out']:
                     raise SystemExit(f'{result["name"]} failed; inspect its raw log before continuing.')
 
