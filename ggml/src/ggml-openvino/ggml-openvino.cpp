@@ -77,6 +77,13 @@ struct ggml_backend_openvino_buffer_context {
     void * spill_mapping = nullptr;
     size_t spill_size = 0;
 
+    // Set when ov_buffer owns Level Zero host memory (GGML_OPENVINO_NPU_L0_HOST_TENSORS); the
+    // tensor frees it, so the destructor must not call ggml_aligned_free.
+    bool data_owned_by_ov = false;
+
+    // Set for a model buffer that directly wraps the loader's GGUF mmap.
+    bool external_memory = false;
+
     // Wrapping of the buffer
     std::shared_ptr<ov::Tensor> ov_buffer;
 
@@ -111,7 +118,21 @@ struct ggml_backend_openvino_buffer_context {
     std::vector<ggml_openvino_source_mapping> source_mappings;
 
     // Used for re-allocation on device for kvcache
-    void * data_prev;
+    void * data_prev = nullptr;
+
+    ggml_backend_openvino_buffer_context(int device, void * external_data, size_t size) :
+        device(device),
+        name(std::string(GGML_OPENVINO_NAME) + std::to_string(device)),
+        id([]() {
+            static std::atomic<size_t> next_id{1};
+            return next_id.fetch_add(1);
+        }()),
+        data(external_data),
+        size(size),
+        is_remote(false),
+        external_memory(true) {
+        ov_buffer = std::make_shared<ov::Tensor>(ov::element::u8, ov::Shape{size}, data);
+    }
 
     ggml_backend_openvino_buffer_context(int device, size_t size, bool is_remote = false) :
         device(device),
@@ -138,6 +159,38 @@ struct ggml_backend_openvino_buffer_context {
             data = usm_tensor.get();
             ov_buffer = std::make_shared<ov::intel_gpu::ocl::USMTensor>(std::move(usm_tensor));
         } else {
+            // In strict warm-mmap mode the model weights are supplied via buffer_from_host_ptr,
+            // so every alloc_buffer here is graph scratch / KV. The large prefill compute buffer
+            // is never touched on the host by the on-device fused OV model, yet an L0 host tensor
+            // commits/zeroes it eagerly (fully resident). For such large buffers, reserve
+            // demand-zero pages instead (no L0, no memset) so they stay non-resident. KV and small
+            // I/O buffers keep the L0 host tensor for zero-copy import (decode throughput).
+            const bool strict_mmap = device_name == "NPU" &&
+                                     ggml_openvino_getenv_int("GGML_OPENVINO_SELF_CONTAINED_BLOB") &&
+                                     ggml_openvino_getenv_int("GGML_OPENVINO_SELF_CONTAINED_MMAP") &&
+                                     ggml_openvino_getenv_str("GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR");
+            const size_t lazy_host_threshold = (size_t) 1024 * 1024 * 1024;  // 1 GiB
+            const bool lazy_host_alloc = strict_mmap && size >= lazy_host_threshold;
+            // Prefer importable Level Zero host memory on NPU: the plugin imports it without an
+            // extra host-to-device copy each infer.
+            if (!lazy_host_alloc && ggml_openvino_is_npu() && ggml_openvino_npu_l0_host_tensors_enabled() &&
+                !ggml_openvino_model_cache_only()) {
+                try {
+                    auto npu_context = ov_singleton_core().get_default_context("NPU");
+                    auto host_tensor = npu_context.create_host_tensor(ov::element::u8, ov::Shape{size});
+                    data = host_tensor.data();
+                    memset(data, 0, size);
+                    ov_buffer = std::make_shared<ov::Tensor>(std::move(host_tensor));
+                    data_owned_by_ov = true;
+                } catch (const std::exception & e) {
+                    GGML_LOG_WARN("%s: L0 host tensor allocation of %zu bytes failed (%s); using aligned malloc\n",
+                                  __func__, size, e.what());
+                    data = nullptr;
+                }
+            }
+            if (data != nullptr) {
+                // backed by the Level Zero host tensor above
+            } else
 #ifdef _WIN32
             if (ggml_openvino_model_cache_only()) {
                 data = spill_mapping = VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
@@ -202,7 +255,11 @@ struct ggml_backend_openvino_buffer_context {
 #endif
                 data = ggml_aligned_malloc(size);
                 GGML_ASSERT(data);
-                memset(data, 0, size);
+                // Demand-zero pages already read as zero; skip the eager memset in lazy mode so the
+                // large, host-untouched prefill compute buffer never becomes resident.
+                if (!lazy_host_alloc) {
+                    memset(data, 0, size);
+                }
                 ov_buffer = std::make_shared<ov::Tensor>(ov::element::u8, ov::Shape{size}, data);
             }
         }
@@ -236,7 +293,7 @@ struct ggml_backend_openvino_buffer_context {
             munmap(spill_mapping, spill_size);
         } else
 #endif
-        if (!is_remote && data != nullptr) {
+        if (!is_remote && !data_owned_by_ov && !external_memory && data != nullptr) {
             ggml_aligned_free(data, size);
         }
     }
@@ -341,6 +398,12 @@ static bool is_stateful_enabled() {
     return ggml_openvino_getenv_int("GGML_OPENVINO_STATEFUL_EXECUTION") != 0;
 }
 
+static bool is_self_contained_mmap_enabled() {
+    return ggml_openvino_is_npu() && ggml_openvino_getenv_int("GGML_OPENVINO_SELF_CONTAINED_BLOB") &&
+           ggml_openvino_getenv_int("GGML_OPENVINO_SELF_CONTAINED_MMAP") &&
+           ggml_openvino_getenv_str("GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR");
+}
+
 static enum ggml_status ggml_backend_openvino_buffer_init_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor) {
     // GGML_LOG_DEBUG("%s: buffer usage=%d, tensor name=%s\n", __func__, buffer->usage, tensor->name);
     ggml_backend_openvino_buffer_context * ctx = (ggml_backend_openvino_buffer_context *) buffer->context;
@@ -433,6 +496,31 @@ static void ggml_backend_openvino_buffer_memset_tensor(ggml_backend_buffer_t buf
     }
 }
 
+// Inputs are set on every inference: keep the tensor extra when it still wraps the same memory, shape and type.
+static bool ggml_openvino_extra_unchanged(const ggml_backend_openvino_buffer_context * ctx,
+                                          const ggml_tensor * tensor) {
+    auto it = ctx->tensor_extras.find(const_cast<ggml_tensor *>(tensor));
+    if (it == ctx->tensor_extras.end() || it->second == nullptr || tensor->extra != it->second ||
+        it->second->type != ggml_openvino_extra_base::Type::TENSOR) {
+        return false;
+    }
+    const auto * extra = static_cast<const ggml_openvino_tensor_extra *>(it->second);
+    const auto & t = extra->tensor;
+    if (extra->data != tensor->data || t == nullptr || t->get_element_type() != GgmlOvDecoder::get_ov_type(tensor)) {
+        return false;
+    }
+    const auto & shape = t->get_shape();
+    if (shape.size() != GGML_MAX_DIMS) {
+        return false;
+    }
+    for (int i = 0; i < GGML_MAX_DIMS; ++i) {
+        if (shape[GGML_MAX_DIMS - 1 - i] != static_cast<size_t>(tensor->ne[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void ggml_backend_openvino_buffer_set_tensor(ggml_backend_buffer_t buffer,
                                                     ggml_tensor * tensor,
                                                     const void * data,
@@ -463,6 +551,13 @@ static void ggml_backend_openvino_buffer_set_tensor(ggml_backend_buffer_t buffer
     bool is_supported_weight_shape = is_2d || (tensor->ne[3] == 1 && ggml_is_quantized(tensor->type));
 
     if (is_weight_buffer && is_full_tensor_set && is_supported_weight_shape) {
+        if (ggml_openvino_is_npu() && ggml_openvino_getenv_int("GGML_OPENVINO_SELF_CONTAINED_BLOB") &&
+            ggml_openvino_getenv_str("GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR")) {
+            // Keep raw bytes for cache fingerprint validation and compile fallback; the imported
+            // self-contained blob supplies the runtime weights, so eager requant is unnecessary.
+            memcpy(tensor->data, data, size);
+            return;
+        }
         try {
             auto result = process_weight_tensor(tensor, data, tensor->data);
             result.weight_node->set_friendly_name(tensor->name);
@@ -536,6 +631,9 @@ static void ggml_backend_openvino_buffer_set_tensor(ggml_backend_buffer_t buffer
             memcpy((char *) tensor->data + offset, data, size);
         }
 
+        if (ggml_openvino_extra_unchanged(ctx, tensor)) {
+            return;
+        }
         ggml_openvino_tensor_extra * extra = ggml_openvino_create_tensor_extra(tensor, ctx->is_remote);
         if (extra == nullptr) {
             // GGML_LOG_ERROR("%s: failed to create tensor extra for %s\n", __func__, tensor->name);
@@ -715,6 +813,10 @@ static size_t ggml_backend_openvino_buffer_type_get_max_size(ggml_backend_buffer
 static size_t ggml_backend_openvino_buffer_type_get_alloc_size(ggml_backend_buffer_type_t buft,
                                                                const ggml_tensor * tensor) {
     GGML_UNUSED(buft);
+
+    if (is_self_contained_mmap_enabled()) {
+        return ggml_nbytes(tensor);
+    }
 
     // For quantized weight tensors, we need extra space for extracted data.
     if (!ggml_openvino_model_cache_only() && ggml_is_quantized(tensor->type) && tensor->ne[3] == 1) {
@@ -932,6 +1034,13 @@ uint64_t ggml_backend_openvino_weight_fingerprint(const ggml_tensor * tensor) {
         auto it = ctx->weight_fingerprints.find(tensor->data);
         if (it != ctx->weight_fingerprints.end()) {
             return it->second;
+        }
+        if (ctx->external_memory) {
+            // GGML_OPENVINO_SELF_CONTAINED_MMAP wraps the GGUF mmap, so the weights are never uploaded
+            // through set_tensor. Identify them from the same mapping set_tensor saw on the cold run.
+            const uint64_t fp = ggml_openvino_source_fingerprint(tensor->data, ggml_nbytes(tensor), ctx->source_mappings);
+            ctx->weight_fingerprints[tensor->data] = fp;
+            return fp;
         }
         GGML_ABORT("ggml-openvino: missing source identity for weight %s", tensor->name);
     }
@@ -1228,7 +1337,7 @@ static void ggml_backend_openvino_device_get_props(ggml_backend_dev_t dev, ggml_
     props->caps = {
         /* .async                 = */ false,
         /* .host_buffer           = */ false,
-        /* .buffer_from_host_ptr  = */ false,
+        /* .buffer_from_host_ptr  = */ is_self_contained_mmap_enabled(),
         /* .events                = */ false,
         /* .mmap_support          = */ true,
     };
@@ -1254,6 +1363,17 @@ static ggml_backend_buffer_type_t ggml_backend_openvino_device_get_buffer_type(g
 static ggml_backend_buffer_type_t ggml_backend_openvino_device_get_host_buffer_type(ggml_backend_dev_t dev) {
     ggml_backend_openvino_device_context * ctx = (ggml_backend_openvino_device_context *) dev->context;
     return ggml_backend_openvino_host_buffer_type(ctx->device);
+}
+
+static ggml_backend_buffer_t ggml_backend_openvino_device_buffer_from_host_ptr(ggml_backend_dev_t dev,
+                                                                               void * ptr,
+                                                                               size_t size,
+                                                                               size_t max_tensor_size) {
+    auto * dev_ctx = static_cast<ggml_backend_openvino_device_context *>(dev->context);
+    auto * ctx = new ggml_backend_openvino_buffer_context(dev_ctx->device, ptr, size);
+    GGML_UNUSED(max_tensor_size);
+    return ggml_backend_buffer_init(ggml_backend_openvino_buffer_type(dev_ctx->device),
+                                    ggml_backend_openvino_buffer_interface, ctx, size);
 }
 
 static bool has_view_op_input(const ggml_tensor * op) {
@@ -1881,7 +2001,7 @@ static ggml_openvino_op_support ggml_backend_openvino_device_supports_op_impl(gg
 
     static std::unordered_set<ggml_type> supported_types{
         GGML_TYPE_F32,  GGML_TYPE_F16,  GGML_TYPE_BF16, GGML_TYPE_I64,  GGML_TYPE_I32,  GGML_TYPE_Q4_0,
-        GGML_TYPE_Q4_1, GGML_TYPE_Q4_K, GGML_TYPE_Q5_1, GGML_TYPE_Q5_K, GGML_TYPE_Q8_0, GGML_TYPE_Q6_K,
+        GGML_TYPE_Q4_1, GGML_TYPE_Q4_K, GGML_TYPE_Q5_0, GGML_TYPE_Q5_1, GGML_TYPE_Q5_K, GGML_TYPE_Q8_0, GGML_TYPE_Q6_K,
         GGML_TYPE_MXFP4};
 
     // derive supported op sets from the op_table map, keys in
@@ -2014,7 +2134,7 @@ static const struct ggml_backend_device_i ggml_backend_openvino_device_interface
     /* .init_backend         = */ ggml_backend_openvino_device_init,
     /* .get_buffer_type      = */ ggml_backend_openvino_device_get_buffer_type,
     /* .get_host_buffer_type = */ ggml_backend_openvino_device_get_host_buffer_type,
-    /* .buffer_from_host_ptr = */ NULL,
+    /* .buffer_from_host_ptr = */ ggml_backend_openvino_device_buffer_from_host_ptr,
     /* .supports_op          = */ ggml_backend_openvino_device_supports_op,
     /* .supports_buft        = */ ggml_backend_openvino_device_supports_buft,
     /* .offload_op           = */ NULL,

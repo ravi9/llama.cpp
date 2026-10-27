@@ -1,6 +1,7 @@
 #include "../node_context.h"
 #include "../op_table.h"
 #include "../utils.h"
+#include "ggml-openvino/ggml-openvino-extra.h"
 
 #include <cassert>
 #include <cstdint>
@@ -43,16 +44,43 @@ OutputVector translate_set_rows(const NodeContext & context) {
                                   ((indices_shape[1].is_static() && indices_shape[1].get_length() > 1) ||
                                    (indices_shape[2].is_static() && indices_shape[2].get_length() > 1));
 
+    // On NPU ScatterUpdate is not in-place: it copies the whole destination to write
+    // one KV row, which dominates decode once ctx grows. ScatterElementsUpdate is
+    // measurably cheaper for the same single-row write.
+    const bool use_elements_update =
+        !multidim_indices && !context.is_stateful() && ggml_openvino_getenv_int("GGML_OPENVINO_KV_SCATTER_ELEMENTS");
+
     auto axes = ov::op::v0::Constant::create(ov::element::i64, ov::Shape{}, {2});
 
     Output<Node> res;
     if (context.is_stateful()) {
         int concat_axis = 1;
+        // the stateful cache appends whole tokens; with `-fa off` llama.cpp writes the V cache transposed,
+        // one element per row
+        FRONT_END_OP_CONVERSION_CHECK(dst.get_partial_shape()[2].is_static() && dst.get_partial_shape()[3].is_static(),
+                                      "Stateful execution needs flash attention (-fa on): with -fa off the V cache "
+                                      "is written transposed");
         int64_t dim2 = dst.get_partial_shape()[2].get_length();
         int64_t dim3 = dst.get_partial_shape()[3].get_length();
         data = std::make_shared<ov::op::v1::Reshape>(
             data, ov::op::v0::Constant::create(ov::element::i64, {4}, {(int64_t) 1, (int64_t) -1, dim2, dim3}), false);
         res = std::make_shared<ov::op::v0::Concat>(OutputVector{dst, data}, concat_axis);
+    } else if (is_kvcache_4d_shape(dst.get_partial_shape())) {
+        // cache [1, ctx, n_heads_kv, head_size]: write whole tokens on axis 1. This is the pattern of the GPU
+        // plugin's StatelessKVFusion (1-D axis, read with VariadicSplit, see permute), which writes the new rows in
+        // place instead of copying the whole cache first
+        FRONT_END_OP_CONVERSION_CHECK(!multidim_indices, "SET_ROWS into a 4-D KV cache needs one index per token");
+        const int64_t n_heads_kv = dst.get_partial_shape()[2].get_length();
+        const int64_t head_size = dst.get_partial_shape()[3].get_length();
+        auto data_tokens = std::make_shared<ov::op::v1::Reshape>(
+            data,
+            ov::op::v0::Constant::create(ov::element::i64, {4}, {(int64_t) 1, (int64_t) -1, n_heads_kv, head_size}),
+            false);
+        auto ind_squeezed = std::make_shared<ov::op::v0::Squeeze>(
+            indices, ov::op::v0::Constant::create(ov::element::i64, {3}, {0, 1, 2}));
+        res = std::make_shared<ov::op::v3::ScatterUpdate>(dst, ind_squeezed, data_tokens,
+                                                          ov::op::v0::Constant::create(ov::element::i64, {1}, {1}));
+        return rename_outputs_with_suffix({res}, context.get_name());
     } else if (multidim_indices) {
         auto updates_shape = std::make_shared<ov::op::v3::ShapeOf>(data, ov::element::i64);
 
@@ -80,7 +108,15 @@ OutputVector translate_set_rows(const NodeContext & context) {
                                              {(int64_t) 1, (int64_t) 1, (int64_t) -1, (int64_t) row_size}),
                 false);
         }
-        res = std::make_shared<ov::op::v3::ScatterUpdate>(dst, ind_squeezed, data_reshaped, axes);
+        if (use_elements_update) {
+            auto updates_shape = std::make_shared<ov::op::v3::ShapeOf>(data_reshaped, ov::element::i64);
+            auto ind_rank4 = std::make_shared<ov::op::v1::Reshape>(
+                ind_squeezed, ov::op::v0::Constant::create(ov::element::i64, {4}, {1, 1, -1, 1}), false);
+            auto broadcasted_indices = std::make_shared<ov::op::v3::Broadcast>(ind_rank4, updates_shape);
+            res = std::make_shared<ov::op::v3::ScatterElementsUpdate>(dst, broadcasted_indices, data_reshaped, axes);
+        } else {
+            res = std::make_shared<ov::op::v3::ScatterUpdate>(dst, ind_squeezed, data_reshaped, axes);
+        }
     }
 
     auto dst_reshape = ov::as_type_ptr<ov::op::v1::Reshape>(dst.get_node_shared_ptr());

@@ -3,14 +3,16 @@
 #include "ggml-impl.h"
 #include "ggml.h"
 #include "model-cache.h"
+#include "npu/npu_config.h"
+#include "npu/npu_quant_policy.h"
 
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <openvino/runtime/intel_gpu/ocl/ocl.hpp>
 #include <openvino/runtime/intel_npu/level_zero/level_zero.hpp>
 #include <openvino/runtime/properties.hpp>
-#include <mutex>
 #include <optional>
 
 ov::Core & ov_singleton_core() {
@@ -54,7 +56,8 @@ std::string ggml_openvino_get_device_description(const std::string & device_name
 
     if (has_prefix(device_name, "NPU")) {
         try {
-            const std::string arch = ov_singleton_core().get_property(device_name, "DEVICE_ARCHITECTURE").as<std::string>();
+            const std::string arch =
+                ov_singleton_core().get_property(device_name, "DEVICE_ARCHITECTURE").as<std::string>();
             if (!arch.empty()) {
                 description += " (NPU " + arch + ")";
             }
@@ -81,9 +84,10 @@ static std::string resolve_openvino_device_name(const std::vector<std::string> &
         for (const std::string & name : available_devices) {
             list += "\n  " + name + ": " + ggml_openvino_get_device_description(name);
         }
-        GGML_ABORT("GGML OpenVINO Backend: GGML_OPENVINO_DEVICE=%s is not available. "
-                   "Set it to one of the available OpenVINO devices:%s",
-                   requested, list.c_str());
+        GGML_ABORT(
+            "GGML OpenVINO Backend: GGML_OPENVINO_DEVICE=%s is not available. "
+            "Set it to one of the available OpenVINO devices:%s",
+            requested, list.c_str());
     }
     return requested;
 }
@@ -113,6 +117,12 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR",
         "GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY",
         "GGML_OPENVINO_NPU_COMPILE_CONFIG",
+        "GGML_OPENVINO_NPU_COMPILER_TYPE",
+        "GGML_OPENVINO_NPUW_FUNCALL_FOR_ALL",
+        "GGML_OPENVINO_NPUW_UNFOLD_IREQS",
+        "GGML_OPENVINO_COMPILATION_NUM_THREADS",
+        "GGML_OPENVINO_NPU_CONFIG",
+        "GGML_OPENVINO_NPU_REQUANT_POLICY",
         // Integer values (use ggml_openvino_getenv_int)
         "GGML_OPENVINO_PREFILL_CHUNK_SIZE",
         // Boolean toggles (treated as int flags via ggml_openvino_getenv_int)
@@ -122,6 +132,12 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_DUMP_IR",
         "GGML_OPENVINO_DEBUG_INPUT",
         "GGML_OPENVINO_DEBUG_OUTPUT",
+        // NPUW dump options require an OpenVINO developer build (NPU_PLUGIN_DEVELOPER_BUILD).
+        // DUMP_SUBS accepts YES, MIN (unique function bodies), last, or indices such as 0,2.
+        "GGML_OPENVINO_NPUW_DUMP_SUBS",
+        "GGML_OPENVINO_NPUW_DUMP_SUBS_DIR",
+        "GGML_OPENVINO_NPUW_DUMP_SUBS_ON_FAIL",
+        "GGML_OPENVINO_NPUW_DUMP_IO",
         // Force the static (NPU-shape) compute path on any device, e.g. GGML_OPENVINO_DEVICE=CPU,
         // to test the static-shape translation without NPUW/real NPU hardware in the loop.
         "GGML_OPENVINO_FORCE_STATIC",
@@ -132,7 +148,9 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_DISABLE_FUSED_RECURRENCE",
         "GGML_OPENVINO_DISABLE_CACHE_ROTATION",
         "GGML_OPENVINO_RECURRENT_CACHE_INPLACE",
+        "GGML_OPENVINO_ENABLE_KV_4D",
         "GGML_OPENVINO_ENABLE_FALLBACK",
+        "GGML_OPENVINO_KV_SCATTER_ELEMENTS",
         "GGML_OPENVINO_MANUAL_GQA_ATTN",
         "GGML_OPENVINO_DISABLE_ELTWISE_RANK_ALIGN",
         "GGML_OPENVINO_MOE_OP",
@@ -142,10 +160,23 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_LOG_UNSUPPORTED_OPS",
         "GGML_OPENVINO_LOG_SWA_LAYERS",
         "GGML_OPENVINO_NATIVE_SOFTPLUS",
+        "GGML_OPENVINO_NPU_TOKEN_EMBD_QUANT",
         "GGML_OPENVINO_DISABLE_REMOTE_OUTPUTS",
         "GGML_OPENVINO_REQUANT_KQUANT",
         "GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT",
+        "GGML_OPENVINO_NPU_KEEP_Q4_0",
+        "GGML_OPENVINO_NPU_FAST_MASK",
         "GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK",
+        "GGML_OPENVINO_GDN_Q_SCALE",
+        "GGML_OPENVINO_NPU_L0_HOST_TENSORS",
+        "GGML_OPENVINO_NPU_KV_SLICE",
+        "GGML_OPENVINO_KV_SLICE",
+        "GGML_OPENVINO_NPU_HFA_PREFILL",
+        "GGML_OPENVINO_NPU_DECODE_UNFOLD",
+        "GGML_OPENVINO_NPU_PARALLEL_COMPILE",
+        "GGML_OPENVINO_SELF_CONTAINED_BLOB",
+        "GGML_OPENVINO_SELF_CONTAINED_MMAP",
+        "GGML_OPENVINO_NPU_SHARED_BANK",
         // Build the precise (but O(n_nodes)) graph cache key. Needed by op tests.
         "GGML_OPENVINO_FULL_GRAPH_KEY",
     };
@@ -165,26 +196,7 @@ void ggml_openvino_device_config::init() {
 
     const char * cache_dir = ggml_openvino_getenv_str("GGML_OPENVINO_CACHE_DIR");
     if (has_prefix(device_name, "NPU")) {
-        compile_config = {
-            {"NPU_COMPILER_DYNAMIC_QUANTIZATION", "YES"   },
-            {"NPU_USE_NPUW",                      "YES"   },
-            {"NPUW_DEVICES",                      "NPU"   },
-            {"NPUW_FOLD",                         "YES"   },
-            {"NPUW_WEIGHTS_BANK",                 "shared"},
-            {"NPUW_FUNCALL_FOR_ALL",              "YES"   },
-            {"NPUW_FUNCALL_ASYNC",                "YES"   },
-            {"NPUW_DQ",                           "YES"   },
-            {"NPUW_DQ_FULL",                      "NO"    },
-        };
-        if (cache_dir && strlen(cache_dir) > 0) {
-            compile_config["NPUW_CACHE_DIR"] = cache_dir;
-            compile_config.insert(ov::cache_mode(ov::CacheMode::OPTIMIZE_SIZE));
-        }
-        const char * compilation_mode_params =
-            ggml_openvino_getenv_str("GGML_OPENVINO_NPU_COMPILE_CONFIG");
-        if (compilation_mode_params && strlen(compilation_mode_params) > 0) {
-            compile_config["NPU_COMPILATION_MODE_PARAMS"] = compilation_mode_params;
-        }
+        compile_config = ggml_openvino_npu_build_compile_config(cache_dir);
     } else if (cache_dir && strlen(cache_dir) > 0) {
         compile_config.insert(ov::cache_dir(cache_dir));
         compile_config.insert(ov::cache_mode(ov::CacheMode::OPTIMIZE_SIZE));
@@ -301,6 +313,22 @@ int ggml_openvino_getenv_int(const char * var, int default_value) {
     return v ? std::atoi(v) : default_value;
 }
 
+bool ggml_openvino_gdn_prescale_enabled() {
+    return ggml_openvino_getenv_int("GGML_OPENVINO_GDN_Q_SCALE") > 0;
+}
+
+float ggml_openvino_gdn_q_scale() {
+    constexpr float default_scale = 64.0f;
+    const char * v = ggml_openvino_getenv_str("GGML_OPENVINO_GDN_Q_SCALE", nullptr);
+    float scale = v ? std::strtof(v, nullptr) : default_scale;
+    if (scale < default_scale) {
+        GGML_LOG_WARN("ggml-openvino: GGML_OPENVINO_GDN_Q_SCALE=%s is below the minimum %.1f, clamping\n", v,
+                      default_scale);
+        scale = default_scale;
+    }
+    return scale;
+}
+
 bool ggml_openvino_reduce_compile_mem_enabled() {
     const char * reduce_compile_mem = ggml_openvino_getenv_str("GGML_OPENVINO_REDUCE_COMPILE_MEM");
     if (reduce_compile_mem != nullptr) {
@@ -324,6 +352,51 @@ bool ggml_openvino_is_npu() {
 
 bool ggml_openvino_is_gpu() {
     return has_prefix(ggml_openvino_get_device_name(), "GPU");
+}
+
+// -1: GGML_OPENVINO_KV_SLICE unset, use the mode's default (or its deprecated alias)
+static int kv_slice_setting() {
+    const char * value = ggml_openvino_getenv_str("GGML_OPENVINO_KV_SLICE");
+    if (value == nullptr || *value == '\0') {
+        return -1;
+    }
+    return ggml_openvino_getenv_int("GGML_OPENVINO_KV_SLICE") != 0 ? 1 : 0;
+}
+
+bool ggml_openvino_dynamic_kv_slice_enabled() {
+    const int setting = kv_slice_setting();
+    if (setting >= 0) {
+        return setting != 0;
+    }
+    return ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_KV_SLICE") == 0;
+}
+
+bool ggml_openvino_static_kv_slice_enabled() {
+    const int setting = kv_slice_setting();
+    if (setting >= 0) {
+        return setting != 0;
+    }
+    return ggml_openvino_getenv_int("GGML_OPENVINO_NPU_KV_SLICE") != 0;
+}
+
+bool ggml_openvino_npu_fast_mask_enabled() {
+    return ggml_openvino_getenv_int("GGML_OPENVINO_NPU_FAST_MASK") != 0;
+}
+
+bool ggml_openvino_npu_l0_host_tensors_enabled() {
+    return ggml_openvino_getenv_int("GGML_OPENVINO_NPU_L0_HOST_TENSORS") != 0;
+}
+
+bool ggml_openvino_npu_hfa_prefill_enabled() {
+    return ggml_openvino_is_npu() && ggml_openvino_getenv_int("GGML_OPENVINO_NPU_HFA_PREFILL") != 0;
+}
+
+bool ggml_openvino_npu_decode_unfold_enabled() {
+    return ggml_openvino_getenv_int("GGML_OPENVINO_NPU_DECODE_UNFOLD") != 0;
+}
+
+bool ggml_openvino_npu_parallel_compile_enabled() {
+    return ggml_openvino_getenv_int("GGML_OPENVINO_NPU_PARALLEL_COMPILE") != 0;
 }
 
 bool ggml_openvino_shape_from_mask_enabled() {
@@ -365,14 +438,19 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
         return std::nullopt;
     }
     if (strncmp(tensor->name, "token_embd.weight", 17) == 0) {
-        return ((ggml_openvino_is_npu() && tensor->type == GGML_TYPE_Q6_K) ? ExtraQuantType::F16 :
-                                                                             ExtraQuantType::Q8_0_C);
+        if (ggml_openvino_is_npu()) {
+            if (auto npu_type = ggml_openvino_npu_token_embd_requant_type(tensor)) {
+                return npu_type;
+            }
+        }
+        return ExtraQuantType::Q8_0_C;
     }
+
     if (strncmp(tensor->name, "output.weight", 13) == 0) {
         return ExtraQuantType::Q8_0_C;
     }
     if (ggml_openvino_is_npu()) {
-        return ExtraQuantType::Q4_0_128;
+        return ggml_openvino_npu_weight_requant_type(tensor);
     }
     // By default Q6_K/Q5_K are requantized to Q8_0_C, which *inflates* 6- and 5-bit weights to 8
     // while the rest of the model stays at 4 bits, and Q4_K keeps its native group-32 layout
@@ -414,6 +492,10 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
         // A group must fit within each row. Use backup channel-wise INT8 for incompatible
         // widths (Q8_0/Q5_1 allow rows of 32 weights); every affected Qwen3.6 row is divisible by 64.
         return tensor->ne[0] % 64 == 0 ? ExtraQuantType::Q4_1_64 : ExtraQuantType::Q8_0_C;
+    }
+    if (tensor->type == GGML_TYPE_Q5_0) {
+        //return ExtraQuantType::Q4_0_128;
+        return ExtraQuantType::Q4_0_64;
     }
     // MoE expert weights (3D, ne[2] = n_expert) stored as Q5_1/Q8_0 are the expert-side
     // equivalent of Q6_K/Q5_K: kept at 8 bits by default while the rest of the model is at 4
@@ -595,6 +677,11 @@ ggml_openvino_extracted_layout ggml_openvino_get_extracted_layout(const ggml_ten
         layout.is_symmetric = true;
         break;
 
+    case GGML_TYPE_Q5_0:
+        // i8 weights (5-bit values minus 16), symmetric (scale only)
+        layout.is_symmetric = true;
+        break;
+
     case GGML_TYPE_Q5_1:
         // u8 weights (5-bit values), asymmetric (scale + zero point)
         break;
@@ -682,5 +769,5 @@ ggml_openvino_tensor_extra * ggml_openvino_create_tensor_extra(const ggml_tensor
         ov_tensor = std::make_shared<ov::Tensor>(element_type, shape, tensor->data);
     }
 
-    return new ggml_openvino_tensor_extra(ov_tensor);
+    return new ggml_openvino_tensor_extra(ov_tensor, tensor->data);
 }

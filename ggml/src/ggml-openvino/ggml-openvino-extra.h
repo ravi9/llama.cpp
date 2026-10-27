@@ -117,11 +117,37 @@ bool ggml_openvino_release_weights_enabled();
 // Check if running on NPU
 bool ggml_openvino_is_npu();
 
+// NPU-only opt-in performance toggles (all default off). Centralized here so each
+// env-var name lives in one place; see docs/backend/OPENVINO.md for semantics.
+// KV-cache slicing: bind the KV cache, and size the KQ masks, at the attended length instead of the full context.
+// One mechanism, two modes:
+//   dynamic graphs (CPU/GPU): the KV input is a view over the cache; the graph is not recompiled. On by default.
+//   static graphs (NPU, or any device with GGML_OPENVINO_FORCE_STATIC): the prefill graph is compiled at the aligned
+//   attended length and recompiled when it changes; decode keeps the full context. Off by default.
+// GGML_OPENVINO_KV_SLICE: unset = the default of each mode, 0 = off in both, 1 = on in both.
+// Deprecated aliases: GGML_OPENVINO_DISABLE_KV_SLICE=1 (dynamic off), GGML_OPENVINO_NPU_KV_SLICE=1 (static on).
+bool ggml_openvino_dynamic_kv_slice_enabled();
+bool ggml_openvino_static_kv_slice_enabled();
+bool ggml_openvino_npu_fast_mask_enabled();
+bool ggml_openvino_npu_l0_host_tensors_enabled();
+bool ggml_openvino_npu_hfa_prefill_enabled();
+bool ggml_openvino_npu_decode_unfold_enabled();
+bool ggml_openvino_npu_parallel_compile_enabled();
+
 // Check if running on a GPU (GPU, GPU.0, GPU.1, ...)
 bool ggml_openvino_is_gpu();
 
 // Read n_seq_active and attention_size(_swa) from the KQ mask shape (off with GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK=1)
 bool ggml_openvino_shape_from_mask_enabled();
+
+// GDN q pre-scale for eligible graphs on the NPU static path. Enabled when
+// GGML_OPENVINO_GDN_Q_SCALE is a positive integer.
+bool ggml_openvino_gdn_prescale_enabled();
+
+// GDN q pre-scale factor (NPU static path, keeps the tiny GDN output above the
+// f16 subnormal range). Defaults to 64.0f and is clamped to a minimum of
+// 64.0f. Only consulted when ggml_openvino_gdn_prescale_enabled() is true.
+float ggml_openvino_gdn_q_scale();
 
 // Largest single memory object the device can allocate, SIZE_MAX when there is no known limit
 size_t ggml_openvino_max_alloc_size();
@@ -183,10 +209,12 @@ struct ggml_openvino_quantized_weight_extra : public ggml_openvino_extra_base {
 // Extra data for KV cache / compute tensors - stores ov::Tensor for infer_request
 struct ggml_openvino_tensor_extra : public ggml_openvino_extra_base {
     std::shared_ptr<ov::Tensor> tensor;  // For direct use with infer_request
+    const void * data;                   // tensor->data that `tensor` wraps
 
-    explicit ggml_openvino_tensor_extra(std::shared_ptr<ov::Tensor> t) :
+    ggml_openvino_tensor_extra(std::shared_ptr<ov::Tensor> t, const void * data) :
         ggml_openvino_extra_base(Type::TENSOR),
-        tensor(std::move(t)) {}
+        tensor(std::move(t)),
+        data(data) {}
 };
 
 // =====================================================

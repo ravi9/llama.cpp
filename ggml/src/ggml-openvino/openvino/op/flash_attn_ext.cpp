@@ -16,16 +16,64 @@
 #include <openvino/op/multiply.hpp>
 #include <openvino/op/reshape.hpp>
 #include <openvino/op/scaled_dot_product_attention.hpp>
+#include <openvino/op/scatter_update.hpp>
 #include <openvino/op/slice.hpp>
 #include <openvino/op/softmax.hpp>
+#include <openvino/op/tile.hpp>
 #include <openvino/op/transpose.hpp>
 #include <openvino/op/unsqueeze.hpp>
+#include <optional>
 #include <string>
+#include <unordered_set>
 
 namespace ov {
 namespace frontend {
 namespace ggml {
 namespace op {
+static std::optional<ov::Output<ov::Node>> find_scatter_updates(const ov::Output<ov::Node> & root) {
+    std::vector<ov::Output<ov::Node>> pending{root};
+    std::unordered_set<const ov::Node *> visited;
+    std::optional<ov::Output<ov::Node>> updates;
+    while (!pending.empty()) {
+        auto output = pending.back();
+        pending.pop_back();
+        auto node = output.get_node_shared_ptr();
+        if (!node || !visited.insert(node.get()).second) {
+            continue;
+        }
+        if (auto scatter = ov::as_type_ptr<ov::op::v3::ScatterUpdate>(node)) {
+            OPENVINO_ASSERT(!updates.has_value(), "HFA KV input contains multiple ScatterUpdate ancestors");
+            updates = scatter->input_value(2);
+            continue;
+        }
+        for (const auto & input : node->inputs()) {
+            pending.push_back(input.get_source_output());
+        }
+    }
+    return updates;
+}
+
+static ov::Output<ov::Node> reshape_present_kv(const ov::Output<ov::Node> & updates,
+                                                int64_t n_heads_kv,
+                                                int64_t head_size) {
+    auto shape = updates.get_partial_shape();
+    OPENVINO_ASSERT(shape.rank().is_static() && shape.rank().get_length() == 4,
+                    "HFA present KV updates must be rank 4");
+    auto reshaped = std::make_shared<ov::op::v1::Reshape>(
+        updates,
+        ov::op::v0::Constant::create(
+            ov::element::i64, {4}, std::vector<int64_t>{1, -1, n_heads_kv, head_size}),
+        false);
+    return std::make_shared<ov::op::v1::Transpose>(
+        reshaped, ov::op::v0::Constant::create(ov::element::i64, {4}, {0, 2, 1, 3}));
+}
+
+static int extract_layer(const std::string & name) {
+    const auto begin = name.find("_l");
+    OPENVINO_ASSERT(begin != std::string::npos, "HFA KV input has no layer suffix: ", name);
+    return std::stoi(name.substr(begin + 2));
+}
+
 static ov::Output<ov::Node> reshape_flat_kv(const ov::Output<ov::Node> & kv_flat,
                                             size_t view_offset_bytes,
                                             size_t nb1_bytes,
@@ -66,6 +114,8 @@ OutputVector translate_flash_attn_ext(const NodeContext & context) {
     auto q_f32 = context.get_input(0);
     auto k = context.get_input(1);
     auto v = context.get_input(2);
+    const auto k_cache = k;
+    const auto v_cache = v;
     const int op_case = context.get_op_case();
 
     if (op_case == 1 || op_case == 2) {
@@ -114,6 +164,7 @@ OutputVector translate_flash_attn_ext(const NodeContext & context) {
     //    if (factor > 1 && num_heads_kv > 1) {
     auto q_shape = context.get_input_shape(0).to_shape();
     auto k_shape = context.get_input_shape(1).to_shape();
+    auto v_shape = context.get_input_shape(2).to_shape();
     const int64_t num_heads = q_shape[1];
     const int64_t num_heads_kv = k_shape[1];
     const int64_t head_size = q_shape[3];
@@ -129,54 +180,54 @@ OutputVector translate_flash_attn_ext(const NodeContext & context) {
         }
         return ggml_openvino_is_gpu();
     }();
+    // The manual path reshapes Q, K, V and the output with one head size; models whose K/V head sizes differ
+    // from Q's (e.g. MLA) take the SDPA path.
+    const bool same_head_size = k_shape[3] == q_shape[3] && v_shape[3] == q_shape[3];
     const bool use_manual_gqa_attention =
-        manual_gqa_enabled && factor > 1 && num_heads_kv > 1 && !context.is_stateful();
+        manual_gqa_enabled && factor > 1 && num_heads_kv > 1 && same_head_size && !context.is_stateful();
 
     if (use_manual_gqa_attention) {
         // Q, K, V arrive as [B, n_heads(_kv), S, head_size], where B is the active
         // batch (n_seq_active) and may be > 1 (llama-perplexity, llama-server -np > 1)
-        // or dynamic. Reshape to
-        //   K_r: [B, num_heads_kv, 1, S, head_size]
-        //   Q_r: [B, num_heads_kv, factor, S_q, head_size]
-        // and let MatMul broadcast across the factor dim without materialising
-        // an expanded K/V. The leading 0 + special_zero=true copies B at runtime,
-        // so this is correct for B == 1, B > 1, and dynamic B alike. Only the head
-        // dims and head_size are baked in as literals; the sequence dim stays -1.
-        auto k_5d_shape = ov::op::v0::Constant::create(ov::element::i64, {5},
-                                                       std::vector<int64_t>{0, num_heads_kv, 1, -1, head_size});
-        auto v_5d_shape = ov::op::v0::Constant::create(ov::element::i64, {5},
-                                                       std::vector<int64_t>{0, num_heads_kv, 1, -1, head_size});
-        auto q_5d_shape = ov::op::v0::Constant::create(ov::element::i64, {5},
-                                                       std::vector<int64_t>{0, num_heads_kv, factor, -1, head_size});
+        // or dynamic. K and V are Transposes of the KV cache; they must feed the MatMuls
+        // directly (4-D, no Reshape in between) so that the GPU plugin folds the transpose
+        // into the Gemm instead of copying the whole transposed cache on every token.
+        // The query heads that share a KV head are stacked along the row axis:
+        //   Q:      [B, num_heads, S_q, head_size] -> [B, num_heads_kv, factor * S_q, head_size]
+        //           (a pure reshape: the query heads of one KV head are adjacent)
+        //   scores: [B, num_heads_kv, factor * S_q, S_k]
+        // The leading 0 + special_zero=true copies B at runtime, so this is correct for
+        // B == 1, B > 1, and dynamic B alike.
+        auto q_r = std::make_shared<ov::op::v1::Reshape>(
+            q,
+            ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{0, num_heads_kv, -1, head_size}),
+            true);
 
-        auto k_r = std::make_shared<ov::op::v1::Reshape>(k, k_5d_shape, true);
-        auto v_r = std::make_shared<ov::op::v1::Reshape>(v, v_5d_shape, true);
-        auto q_r = std::make_shared<ov::op::v1::Reshape>(q, q_5d_shape, true);
+        // QK^T -> [B, num_heads_kv, factor * S_q, S_k]
+        auto qk = std::make_shared<ov::op::v0::MatMul>(q_r, k, /*tA=*/false, /*tB=*/true);
+        ov::Output<ov::Node> probs = std::make_shared<ov::op::v1::Multiply>(qk, scale_node);
 
-        // QK^T → [B, num_heads_kv, factor, S_q, S_k]
-        auto qk = std::make_shared<ov::op::v0::MatMul>(q_r, k_r, /*tA=*/false, /*tB=*/true);
-        auto qk_scaled = std::make_shared<ov::op::v1::Multiply>(qk, scale_node);
-
-        // Mask arrives as [B, 1, S_q, S_k]. Unsqueeze a factor axis at position 2 to
-        // get [B, 1, 1, S_q, S_k], which NUMPY-broadcasts cleanly against the
-        // [B, num_heads_kv, factor, S_q, S_k] scores: B==B, then 1→num_heads_kv and
-        // 1→factor on the head dims.
-        ov::Output<ov::Node> qk_masked;
         if (has_mask) {
-            auto mask_unsq1 =
-                std::make_shared<ov::op::v0::Unsqueeze>(mask, ov::op::v0::Constant::create(ov::element::i64, {1}, {2}));
-            qk_masked = std::make_shared<ov::op::v1::Add>(qk_scaled, mask_unsq1);
-        } else {
-            qk_masked = qk_scaled;
+            // Mask arrives as [B, 1, S_q, S_k]. Row j * S_q + s of the scores belongs to query position s, so
+            // repeat the mask factor times along the rows, [B, 1, factor * S_q, S_k], and add it to the 4-D
+            // scores. Keeping the scores 4-D from the MatMul to the Softmax lets the GPU plugin fuse the scale
+            // and the mask into the Gemm: a reshape of the scores in between costs a full pass over them per
+            // layer, which is large in prefill. The tiled mask is the same in every layer.
+            // The GPU plugin fuses this attention into its SDPA kernel, which works on blocks of keys: a block
+            // fully masked with -inf for a row gives NaN (see the SDPA path below), so use a large finite value.
+            auto mask_finite = std::make_shared<ov::op::v1::Maximum>(
+                mask, ov::op::v0::Constant::create(ov::element::f16, ov::Shape{}, std::vector<float>{-30000.0f}));
+            auto mask_tiled = std::make_shared<ov::op::v0::Tile>(
+                mask_finite,
+                ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{1, 1, factor, 1}));
+            probs = std::make_shared<ov::op::v1::Add>(probs, mask_tiled);
         }
+        probs = std::make_shared<ov::op::v8::Softmax>(probs, /*axis=*/-1);
 
-        auto softmax = std::make_shared<ov::op::v8::Softmax>(qk_masked, /*axis=*/-1);
-
-        // softmax @ V → [B, num_heads_kv, factor, S_q, head_size]
-        auto attn = std::make_shared<ov::op::v0::MatMul>(softmax, v_r);
+        // softmax @ V -> [B, num_heads_kv, factor * S_q, head_size]
+        auto attn = std::make_shared<ov::op::v0::MatMul>(probs, v);
 
         // Reshape back to [B, num_heads, S_q, head_size] (combine num_heads_kv * factor).
-        // Leading 0 + special_zero=true copies B at runtime.
         auto out_4d_shape =
             ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{0, num_heads, -1, head_size});
         auto out_4d = std::make_shared<ov::op::v1::Reshape>(attn, out_4d_shape, true);
@@ -215,6 +266,41 @@ OutputVector translate_flash_attn_ext(const NodeContext & context) {
         }
         return kv;
     };
+
+    const bool use_hfa_gate = ggml_openvino_npu_hfa_prefill_enabled() && context.is_static() &&
+                              context.is_prefill() && has_mask;
+    if (use_hfa_gate) {
+        const int layer = extract_layer(context.get_input_names()[1]);
+        auto past_k = context.get_input("ggml_hfa_past_cache_k_l" + std::to_string(layer));
+        auto past_v = context.get_input("ggml_hfa_past_cache_v_l" + std::to_string(layer));
+        auto hfa_mask = context.get_input("ggml_hfa_mask");
+        auto present_k_updates = find_scatter_updates(k_cache);
+        auto present_v_updates = find_scatter_updates(v_cache);
+        OPENVINO_ASSERT(present_k_updates.has_value() && present_v_updates.has_value(),
+                        "HFA prefill requires ScatterUpdate-backed K/V cache inputs");
+        auto present_k = reshape_present_kv(*present_k_updates, num_heads_kv, head_size);
+        auto present_v = reshape_present_kv(*present_v_updates, num_heads_kv, head_size);
+        k = std::make_shared<ov::op::v0::Concat>(ov::OutputVector{past_k, present_k}, 2);
+        v = std::make_shared<ov::op::v0::Concat>(ov::OutputVector{past_v, present_v}, 2);
+        k = tile_kv(num_heads, num_heads_kv, head_size, k);
+        v = tile_kv(num_heads, num_heads_kv, head_size, v);
+
+        auto q_scaled = std::make_shared<ov::op::v1::Multiply>(q, scale_node);
+        auto scores = std::make_shared<ov::op::v0::MatMul>(q_scaled, k, false, true);
+        auto masked_scores = std::make_shared<ov::op::v1::Add>(scores, hfa_mask);
+        auto probs = std::make_shared<ov::op::v8::Softmax>(masked_scores, -1);
+        auto attended = std::make_shared<ov::op::v0::MatMul>(probs, v);
+        auto transposed = std::make_shared<ov::op::v1::Transpose>(
+            attended, ov::op::v0::Constant::create(ov::element::i64, {4}, {0, 2, 1, 3}));
+        auto output_shape = ov::op::v0::Constant::create(
+            ov::element::i64, {3}, std::vector<int64_t>{0, -1, num_heads * head_size});
+        res = std::make_shared<ov::op::v1::Reshape>(transposed, output_shape, true);
+        auto restored_shape = ov::op::v0::Constant::create(
+            ov::element::i64, {4}, std::vector<int64_t>{0, -1, num_heads, head_size});
+        res = std::make_shared<ov::op::v1::Reshape>(res, restored_shape, true);
+        res = std::make_shared<ov::op::v0::Convert>(res, ov::element::f32);
+        return rename_outputs_with_suffix({res}, context.get_name());
+    }
 
     //auto q_shape = context.get_input_shape(0).to_shape();
     //auto k_shape = context.get_input_shape(1).to_shape();
