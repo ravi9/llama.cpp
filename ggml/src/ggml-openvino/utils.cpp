@@ -375,8 +375,16 @@ static bool compiled_model_matches_graph(const ov::CompiledModel & model,
             continue;
         }
         const auto & port = model.output(i);
+        const auto * tensor = graph_it->second;
+        auto expected_shape = GgmlOvDecoder::get_shape(tensor);
+        if (decoder.is_kvcache_4d_input(tensor)) {
+            // Cache Results use the same head-split layout as their Parameters.
+            const auto heads = static_cast<size_t>(decoder.get_n_heads_kv_for_tensor(tensor));
+            expected_shape = {1, static_cast<size_t>(tensor->ne[1]), heads,
+                              static_cast<size_t>(tensor->ne[0]) / heads};
+        }
         if (port.get_element_type() != GgmlOvDecoder::get_ov_type(graph_it->second) ||
-            !port.get_partial_shape().compatible(ov::PartialShape(GgmlOvDecoder::get_shape(graph_it->second)))) {
+            !port.get_partial_shape().compatible(ov::PartialShape(expected_shape))) {
             return false;
         }
     }
