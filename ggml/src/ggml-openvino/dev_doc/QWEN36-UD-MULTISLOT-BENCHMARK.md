@@ -1,6 +1,243 @@
 # Qwen3.6 UD multi-slot benchmark (2026-10-23)
 
-Status: the campaign is finished. All 16 original server cases and all eight
+## In-place KV and recurrent convolution rerun (2026-10-27)
+
+This is a separate campaign; earlier tables use the previous translation and
+`-b 2048 -ub 512`. The current code merges `origin/dev_backend_openvino`
+`0974aef91`, removes recurrent rotation, and compares fused convolution against
+history/QKV output plus ordinary GroupConvolution. No new server or Vulkan
+measurements are part of this rerun.
+
+- llama.cpp implementation: `9ca7965d6` (`qwen-openvino-inplace-perf`, isolated
+  worktree `/home/zijun/llama.cpp-inplace-perf`). Merge commit: `26870e70d`;
+  recurrent implementation: `bdaf4818f`.
+- OpenVINO: `397f7a2c71` (`qwen-mtp-inplace-primary`). Release GPU build at
+  `/home/zijun/openvino-build-mtp`.
+- Timed binaries include the cache-only fixes subsequently committed as llama.cpp
+  `036829535` and OpenVINO `40d69210bf`. The llama.cpp build identifier stayed
+  `9ca7965d6` during the measurements. Obsolete rotation-setting cleanup is
+  `2188bc23f`; it does not change the graph or cache fingerprint used here.
+- Same target UD GGUF, GPU, native softplus, `q4_asym64_all`.
+  `GGML_OPENVINO_ENABLE_KV_4D=1`; KV slicing is not disabled.
+- `-b 8192 -ub 8192`, 1024/8192/32768 prompt tokens per sequence, 512 decode
+  tokens per sequence. One-slot context is 131072; four-slot contexts are 524288
+  total. Split allocates 131072 per slot; unified shares the total capacity.
+- In-place recurrent caches are primary in both variants. Fused convolution is
+  the default; `GGML_OPENVINO_SEPARATE_RECURRENT_CONV=1` selects the separate
+  variant. Both use the same reset, reorder and ordered writeback semantics.
+- Full-capacity 4D attention KV is bound where the upstream eligibility check
+  permits one physical stream (one-slot and unified). The GPU StatelessKV fusion
+  can expose the live prefix to attention. Explicit split four-slot KV is still
+  outside that upstream eligibility check and retains ordinary full bindings.
+- All GPU workloads are serial. Cache population and functional checks precede
+  the 30-minute timed matrix. Timed runs use compiled-model cache-only mode.
+  Each batched timing row is one pass; batched-bench does not test MTP acceptance.
+  The upstream merge, cache implementation and batch sizes all changed from the
+  earlier campaign. These results do not isolate the effect of any one change.
+
+Reproducible runner: [qwen36_ud_inplace_batched.py](benchmarks/qwen36_ud_inplace_batched.py).
+Raw commands, outputs, memory samples and status:
+`tmp/inplace-kv-retest-20261027/target/` in the original llama.cpp workspace.
+The six compiled blobs total approximately 108 GiB on disk. They are shared
+across prompt lengths; convolution mode and KV layout use distinct signatures.
+
+```sh
+BINARY=/home/zijun/llama.cpp-inplace-perf/build/MtpOVPerf/bin/llama-batched-bench
+MODEL="$HOME/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+OUT=/home/zijun/llama.cpp/tmp/inplace-kv-retest-20261027/target
+RUNNER=ggml/src/ggml-openvino/dev_doc/benchmarks/qwen36_ud_inplace_batched.py
+python3 "$RUNNER" --binary "$BINARY" --model "$MODEL" --output "$OUT" --phase prime
+python3 "$RUNNER" --binary "$BINARY" --model "$MODEL" --output "$OUT" --phase timed --minutes 30
+python3 ggml/src/ggml-openvino/dev_doc/benchmarks/qwen36_ud_inplace_summary.py \
+  --output "$OUT" --report ggml/src/ggml-openvino/dev_doc/QWEN36-UD-MULTISLOT-BENCHMARK.md --finished
+```
+
+The equivalent raw commands for either variant are below. Set the separate-conv
+flag only for the separate variant; unset it for the fused default. Set cache-only
+only after population using the same compilation settings.
+
+```sh
+export GGML_OPENVINO_DEVICE=GPU
+export GGML_OPENVINO_NATIVE_SOFTPLUS=1
+export GGML_OPENVINO_REQUANT_KQUANT=q4_asym64_all
+export GGML_OPENVINO_ENABLE_KV_4D=1
+export GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR="$OUT/model-cache"
+export GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY=1
+"$BINARY" -m "$MODEL" -c 131072 -npp 1024,8192,32768 -ntg 512 -npl 1 -b 8192 -ub 8192
+"$BINARY" -m "$MODEL" -c 524288 -npp 1024,8192,32768 -ntg 512 -npl 1,4 -b 8192 -ub 8192
+"$BINARY" -m "$MODEL" -c 524288 -npp 1024,8192,32768 -ntg 512 -npl 1,4 --kv-unified -b 8192 -ub 8192
+```
+
+### Validation
+
+All 13 native shape, attribute and GPU test cases pass, including history-only
+convolution, cyclic/duplicate reorders, overlapping windows/snapshots, mixed
+precision, dynamic shapes, host/device USM, alias/distinct output bindings,
+exclusive Reshapes, shared readers, unrelated overlaps and export/import.
+Convolution uses an independent host reference; GDN uses ordinary GDN with
+independent host cache mapping. Both llama.cpp convolution variants pass the
+0.8B four-slot reset/copy/checkpoint/rollback test (`rollback=0,2`).
+
+These checks also caught a post-GDN reshape that kept sequence and token axes
+separate at the projection/residual boundary; it now flattens back into the
+shared token stream. Full UD preparation exposed matching empty token axes in
+DIV during no-logits MoE warmup; their repeat factor now remains one. The 0.8B
+split four-slot 8K prompt smoke test with `b=ub=8192` completed (peak process RSS
+12.77 GiB); its short 8-token decode is a functional check, not a target result.
+
+### Cache-only and runtime binding checks
+
+Cache preparation itself passed, but the first cache-only validation exposed two
+compatibility bugs. The llama.cpp imported-output check compared 4D KV Results
+against their old flat GGML shape; it now validates the same head-split layout
+used for input/output binding. In the GPU plugin, SetOutput tried to bind a dynamic
+Result's arguments while its producer still had the empty allocation from the
+previous no-logits batch. Dynamic argument binding is deferred to inference,
+after shape inference and allocation. These fixes preserve the compiled graph
+format; the six prepared blobs are reused.
+
+Both new GPU output-binding regression tests pass with directly compiled and
+exported/imported models. They cover empty-to-nonempty producer allocations and
+a new output destination with unchanged input storage and shape. The 13 native
+shape, attribute and GPU test cases also pass after the runtime fix.
+
+The one-slot and unified runtime dumps each contain 20 `stateless_kv` primitives,
+60 `recurrent_cache_update` primitives and 10 attention primitives. All 80 cache
+Parameter/Result pairs bind the same USM pointers. Short cache-only runs pass
+no-logits warmup, prefill and decode, including four active unified sequences.
+The pointer check establishes caller bindings; the OpenCL trace also checks
+explicit copy calls, and does not measure traffic inside a kernel.
+
+### Convolution kernel control
+
+This isolated control uses 8192 channels, history 3, four cache rows, one active
+sequence, FP16 data/weights and an FP32 cache. Cache input and output share device
+USM. Eight warmups precede 20 measured calls per variant; profiling is enabled,
+so these are operator controls, not predicted full-model token rates.
+
+| Input tokens | Fused request time (ms) | Separate request time (ms) |
+|---:|---:|---:|
+| 1 | 0.068 | 0.158 |
+| 1024 | 2.179 | 3.243 |
+| 8192 | 18.862 | 26.746 |
+
+At 8192 tokens, the ordinary convolution itself takes 2.133 ms in the last
+profiled call, against 16.269 ms for the fused cache/convolution primitive.
+However, the separate path also needs 3.104 ms to materialize history/QKV,
+2.461 ms input layout conversion, 2.419 ms output reorder and 16.364 ms for the
+final transpose. The full separate chain is slower in this control. Full-model
+consumers may allow different layout optimizations, so the model matrix remains
+the primary comparison. Improving the fused convolution's output access and
+eliminating separate-convolution transposes are concrete kernel/layout targets.
+
+### Native GenAI prefill scheduling
+
+Native GenAI supports chunked prefill. In local source `25899f70`,
+[SchedulerConfig](https://github.com/openvinotoolkit/openvino.genai/blob/25899f70/src/cpp/include/openvino/genai/scheduler_config.hpp)
+defaults to `max_num_batched_tokens=256` and `dynamic_split_fuse=true`. Its
+[latency-oriented client configuration](https://github.com/openvinotoolkit/openvino.genai/blob/25899f70/src/cpp/src/utils.cpp)
+sets the token budget to `size_t::max`, so that client path does not impose this
+small batch limit. With chunking disabled, the scheduler requires a full prompt
+to fit the budget. These modes use different scheduling choices; native GenAI
+performance alone does not prove the best llama.cpp microbatch size. This rerun
+uses an 8192-token budget and equal batch/microbatch sizes, so 32K prompts still
+span several graph executions.
+
+<!-- inplace-results:start -->
+Finished: 23/30 timing rows retained. A row is retained only after its prefill and all 512 decode steps finish.
+
+Decode throughput below excludes prefill. Values are aggregate tokens/s, using `speed_tg = pl * tg / t_tg`. In four-slot configurations, `A / B` means one active sequence / four active sequences; divide B by four for the simultaneous per-sequence rate.
+
+| OV convolution / KV configuration | 1K prompt | 8K prompt | 32K prompt |
+|---|---:|---:|---:|
+| Fused conv, `-npl 1` | 38.82 | 34.31 | 24.66 |
+| Fused conv, `-npl 1,4` split | 4.56 / 27.36 | 5.17 / 22.47 | 4.47 / Skipped |
+| Fused conv, `-npl 1,4 --kv-unified` | 38.40 / 93.43 | 33.98 / 71.90 | Skipped / Skipped |
+| Separate conv, `-npl 1` | 38.22 | 33.90 | 24.44 |
+| Separate conv, `-npl 1,4` split | 4.52 / 27.53 | 5.13 / 23.07 | Skipped / Skipped |
+| Separate conv, `-npl 1,4 --kv-unified` | 37.92 / 90.75 | 33.40 / 71.07 | Skipped / Skipped |
+
+Prefill duration in seconds (not streaming TTFT). `t_pp` ends after all active prompts finish and synchronization completes. It is a prefill-latency proxy, and includes first-use runtime shape/kernel preparation; it does not include process startup or loading compiled blobs.
+
+| OV convolution / KV configuration | 1K prompt | 8K prompt | 32K prompt |
+|---|---:|---:|---:|
+| Fused conv, `-npl 1` | 1.052 | 5.596 | 24.133 |
+| Fused conv, `-npl 1,4` split | 2.768 / 4.113 | 12.157 / 88.200 | 37.953 / Skipped |
+| Fused conv, `-npl 1,4 --kv-unified` | 1.069 / 2.421 | 6.290 / 29.394 | Skipped / Skipped |
+| Separate conv, `-npl 1` | 1.096 | 5.457 | 30.124 |
+| Separate conv, `-npl 1,4` split | 3.344 / 4.388 | 8.760 / 27.930 | Skipped / Skipped |
+| Separate conv, `-npl 1,4 --kv-unified` | 1.336 / 2.839 | 7.074 / 24.270 | Skipped / Skipped |
+
+Aggregate prefill throughput in tokens/s. Prompt tokens are independently evaluated for each sequence; no shared-prompt optimization is enabled.
+
+| OV convolution / KV configuration | 1K prompt | 8K prompt | 32K prompt |
+|---|---:|---:|---:|
+| Fused conv, `-npl 1` | 973.71 | 1464.03 | 1357.78 |
+| Fused conv, `-npl 1,4` split | 370.00 / 995.92 | 673.87 / 371.52 | 863.39 / Skipped |
+| Fused conv, `-npl 1,4 --kv-unified` | 957.77 / 1691.56 | 1302.47 / 1114.77 | Skipped / Skipped |
+| Separate conv, `-npl 1` | 934.72 | 1501.26 | 1087.77 |
+| Separate conv, `-npl 1,4` split | 306.26 / 933.49 | 935.13 / 1173.20 | Skipped / Skipped |
+| Separate conv, `-npl 1,4 --kv-unified` | 766.60 / 1442.88 | 1158.11 / 1350.12 | Skipped / Skipped |
+
+Peak process RSS in GiB for each process (both active-sequence rows together). This is a host process measurement, not dedicated GPU memory or total system consumption.
+
+| OV convolution / KV configuration | 1K prompt | 8K prompt | 32K prompt |
+|---|---:|---:|---:|
+| Fused conv, `-npl 1` | 21.23 | 21.31 | 21.31 |
+| Fused conv, `-npl 1,4` split | 21.31 | 21.31 | 20.00 |
+| Fused conv, `-npl 1,4 --kv-unified` | 21.31 | 21.31 | Skipped |
+| Separate conv, `-npl 1` | 21.31 | 21.31 | 21.21 |
+| Separate conv, `-npl 1,4` split | 21.31 | 21.31 | Skipped |
+| Separate conv, `-npl 1,4 --kv-unified` | 21.31 | 21.31 | Skipped |
+
+The 30-minute limit interrupted `timed-fused-split-32768` after 267.8 seconds; 1 completed row(s) from that process are retained. Remaining cells are marked Skipped.
+
+
+<!-- inplace-results:end -->
+
+### Findings and next opportunities
+
+All 1K and 8K cases completed. Both one-slot 32K variants and the fused split-KV
+one-active-sequence row completed. The 30-minute limit interrupted the fused
+split-KV four-active-sequence case; seven remaining rows were skipped. No further
+GPU benchmark is running. RSS shown for the interrupted process covers only its
+observed lifetime. System memory and process RSS measure different allocations;
+the minimum system `MemAvailable` in completed processes ranged from 8.07 to
+34.52 GiB, so the approximately 21 GiB process RSS is not total GPU/system usage.
+
+Decode rates are close between convolution variants. Fused versus separate
+one-slot decode is 38.82 versus 38.22 t/s at 1K, 34.31 versus 33.90 at 8K, and
+24.66 versus 24.44 at 32K. Four-active unified decode is 93.43 versus 90.75 at 1K
+and 71.90 versus 71.07 at 8K. These single-pass differences do not establish a
+repeatable small speedup.
+
+Separate convolution improves some prefill cases, but not all. Four-active split
+8K prefill takes 27.930 seconds versus fused 88.200; unified 8K takes 24.270
+versus 29.394. Conversely, one-slot 32K takes 30.124 seconds versus fused 24.133.
+First-use shape/kernel preparation and different memory-pressure samples remain
+in these timings. Keep fused convolution as the default and retain the explicit
+separate mode for controlled follow-up; a universal long-prefill selection rule
+is not justified by this matrix.
+
+The largest decode gap remains split attention KV. With one active sequence in
+four slots, fused 1K decode is 4.56 t/s split versus 38.40 unified, although both
+use the same in-place recurrent-cache implementation. At 8K it is 5.17 versus
+33.98. The upstream attention fusion excludes split roots because their stream
+dimension exceeds one. This comparison points to the attention-cache path and
+its layout as the next priority; it does not isolate individual copies or
+kernels. Extend the 4D KV translation and StatelessKV fusion to split streams,
+then measure actual binding/copy traffic before assigning the residual gap.
+
+For recurrent computation, optimize fused convolution output stores and layouts,
+or remove the separate path's materialization/reorder costs. The kernel control
+shows why ordinary convolution arithmetic alone cannot predict full-chain
+latency. Both variants retain staged in-place handling for cycles and duplicate
+sources, with private output/copy-back for incompatible caller bindings.
+
+---
+
+
+Status of the earlier 2026-10-23 campaign: finished. All 16 original server cases and all eight
 Vulkan full-GPU server reruns completed. Of 40 batched timing rows, 32 completed
 and eight were skipped at user request. No benchmark remains pending.
 

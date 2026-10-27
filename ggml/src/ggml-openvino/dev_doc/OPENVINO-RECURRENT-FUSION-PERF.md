@@ -1,5 +1,10 @@
 # Qwen3.5/Qwen3.6 generic recurrent fusion performance
 
+The measurements below are historical. The current in-place implementation and
+the fused/separate convolution rerun are documented in
+[the 2026-10-27 benchmark campaign](QWEN36-UD-MULTISLOT-BENCHMARK.md#in-place-kv-and-recurrent-convolution-rerun-2026-10-27).
+The current code removes the recurrent rotation ops and buffer banks.
+
 2026-10-21. This work supports Qwen3.5 and Qwen3.6 (`qwen35`/`qwen35moe`) in
 llama.cpp's OpenVINO backend, including multi-slot llama-server and draft-MTP
 verification/rollback. It implements the two computation/cache boundaries proposed
