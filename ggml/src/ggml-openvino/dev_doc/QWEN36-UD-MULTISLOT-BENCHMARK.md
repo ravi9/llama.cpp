@@ -54,7 +54,92 @@ Raw artifacts: `/home/zijun/llama.cpp/tmp/batch-size-matrix-20261028`. Source pa
 
 <!-- batch-comparison:end -->
 
-### Interpretation
+## MMLU llama-server: current OV unified KV, fresh servers (2026-10-28)
+
+<!-- mmlu-current:start -->
+Completed 4/4 current OV unified-KV MMLU cases.
+
+The target UD model uses the current fused in-place GPU backend, `q4_asym64_all`, native softplus, `ENABLE_KV_4D=1`, enabled KV slicing and compiled-model cache-only loading. Every server has `-np 4 -c 524288`, unified KV and default `-b 2048 -ub 512`; columns distinguish client concurrency from server slot count. MTP uses two draft tokens.
+
+Each case sends the same first eight local MMLU question texts with the native chat template, greedy sampling, `ignore_eos=true`, `cache_prompt=false`, and exactly 512 generated tokens per request. This is a throughput sample using natural text, not an MMLU accuracy evaluation.
+
+| MTP | Requests in flight | TTFT mean / median (s) | Decode t/s per request, excludes prefill | End-to-end aggregate t/s, includes prefill | Draft accepted / generated |
+|---|---:|---:|---:|---:|---:|
+| Off | 1 | 0.555 / 0.471 | 37.22 | 35.83 | - |
+| Off | 4 | 1.800 / 1.781 | 21.58 | 80.36 | - |
+| On | 1 | 10.249 / 0.667 | 48.62 | 24.61 | 2626/2913 (90.1%) |
+| On | 4 | 57.373 / 57.412 | 22.79 | 25.40 | 2619/2935 (89.2%) |
+
+TTFT is measured from client submission to the first counted token arrival. Decode is the mean native server-reported rate per request; four-request values are per request, not aggregate. End-to-end throughput is 4096 generated tokens divided by the harness wall duration, including prefill and scheduling. That duration is printed to 0.01-second precision. Cache preparation and server startup are excluded. First-use compiled-graph import and runtime preparation during requests are included; no request warmup precedes the eight measured questions. TTFT shows both mean and median to expose outliers. Draft acceptance uses native timing counters. Streaming may group buffered tokens at the same observed arrival time.
+
+Templated prompt lengths: 35-73 tokens, mean 53.25.
+
+Native decode comparison, mean tokens/s per request:
+
+| Requests in flight | MTP off -> on | Change |
+|---|---:|---:|
+| 1 | 37.22 -> 48.62 | +30.6% |
+| 4 | 21.58 -> 22.79 | +5.6% |
+
+Raw commands, provenance, logs, response timings and stream arrivals: `/home/zijun/llama.cpp/tmp/mmlu-inplace-20261028`.
+
+<!-- mmlu-current:end -->
+
+MTP improves the mean native decode rate by 31% for one request and 6% for four requests in this sample. Acceptance is about 90% in both cases. These native rates exclude each request's prompt evaluation, but still include work and scheduling delays during generation; they are not isolated kernel timings or fully warmed serving rates.
+
+The MTP end-to-end rates are lower because first-use graph loading dominates these short fresh-server campaigns. In the one-request run, question 1 has 77.291 seconds of native prompt evaluation, compared with 0.423-1.015 seconds for the other seven questions. In the four-request run, the first four questions each report about 110.689 seconds of prompt evaluation; the last four report 0.931-1.353 seconds. The logs show compiled-model cache hits and no compilation or missing-cache errors. Importing a cached graph and preparing it on the GPU still takes time, and some draft graph imports occur during generation when the active subset changes. The precise split between disk reading, runtime import, GPU weight preparation and memory pressure was not profiled. Cache-only loading removes weight requantization and graph compilation, not all first-use costs.
+
+No first-use requests are removed from the primary table. A serving-throughput follow-up should warm the required graph variants inside the same server process before starting timed requests; its warmed TTFT/end-to-end figures must be reported separately. These results establish current functional throughput with the full context allocation, but do not establish the steady four-request MTP gain relative to the earlier rotation implementation. The historical Vulkan server table below retains its original measurements and is not a matched warmed comparison with this fresh-server campaign.
+
+### Reproduce the MMLU server runs
+
+Run from `/home/zijun/llama.cpp-inplace-perf` with the local Python environment that includes the server-bench dependencies and PyArrow. The wrapper imports `scripts/server-bench.py`, substitutes the local MMLU parquet reader, and keeps the server at four slots while changing client concurrency. This avoids the raw script's coupling between slot count and request concurrency. The recorded inference sources are llama.cpp fused-convolution cleanup `da95d1b1c` plus sampler fixes `c1ae62002`, and OpenVINO `9299cc3d78`. The harness started at `2803132ec`; the plotting fix is `f9b648a52`. Per-case checkout commits, the harness source patch and binary SHA-256 are retained in the artifacts.
+
+```sh
+export UD_BENCH_DIR=/home/zijun/llama.cpp/tmp/mmlu-inplace-20261028
+export UD_MMLU_PARQUET=/home/zijun/llama.cpp/tmp/mmlu-dataset/all/test-00000-of-00001.parquet
+export UD_COMPILED_CACHE=/home/zijun/llama.cpp/tmp/batch-size-matrix-20261028/model-cache
+export UD_FORCE_GPU=1
+export UD_LOG_VERBOSITY=4
+export UD_OPENVINO_COMMIT=9299cc3d78
+
+for mode in off mtp; do
+    for concurrency in 1 4; do
+        /home/zijun/venv/bin/python \
+            ggml/src/ggml-openvino/dev_doc/benchmarks/qwen36_ud_mmlu.py \
+            ov unified "$mode" "$concurrency" \
+            > "$UD_BENCH_DIR/ov-unified-$mode-c$concurrency.log" 2>&1
+    done
+done
+```
+
+The wrapper defaults to GPU `q4_asym64_all`, enabled KV slicing and 4D in-place KV fusion, unified KV, context 524288, eight questions, 512 output tokens and compiled-model cache-only mode. Full GPU offload and disabled automatic fitting preserve the requested context allocation. The server logs confirm `n_ctx=524288`, `n_batch=2048`, `n_ubatch=512` and a 10240 MiB attention KV allocation; unified slots report a 262144-token per-request model limit. These short prompts do not test that limit. Peak memory was not sampled for this server campaign.
+
+For a fresh compiled cache, prepare both modes before timing. Create the spill directory on real disk storage before running; disk-backed repacked weights reduce preparation RAM pressure and do not change the compiled-cache key. Each preparation uses a small context and primes all 15 nonempty subsets of the four slots; it is excluded from the reported durations.
+
+One shared directory contains multiple compiled graphs, rather than one blob per MTP mode. Context length is generally dynamic, but recurrent slot capacity, rollback mode, split/unified KV translation and graph input/output contracts can distinguish variants. The MTP draft graph contains GPU sampling branches with slot-specific Parameter names. For example, slot 3 uses `sampling_row_logits_seq_3_0`, while slots 0 and 2 have two separately named row inputs and two sets of top-k outputs. The current cache key distinguishes these interfaces to prevent the sampler-input lookup bug described below. Four slots have 15 nonempty active subsets, which can occur as concurrent requests finish at different times. Most additional subset variants contain the MTP layer and output head, rather than the full trunk. A single sampler interface with runtime active-row/slot lists could reduce compilation count, cache footprint and first-use latency; it needs a separate implementation and correctness review.
+
+MTP preparation initially stopped before all slots were covered. The subsequent cache-only attempt hit a missing fourth-slot draft graph and was discarded. A second preparation lost the server connection while entering two active slots; its log has no explicit cause, and kernel logs were unavailable, so an OOM cause is not established. Preparation with disk-backed weights subsequently completed all 15 subsets in about 13 minutes, including roughly five minutes of weight conversion. The interrupted and failed attempts are preserved separately. Every reported timing run uses cache-only mode and rejects missing graphs or draft-computation failures.
+
+```sh
+for mode in off mtp; do
+    UD_CACHE_ONLY=0 UD_PRIME_SUBSETS=1 UD_TEST_CTX=8192 \
+    UD_N_PROMPTS=1 UD_N_PREDICT=16 UD_RUN_LABEL="prime-unified-$mode" \
+    UD_SPILL_DIR=/home/zijun/llama.cpp/tmp/ov_spill \
+        /home/zijun/venv/bin/python \
+        ggml/src/ggml-openvino/dev_doc/benchmarks/qwen36_ud_mmlu.py \
+        ov unified "$mode" 4 \
+        > "$UD_BENCH_DIR/prime-unified-$mode.log" 2>&1
+done
+```
+
+```sh
+python3 ggml/src/ggml-openvino/dev_doc/benchmarks/qwen36_ud_inplace_summary.py \
+    --output "$UD_BENCH_DIR" --mmlu \
+    --report ggml/src/ggml-openvino/dev_doc/QWEN36-UD-MULTISLOT-BENCHMARK.md
+```
+
+## Batched-benchmark interpretation
 
 Every completed OV one-slot and unified-KV prefill comparison improved with the larger batch, including unified KV with one active sequence at 32K. The unresolved exception is 32K with four active sequences, which became extremely slow and was canceled. Single-slot prefill improves as follows: 8K drops from 7.703 to 5.147 seconds (33% less), and 32K from 32.539 to 22.989 seconds (29% less). Unified four-active prefill also improves at 1K/8K, from 3.479/30.785 to 2.402/25.233 seconds (31%/18% less). Decode rates are generally unchanged. These are single-pass observations.
 
@@ -94,7 +179,7 @@ Unified KV with in-place attention and recurrent cache updates is the recommende
 - At default batch sizes, the combined upstream/backend changes raise unified four-active 32K decode from 7.72 to 40.79 aggregate t/s and reduce prefill from 1279.25 to 175.47 seconds. These improvements do not isolate in-place KV, recurrent cache handling or batch size as the sole cause.
 - The latest OV unified four-active 32K result is about 1.8% below the older Vulkan split reference, 41.53 t/s. The one-slot 32K OV result is about 5% below the older Vulkan one-slot reference. Vulkan unified four-active 32K remains unmeasured; source revisions and compressed weight representations differ between backends.
 - Separate convolution provides no consistent full-model advantage. At default-batch 32K, fused/separate four-active decode is 40.79/40.72 t/s, and fused prefill is faster in that sample. These single-pass differences do not establish a repeatable small decode speedup.
-- The earlier short-prompt MMLU server campaign showed MTP improving OV unified decode from 36.47 to 51.35 t/s for one request and from 21.73 to 25.91 t/s per request with four in flight. Those server measurements used the earlier rotation implementation. The current fused-only cleanup has passed functional MTP checks, but has no new 512-token server performance campaign.
+- The earlier short-prompt MMLU server campaign showed MTP improving OV unified decode from 36.47 to 51.35 t/s for one request and from 21.73 to 25.91 t/s per request with four in flight. Those server measurements used the earlier rotation implementation. The current fused-only implementation now has the four-case cache-only 512-token campaign at the top of this report: native decode is 37.22 -> 48.62 t/s for one request and 21.58 -> 22.79 t/s per request for four. First-use graph imports affect the fresh-server timings, so this does not isolate a warmed implementation-to-implementation speedup.
 
 ### Earlier mixed-batch snapshot
 
@@ -125,7 +210,7 @@ Each entry is **prefill seconds @ aggregate decode tokens/s**. In four-slot rows
 
 Larger limits can still affect decode indirectly through reserved compute/output memory, memory pressure and runtime kernel or cache behavior. These historical samples had no controlled same-source, same-layout comparison that changed only `-b`/`-ub`; the earlier-to-later implementation improvements must not be attributed to batch size. The matched campaign at the top addresses that gap. Native GenAI supports chunked prefill, while its latency-oriented client configuration permits a much larger token budget; that does not establish the optimal llama.cpp microbatch size.
 
-Next work: extend in-place attention KV updates to split streams, profile the remaining single-sequence long-context decode gap, optimize fused convolution memory access and output layouts, and measure MTP performance on the current implementation. Cleanup validation and the unresolved MoE-slice numerical experiment are documented below.
+Next work: extend in-place attention KV updates to split streams, profile the remaining single-sequence long-context decode gap, optimize fused convolution memory access and output layouts, and separate warmed MTP serving performance from first-use graph loading. Cleanup validation and the unresolved MoE-slice numerical experiment are documented below.
 
 ## Current implementation
 
