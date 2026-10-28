@@ -1,9 +1,162 @@
-# Qwen3.6 UD multi-slot benchmark (2026-10-23)
+# Qwen3.6 UD multi-slot benchmark
+
+## Matched default and large batch measurements (2026-10-28)
+
+OV prefill benefits from larger batches in every completed one-slot and unified-KV comparison. The unresolved exception is unified 32K with four active sequences, which became extremely slow and was canceled. The completed Vulkan comparisons show no useful large-batch prefill advantage. Decode throughput is generally unchanged.
+
+<!-- batch-comparison:start -->
+Completed 47/60 originally planned timing rows. Selected campaign finished. Missing rows: 1 canceled, 12 skipped.
+
+This campaign compares default `-b 2048 -ub 512` with large `-b 8192 -ub 8192` on the same llama.cpp source. Default batch flags are omitted. OV uses fused in-place recurrent caches, GPU, native softplus, `q4_asym64_all`, `ENABLE_KV_4D=1`, enabled KV slicing and compiled-model cache-only loading. Vulkan uses the stored GGUF weights. GPU workloads run serially, with no elapsed-time cap.
+
+Each cell is **prefill seconds @ aggregate decode tokens/s**; four-slot rows show **one active / four active sequences**. Prompt lengths are 1024/8192/32768 tokens per sequence, with 512 generated tokens each. One-slot context is 131072 and four-slot context is 524288 total. MTP and shared-prompt processing are off; batched-bench uses random token IDs. Each timing row is one pass. Prefill includes first-use runtime shape/kernel preparation, excludes model loading and is not streaming TTFT. Decode excludes prefill.
+
+### Default batch: `-b / -ub = 2048 / 512`
+
+| Backend/configuration | 1K prompt | 8K prompt | 32K prompt |
+|---|---:|---:|---:|
+| OV fused `-npl 1` | 1.197 @ 34.61 | 7.703 @ 33.77 | 32.539 @ 24.51 |
+| OV fused `-npl 1,4` split | 8.959 @ 4.54 / 7.095 @ 27.22 | 10.842 @ 5.19 / 38.769 @ 23.06 | 43.922 @ 4.47 / 170.131 @ 14.54 |
+| OV fused `-npl 1,4 --kv-unified` | 1.158 @ 37.46 / 3.479 @ 91.95 | 7.224 @ 33.51 / 30.785 @ 71.41 | 30.326 @ 24.42 / 179.282 @ 40.84 |
+| Vulkan `-npl 1` | 1.591 @ 32.37 | 18.586 @ 30.69 | 253.293 @ 26.04 |
+| Vulkan `-npl 1,4` split | 1.454 @ 32.59 / 5.808 @ 73.90 | 18.586 @ 30.49 / 74.234 @ 66.32 | Skipped / Skipped |
+| Vulkan `-npl 1,4 --kv-unified` | 1.459 @ 32.56 / 5.844 @ 73.63 | 18.573 @ 30.76 / 74.996 @ 56.38 | Skipped / Skipped |
+
+OpenVINO recorded-process peak RSS: 21.30-21.31 GiB. Lowest sampled system MemAvailable: 11.45 GiB.
+
+Vulkan recorded-process peak RSS: 0.24-0.66 GiB. Lowest sampled system MemAvailable: 22.14 GiB.
+
+### Large batch: `-b / -ub = 8192 / 8192`
+
+| Backend/configuration | 1K prompt | 8K prompt | 32K prompt |
+|---|---:|---:|---:|
+| OV fused `-npl 1` | 1.072 @ 37.85 | 5.147 @ 33.68 | 22.989 @ 24.31 |
+| OV fused `-npl 1,4` split | 2.640 @ 4.53 / 4.896 @ 27.05 | 9.554 @ 5.10 / 41.408 @ 22.61 | 28.137 @ 4.44 / 181.780 @ 14.51 |
+| OV fused `-npl 1,4 --kv-unified` | 1.089 @ 37.33 / 2.402 @ 92.00 | 6.498 @ 33.46 / 25.233 @ 71.52 | 25.083 @ 24.38 / Canceled |
+| Vulkan `-npl 1` | 1.548 @ 32.42 | 24.700 @ 30.68 | Skipped |
+| Vulkan `-npl 1,4` split | 1.533 @ 32.41 / 9.641 @ 74.00 | 24.446 @ 30.81 / Skipped | Skipped / Skipped |
+| Vulkan `-npl 1,4 --kv-unified` | 1.562 @ 32.44 / 9.658 @ 72.78 | Skipped / Skipped | Skipped / Skipped |
+
+OpenVINO recorded-process peak RSS: 21.27-21.31 GiB. Lowest sampled system MemAvailable: 6.89 GiB.
+
+Vulkan recorded-process peak RSS: 0.55-0.66 GiB. Lowest sampled system MemAvailable: 19.64 GiB.
+
+Canceled `openvino/large/timed-fused-unified-32768`: Stopped with user approval after 2147.7 seconds of process wall time; the four-active timing row was incomplete and the last stack snapshot was inside prefill. Preserve the completed one-active row. Completed timing rows and sampled memory are retained; missing timings are not extrapolated.
+
+Canceled `vulkan/large/timed-vulkan-split-8192`: Stopped after the user approved a preliminary conclusion and skipping remaining unnecessary large-batch Vulkan tests. Completed timing rows and sampled memory are retained; missing timings are not extrapolated.
+
+Process RSS does not include every GPU/system allocation. Per-process command, timing and memory records are stored with the raw results.
+
+Raw artifacts: `/home/zijun/llama.cpp/tmp/batch-size-matrix-20261028`. Source patches, base commits and binary identities are recorded in the campaign metadata.
+
+<!-- batch-comparison:end -->
+
+### Interpretation
+
+Every completed OV one-slot and unified-KV prefill comparison improved with the larger batch, including unified KV with one active sequence at 32K. The unresolved exception is 32K with four active sequences, which became extremely slow and was canceled. Single-slot prefill improves as follows: 8K drops from 7.703 to 5.147 seconds (33% less), and 32K from 32.539 to 22.989 seconds (29% less). Unified four-active prefill also improves at 1K/8K, from 3.479/30.785 to 2.402/25.233 seconds (31%/18% less). Decode rates are generally unchanged. These are single-pass observations.
+
+Larger batches are not a universal improvement. Split four-active 8K/32K prefill is about 7% slower at 8192. Unified four-active 32K with 8192 was stopped with user approval after 2147.7 seconds of process wall time; its completed one-active row is retained. A stack snapshot mapped to the prefill call inside GPU inference, before decode timing, but did not identify the responsible kernel. Defaults are the safer choice for long multi-sequence prefill until this case is profiled. No missing prefill or decode rate is inferred from the process wall time.
+
+The Vulkan rows do not show a useful large-batch prefill advantage. One-slot 8K prefill increases from 18.586 to 24.700 seconds (33% more), and four-active 1K split/unified prefill increases from 5.808/5.844 to 9.641/9.658 seconds (about 65-66% more). Decode is nearly unchanged. This supports keeping Vulkan defaults for this workload; kernel optimization, dispatch/layout choices and first-use preparation need profiling before assigning a cause.
+
+With default batches, OV unified four-active decode is 91.95 t/s at 1K and 71.41 t/s at 8K, versus Vulkan split's 73.90/66.32 t/s and Vulkan unified's 73.63/56.38 t/s. OV is about 24%/8% ahead of the faster Vulkan layout in these two cases. At one-slot 32K, OV decode is about 5.9% below Vulkan (24.51 versus 26.04 t/s), while OV prefill is about 7.8 times faster (32.539 versus 253.293 seconds). Fresh Vulkan 32K multi-slot comparisons were deliberately skipped; the older references below remain historical.
+
+### Profiling limits and next work
+
+The canceled process had about 42.9 GiB of resident graphics GTT allocations in a Xe driver snapshot, which is not captured completely by process RSS. Dense attention masks scale as live KV span times microbatch tokens; at a fixed span, an 8192-token mask is 16 times larger than a 512-token mask. Mask construction/upload, attention kernel selection and first-use shape/kernel preparation are profiling candidates, not established causes. Two brief stack checks took less than a second combined; the process was otherwise allowed to run until cancellation. Diagnostics are saved as `ov-large-32k-stack.txt`, `ov-large-32k-prefill-call-site.txt` and `ov-large-32k-drm-fdinfo.txt` in the campaign artifact directory.
+
+The next priorities are to diagnose the large-batch unified 32K/four-active prefill slowdown, profile the remaining one-slot long-context attention/decode gap, and extend the upstream in-place attention KV update to split streams. The recurrent cache banks already have in-place fused convolution/GDN updates; their size depends on slots and snapshots rather than the attention context window. These comparisons do not isolate individual kernel times. New MTP performance measurements remain separate from this non-MTP campaign.
+
+### Reproduce the campaign
+
+This campaign measures both batch configurations on the current fused in-place implementation and a Vulkan build from the same llama.cpp source. The original matrix covers 1K/8K/32K prompts for one slot and four slots with split/unified KV, including one and four active sequences in each four-slot allocation. After enough preliminary data was available, the user approved skipping unnecessary remaining Vulkan large-batch tests and lengthy 32K multi-slot comparisons. Missing entries remain explicit. The 30-minute limit is removed. An 8192-token microbatch is a useful comparison point because one 8K prompt fits in it; it is not assumed to be optimal.
+
+```sh
+python3 ggml/src/ggml-openvino/dev_doc/benchmarks/qwen36_ud_batch_size_bench.py \
+  --openvino-binary /home/zijun/llama.cpp-inplace-perf/build/MtpOVPerf/bin/llama-batched-bench \
+  --vulkan-binary /home/zijun/llama.cpp-inplace-perf/build/VulkanBatchPerf/bin/llama-batched-bench \
+  --model "$HOME/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf" \
+  --output /home/zijun/llama.cpp/tmp/batch-size-matrix-20261028 \
+  --openvino-source /home/zijun/openvino \
+  --report ggml/src/ggml-openvino/dev_doc/QWEN36-UD-MULTISLOT-BENCHMARK.md
+```
+
+The runner populates the OV caches once per layout, shares them across batch settings, and resumes completed timing processes. The continuation used `--skip-canceled` to retain the explicitly canceled OV result and finish the remaining backend cases. Settings inherited through `LLAMA_ARG_*`, `GGML_OPENVINO_*`, `GGML_VULKAN_*` and `LD_PRELOAD` are cleared before each process; the recorded OV configuration is then applied. Batched-bench loads directly and does not use the server's automatic expert fitting. The narrowed `--skip-case` selection is saved in `metadata/skipped-cases.json` and reused when resuming this output directory; use a fresh output directory for a full rerun.
+
+## Historical conclusions and mixed-batch snapshot (2026-10-28)
+
+Unified KV with in-place attention and recurrent cache updates is the recommended OV GPU multi-slot configuration for this model. The current native path uses fused convolution and GDN; rotation and the experimental separate-convolution path are removed.
+
+- Split attention KV remains the largest performance problem. With one active sequence in four allocated slots, the latest 1K sample reaches 4.56 t/s split versus 38.40 t/s unified. Both use in-place recurrent caches; the upstream in-place attention KV fusion currently excludes split streams.
+- At default batch sizes, the combined upstream/backend changes raise unified four-active 32K decode from 7.72 to 40.79 aggregate t/s and reduce prefill from 1279.25 to 175.47 seconds. These improvements do not isolate in-place KV, recurrent cache handling or batch size as the sole cause.
+- The latest OV unified four-active 32K result is about 1.8% below the older Vulkan split reference, 41.53 t/s. The one-slot 32K OV result is about 5% below the older Vulkan one-slot reference. Vulkan unified four-active 32K remains unmeasured; source revisions and compressed weight representations differ between backends.
+- Separate convolution provides no consistent full-model advantage. At default-batch 32K, fused/separate four-active decode is 40.79/40.72 t/s, and fused prefill is faster in that sample. These single-pass differences do not establish a repeatable small decode speedup.
+- The earlier short-prompt MMLU server campaign showed MTP improving OV unified decode from 36.47 to 51.35 t/s for one request and from 21.73 to 25.91 t/s per request with four in flight. Those server measurements used the earlier rotation implementation. The current fused-only cleanup has passed functional MTP checks, but has no new 512-token server performance campaign.
+
+### Earlier mixed-batch snapshot
+
+Each entry is **prefill seconds @ aggregate decode tokens/s**. In four-slot rows, entries are **one active / four active sequences**. Prefill time is synchronized prompt evaluation time, not streaming TTFT; decode rates exclude prefill. MTP is off, prompts use random token IDs, and each completed row generates 512 tokens per sequence. One-slot context capacity is 131072; four-slot capacity is 524288 total.
+
+**Batch settings:** latest OV 1K/8K rows and one-slot/split 32K rows use `-b 8192 -ub 8192`. The OV unified 32K cell marked `[D]` uses defaults, `-b 2048 -ub 512`, with neither flag passed. Vulkan references use those defaults and come from the earlier 2026-10-23 source. This matrix collects the latest available rows; its prefill comparisons are not a matched batch-size experiment. The complete historical default-batch matrix remains under [Result matrices](#result-matrices).
+
+| Backend/configuration | 1K prompt | 8K prompt | 32K prompt | 64K prompt |
+|---|---:|---:|---:|---:|
+| OV fused `-npl 1` | 1.052 @ 38.82 | 5.596 @ 34.31 | 24.133 @ 24.66 | Not measured |
+| OV fused `-npl 1,4` split | 2.768 @ 4.56 / 4.113 @ 27.36 | 12.157 @ 5.17 / 88.200 @ 22.47 | 37.953 @ 4.47 / Skipped | Not measured / Not measured |
+| OV fused `-npl 1,4 --kv-unified` | 1.069 @ 38.40 / 2.421 @ 93.43 | 6.290 @ 33.98 / 29.394 @ 71.90 | 31.029 @ 24.57 / 175.468 @ 40.79 [D] | Not measured / Not measured |
+| Vulkan reference `-npl 1` | 1.498 @ 32.49 | 18.785 @ 30.59 | 255.503 @ 25.99 | 1013.906 @ 19.80 |
+| Vulkan reference `-npl 1,4` split | 1.508 @ 32.45 / 5.931 @ 72.39 | 18.901 @ 30.31 / 75.542 @ 65.11 | 258.362 @ 25.99 / 1021.572 @ 41.53 | Skipped / Skipped |
+| Vulkan reference `-npl 1,4 --kv-unified` | 1.492 @ 32.44 / 5.964 @ 71.82 | 18.785 @ 30.69 / 75.933 @ 55.31 | 254.584 @ 25.42 / Skipped | Skipped / Skipped |
+
+`Not measured` means no row for the latest OV implementation; some earlier OV 64K split measurements remain in the historical matrix. `Skipped` means an unfinished or canceled row. No missing value is extrapolated. Measured OV peak process RSS is about 21.3 GiB; it excludes some GPU/system allocations. Vulkan batched peak memory was not recorded.
+
+### Effect of batch size
+
+`-b` limits the logical batch submitted to llama.cpp. `-ub` limits each physical microbatch executed by the model; prompt processing may split one logical batch into several microbatches. Defaults are `-b 2048 -ub 512`.
+
+| Phase | Actual tokens in a model step | Expected effect of raising the limits to 8192 |
+|---|---|---|
+| Prefill | Up to the microbatch limit | Can materially change latency and throughput through fewer graph executions, different kernel/layout choices and larger temporary allocations. An 8K single prompt can fit one 8192-token microbatch rather than sixteen 512-token chunks. Larger is not necessarily faster. |
+| Non-MTP decode | One token per active sequence: 1 or 4 here | Little direct effect: both limits already fit each step. Setting 8192 does not turn a four-token decode step into an 8192-token step. |
+| Two-token MTP verification | Normally up to 3 tokens per active sequence: 12 with four active | Also well below the default 512-token microbatch limit. Raising the limits does not directly increase this verification batch. |
+
+Larger limits can still affect decode indirectly through reserved compute/output memory, memory pressure and runtime kernel or cache behavior. These historical samples had no controlled same-source, same-layout comparison that changed only `-b`/`-ub`; the earlier-to-later implementation improvements must not be attributed to batch size. The matched campaign at the top addresses that gap. Native GenAI supports chunked prefill, while its latency-oriented client configuration permits a much larger token budget; that does not establish the optimal llama.cpp microbatch size.
+
+Next work: extend in-place attention KV updates to split streams, profile the remaining single-sequence long-context decode gap, optimize fused convolution memory access and output layouts, and measure MTP performance on the current implementation. Cleanup validation and the unresolved MoE-slice numerical experiment are documented below.
+
+## Current implementation
+
+Current implementation after the convolution cleanup: `RecurrentConvCacheUpdate` always fuses depthwise convolution and takes nine inputs. The separate-convolution mode and `GGML_OPENVINO_SEPARATE_RECURRENT_CONV` switch are removed in both repositories. Unified KV is recommended for multi-slot OV GPU execution because the upstream in-place attention KV update supports that layout. Translation revision 12 requires rebuilding both repositories and repopulating compiled-model caches.
+
+The fused/separate comparisons below are historical measurements. Separate convolution showed no advantage in the unified-KV samples, so future work can focus on the fused computation. Historical runner commands require llama.cpp revision `626aae390`; the current runner runs fused convolution only. Existing timing rows are preserved.
+
+## Fused convolution cleanup and validation (2026-10-27)
+
+Validation and benchmarks used the working-tree patches over llama.cpp `626aae390` and OV `40d69210bf`, recorded with the binary identities in the campaign metadata. The inference changes are now committed as llama.cpp `da95d1b1c` (fused-convolution cleanup) and `c1ae62002` (zero-logits/sampler fixes) on `qwen-openvino-inplace-perf`, and OV `9299cc3d78` on `qwen-mtp-inplace-primary`. The binaries were built before these commits; the inference source is unchanged.
+
+The cleanup removes the eight-input history-only convolution contract, its GPU kernel branch, and the llama.cpp environment switch and benchmark selection. The native convolution op now requires weights and produces convolution plus the updated cache. Generic reset, reorder, snapshots, in-place USM binding and the fallback with private outputs retain their semantics. The new OV op specifications and both backend integration documents describe this contract. The summary script shows only fused rows for new runs and can still read archived comparisons.
+
+Short-prompt validation also exposed existing view-translation errors when a server prompt chunk updates recurrent caches but requests no logits. Integer MoE routing views could match the packed-activation and recurrent-state stride heuristics. Both heuristics now require floating-point inputs. GET_ROWS uses runtime-shape Reshapes to remove leading singleton dimensions, preserving zero dimensions that the GPU Squeeze conversion lost. `recurrent_no_logits_prefill` covers alternating batches with and without logits, changing active sequence counts, and zero/two rollback positions.
+
+The initial full-model MTP smoke returned the requested tokens but logged a missing sampler input when only one of four requests remained active. The local graph key used node counts and end names, which could match for different active sequence IDs even though their sampler row Parameters differed. Those Parameter names are now always included in the key. The top-k row regression adds a sequence-0-only -> sequence-1-only -> sequence-0-only transition; it reproduced the input-lookup failure before the fix.
+
+- Release builds of OpenVINO runtime/GPU plugin and llama.cpp server, batched benchmark and sampler test passed.
+- All 12 native cache-update GPU/core tests passed, including cycles, duplicates, overlapping windows, precision, host/device USM, reader restrictions and export/import.
+- The unchanged Qwen3.5-2B Q4_0 recurrent reset/copy/rollback test passed 50 replay comparisons; maximum relative logit error was 0.004191.
+- The extended Qwen3.5-2B Q4_0 `top_k_rows`, `top_k_rollback` and `top_k_hidden_rollback` regressions passed, including the active sampler-ID transition that failed before the cache-key fix. Numerical thresholds are unchanged.
+- The four-layer UD MoE slice passed `recurrent_no_logits_prefill` with `q4_asym64_all` and zero/two rollback positions. Its server test also completed one request and four concurrent requests, each generating 32 tokens.
+- The full target UD model passed one request followed by four concurrent requests, with MTP off and on. Each request processed 14 prompt tokens and generated exactly 32 tokens; responses contained the expected answer, and the successful logs contain no errors. All five MTP requests generated and accepted drafts.
+
+Full-model smoke settings: `llama-server -np 4 -c 8192 --kv-unified --temp 0`, default batch sizes, GPU, native softplus, `q4_asym64_all` and `GGML_OPENVINO_ENABLE_KV_4D=1`. KV slicing is enabled. MTP adds `--spec-type draft-mtp --spec-draft-n-max 2`. The checks use fresh compilation rather than cache-only mode. Successful commands, responses and logs are in `tmp/fused-conv-cleanup-20261027/target-final/mtp-off.*` and `tmp/fused-conv-cleanup-20261027/target-keyed/mtp-on.*`. The initial MTP attempt and its sampler error remain in `target-final/mtp-on.*` for reference.
+
+An additional experiment inserted a no-logits prefix into the numerical replay test on the four-layer MoE slice. It differed by 0.041318 at the first comparison and did not meet the existing 0.01 threshold. That experiment is not a numerical-equivalence result and is not included in the passed checks above. The original numerical test and threshold are unchanged; the focused regression tests the observed compute failure without asserting equivalence across different prefill chunk boundaries.
+
+Raw cleanup build/test logs are under `tmp/fused-conv-cleanup-20261027*`; server commands and responses are under `tmp/fused-conv-cleanup-20261027/` in the original llama.cpp workspace. These are functional checks, not replacements for the 512-token performance campaign. Validation is on the GPU stateless path; CPU, NPU and stateful execution were not retested.
 
 ## In-place KV and recurrent convolution rerun (2026-10-27)
 
-This is a separate campaign; earlier tables use the previous translation and
-`-b 2048 -ub 512`. The current code merges `origin/dev_backend_openvino`
+This historical campaign predates the fused-only cleanup above; its commands and mode switches require the recorded source revisions. Earlier tables use the previous translation and
+`-b 2048 -ub 512`. The measured code merges `origin/dev_backend_openvino`
 `0974aef91`, removes recurrent rotation, and compares fused convolution against
 history/QKV output plus ordinary GroupConvolution. No new server or Vulkan
 measurements are part of this rerun.
@@ -35,7 +188,7 @@ measurements are part of this rerun.
   The upstream merge, cache implementation and batch sizes all changed from the
   earlier campaign. These results do not isolate the effect of any one change.
 
-Reproducible runner: [qwen36_ud_inplace_batched.py](benchmarks/qwen36_ud_inplace_batched.py).
+Historical runner: [qwen36_ud_inplace_batched.py](benchmarks/qwen36_ud_inplace_batched.py) at revision `626aae390`.
 Raw commands, outputs, memory samples and status:
 `tmp/inplace-kv-retest-20261027/target/` in the original llama.cpp workspace.
 The six compiled blobs total approximately 108 GiB on disk. They are shared
@@ -68,7 +221,7 @@ export GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY=1
 "$BINARY" -m "$MODEL" -c 524288 -npp 1024,8192,32768 -ntg 512 -npl 1,4 --kv-unified -b 8192 -ub 8192
 ```
 
-### Validation
+### Validation of the historical comparison
 
 All 13 native shape, attribute and GPU test cases pass, including history-only
 convolution, cyclic/duplicate reorders, overlapping windows/snapshots, mixed
@@ -215,9 +368,7 @@ Separate convolution improves some prefill cases, but not all. Four-active split
 8K prefill takes 27.930 seconds versus fused 88.200; unified 8K takes 24.270
 versus 29.394. Conversely, one-slot 32K takes 30.124 seconds versus fused 24.133.
 First-use shape/kernel preparation and different memory-pressure samples remain
-in these timings. Keep fused convolution as the default and retain the explicit
-separate mode for controlled follow-up; a universal long-prefill selection rule
-is not justified by this matrix.
+in these timings. The later default-batch unified-KV results also show no separate-convolution advantage, so the cleanup above removes that mode and retains fused convolution. A universal long-prefill selection rule is not justified by this matrix.
 
 The largest decode gap remains split attention KV. With one active sequence in
 four slots, fused 1K decode is 4.56 t/s split versus 38.40 unified, although both
@@ -228,8 +379,7 @@ its layout as the next priority; it does not isolate individual copies or
 kernels. Extend the 4D KV translation and StatelessKV fusion to split streams,
 then measure actual binding/copy traffic before assigning the residual gap.
 
-For recurrent computation, optimize fused convolution output stores and layouts,
-or remove the separate path's materialization/reorder costs. The kernel control
+For recurrent computation, optimize fused convolution output stores and layouts. The historical kernel control
 shows why ordinary convolution arithmetic alone cannot predict full-chain
 latency. Both variants retain staged in-place handling for cycles and duplicate
 sources, with private output/copy-back for incompatible caller bindings.
@@ -238,7 +388,7 @@ sources, with private output/copy-back for incompatible caller bindings.
 
 ## Default-batch completion of the OV 32K cases (2026-10-27)
 
-This continuation measures the four unified-KV rows left unfinished by the
+This historical continuation uses the pre-cleanup runner, including its removed `--mode` option. It measures the four unified-KV rows left unfinished by the
 30-minute large-batch campaign. The initial plan also included three split-KV
 rows, but the user skipped those comparisons until the split KV cache bottleneck
 is addressed. Vulkan and 64K cases are outside this continuation. Model,
@@ -353,6 +503,8 @@ The OpenVINO binary was rebuilt after reverting an experimental input fallback.
 
 <!-- compact-matrices:start -->
 ## Result matrices
+
+These are historical measurements from the 2026-10-23 implementation with recurrent rotation and default batch sizes, `-b 2048 -ub 512`. See the overview for the latest fused in-place OV rows and their batch settings. The tables below retain the original completed measurements.
 
 The campaign is finished: 32 batched timing rows, 16 original server cases and
 8 Vulkan server reruns completed. Eight remaining batched rows were canceled.

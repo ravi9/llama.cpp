@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Populate caches, then run the bounded in-place convolution comparison serially."""
+"""Populate caches, then benchmark fused in-place recurrence serially."""
 import argparse
 import json
 import os
@@ -16,27 +16,22 @@ def memory_available_kib():
     return None
 
 
-def run_case(binary, model, output, mode, layout, prompt, decode, cache_only, deadline=None, probe=None,
-             default_batch=False, cache_dir=None):
-    name = f'{"timed" if cache_only else "prime"}-{mode}-{layout}-{prompt}'
+def run_case(binary, model, output, layout, prompt, decode, cache_only, deadline=None, probe=None,
+             default_batch=False, cache_dir=None, backend='openvino', phase=None):
+    phase = phase or ('timed' if cache_only else 'prime')
+    name = f'{phase}-{"fused" if backend == "openvino" else "vulkan"}-{layout}-{prompt}'
     cache = cache_dir if cache_dir is not None else output / 'model-cache'
     spill = output / 'spill'
-    cache.mkdir(exist_ok=True)
-    spill.mkdir(exist_ok=True)
-    env = os.environ.copy()
-    if default_batch:
-        env.pop('LLAMA_ARG_BATCH', None)
-        env.pop('LLAMA_ARG_UBATCH', None)
-    for key in ('GGML_OPENVINO_DISABLE_KV_SLICE', 'GGML_OPENVINO_RECURRENT_CACHE_INPLACE',
-                'GGML_OPENVINO_SEPARATE_RECURRENT_CONV', 'GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY'):
-        env.pop(key, None)
-    env.update(GGML_OPENVINO_DEVICE='GPU', GGML_OPENVINO_NATIVE_SOFTPLUS='1',
-               GGML_OPENVINO_REQUANT_KQUANT='q4_asym64_all', GGML_OPENVINO_ENABLE_KV_4D='1',
-               GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR=str(cache), GGML_OPENVINO_SPILL_DIR=str(spill))
-    if mode == 'separate':
-        env['GGML_OPENVINO_SEPARATE_RECURRENT_CONV'] = '1'
-    if cache_only:
-        env['GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY'] = '1'
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(('GGML_OPENVINO_', 'GGML_VULKAN_', 'LLAMA_ARG_')) and key != 'LD_PRELOAD'}
+    if backend == 'openvino':
+        cache.mkdir(parents=True, exist_ok=True)
+        spill.mkdir(parents=True, exist_ok=True)
+        env.update(GGML_OPENVINO_DEVICE='GPU', GGML_OPENVINO_NATIVE_SOFTPLUS='1',
+                   GGML_OPENVINO_REQUANT_KQUANT='q4_asym64_all', GGML_OPENVINO_ENABLE_KV_4D='1',
+                   GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR=str(cache), GGML_OPENVINO_SPILL_DIR=str(spill))
+        if cache_only:
+            env['GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY'] = '1'
     if probe:
         env['LD_PRELOAD'] = str(probe)
     cmd = [str(binary), '-m', str(model), '-c', '131072' if layout == 'one' else '524288',
@@ -46,9 +41,10 @@ def run_case(binary, model, output, mode, layout, prompt, decode, cache_only, de
     cmd.extend(['--output-format', 'jsonl'])
     if layout == 'unified':
         cmd.append('--kv-unified')
-    meta = dict(name=name, mode=mode, layout=layout, prompt=prompt, decode=decode, command=cmd,
+    meta = dict(name=name, mode='fused' if backend == 'openvino' else 'gguf', backend=backend,
+                layout=layout, prompt=prompt, decode=decode, command=cmd,
                 default_batch=default_batch, requested_parallel=cmd[cmd.index('-npl') + 1],
-                environment={k: v for k, v in env.items() if k.startswith('GGML_OPENVINO_')},
+                environment={k: v for k, v in env.items() if k.startswith(('GGML_OPENVINO_', 'GGML_VULKAN_'))},
                 initial_available_kib=memory_available_kib())
     (output / f'{name}.command.json').write_text(json.dumps(meta, indent=2) + '\n')
     started = time.monotonic()
@@ -65,7 +61,8 @@ def run_case(binary, model, output, mode, layout, prompt, decode, cache_only, de
             except FileNotFoundError:
                 pass
             available = memory_available_kib()
-            minimum_available = min(minimum_available, available)
+            if available is not None:
+                minimum_available = available if minimum_available is None else min(minimum_available, available)
             if deadline is not None and time.monotonic() >= deadline:
                 timed_out = True
                 os.killpg(proc.pid, signal.SIGTERM)
@@ -97,8 +94,8 @@ def main():
     parser.add_argument('--model', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--phase', choices=('prime', 'timed'), required=True)
-    parser.add_argument('--minutes', type=float, default=30)
-    parser.add_argument('--mode', choices=('fused', 'separate'))
+    parser.add_argument('--minutes', type=float, default=30, help='Timed-run limit; zero disables the limit.')
+    parser.add_argument('--backend', choices=('openvino', 'vulkan'), default='openvino')
     parser.add_argument('--layout', choices=('one', 'split', 'unified'))
     parser.add_argument('--default-batch', action='store_true', help='Omit batch flags and use the binary defaults.')
     parser.add_argument('--prompts', type=int, nargs='+', help='Prompt lengths to run instead of the phase defaults.')
@@ -106,21 +103,21 @@ def main():
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    modes = [args.mode] if args.mode else ['fused', 'separate']
     layouts = [args.layout] if args.layout else ['one', 'split', 'unified']
-    deadline = time.monotonic() + args.minutes * 60 if args.phase == 'timed' else None
+    deadline = time.monotonic() + args.minutes * 60 if args.phase == 'timed' and args.minutes > 0 else None
     cache_dir = args.cache_dir.resolve() if args.cache_dir else None
     for prompt in (args.prompts or ([16] if args.phase == 'prime' else [1024, 8192, 32768])):
         for layout in layouts:
-            for mode in modes:
-                if deadline is not None and time.monotonic() >= deadline:
-                    print('Benchmark deadline reached; remaining cases are skipped.', flush=True)
-                    return
-                result = run_case(args.binary.resolve(), args.model.resolve(), output, mode, layout, prompt,
-                                  1 if args.phase == 'prime' else 512, args.phase == 'timed', deadline,
-                                  default_batch=args.default_batch, cache_dir=cache_dir)
-                if result['exit_code'] != 0 and not result['timed_out']:
-                    raise SystemExit(f'{result["name"]} failed; inspect its raw log before continuing.')
+            if deadline is not None and time.monotonic() >= deadline:
+                print('Benchmark deadline reached; remaining cases are skipped.', flush=True)
+                return
+            result = run_case(args.binary.resolve(), args.model.resolve(), output, layout, prompt,
+                              1 if args.phase == 'prime' else 512,
+                              args.phase == 'timed' and args.backend == 'openvino', deadline,
+                              default_batch=args.default_batch, cache_dir=cache_dir,
+                              backend=args.backend, phase=args.phase)
+            if result['exit_code'] != 0 and not result['timed_out']:
+                raise SystemExit(f'{result["name"]} failed; inspect its raw log before continuing.')
 
 
 if __name__ == '__main__':
