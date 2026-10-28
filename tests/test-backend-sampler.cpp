@@ -1158,7 +1158,8 @@ static void test_backend_top_k_rows_impl(const test_params & params, uint32_t n_
         bool output;
     };
     const batch_case cases[] = {{{2, 2}, true}, {{1, 1}, true}, {{2, 0}, false},
-                                {{0, 3}, true}, {{2, 1}, true}, {{1, 1}, true}, {{1, 0}, true}};
+                                {{0, 3}, true}, {{2, 1}, true}, {{1, 1}, true}, {{1, 0}, true},
+                                {{0, 1}, true}, {{1, 0}, true}};
     int32_t positions[2] = {0, 0};
     int case_index = 0;
     for (const auto & c : cases) {
@@ -1348,6 +1349,33 @@ static void test_backend_recurrent_slots(const test_params & params) {
         run({1, 1, 1, 1});
     }
     printf("backend recurrent slot reset/copy/rollback test PASSED\n");
+}
+
+static void test_backend_recurrent_no_logits_prefill(const test_params & params) {
+    std::vector<llama_sampler_seq_config> configs;
+    for (uint32_t rollback : {0u, 2u}) {
+        test_context ctx(params, configs, 4, 12, 16, 3, rollback);
+        // Alternate prefill without logits and logits batches on the same context.
+        for (int step = 0; step < 4; ++step) {
+            common_batch batch(ctx.ctx.get());
+            const int sequences = step == 3 ? 1 : 4;
+            const bool logits = step % 2 != 0;
+            for (int seq = 0; seq < sequences; ++seq) {
+                batch.add((100 + step * 4 + seq) % ctx.n_vocab, step, seq, logits);
+            }
+            GGML_ASSERT(llama_process(ctx.ctx.get(), LLAMA_PROCESS_TYPE_DECODE, batch.get()) == 0);
+            if (logits) {
+                for (int seq = 0; seq < sequences; ++seq) {
+                    const float * values = llama_get_logits_ith(ctx.ctx.get(), seq);
+                    GGML_ASSERT(values);
+                    for (int i = 0; i < ctx.n_vocab; ++i) {
+                        GGML_ASSERT(std::isfinite(values[i]));
+                    }
+                }
+            }
+        }
+    }
+    printf("backend recurrent prefill without logits test PASSED\n");
 }
 
 static float find_backend_logit(const backend_sampler_output & output, llama_token token) {
@@ -2317,6 +2345,7 @@ static const backend_test_case BACKEND_TESTS[] = {
     { "top_k_rollback",  test_backend_top_k_rows_rollback,      false },
     { "top_k_hidden_rollback", test_backend_top_k_hidden_rollback, false },
     { "recurrent_slots", test_backend_recurrent_slots, false },
+    { "recurrent_no_logits_prefill", test_backend_recurrent_no_logits_prefill, false },
 };
 
 // TODO: add usage, examples

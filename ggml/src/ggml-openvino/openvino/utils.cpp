@@ -463,8 +463,9 @@ ov::Output<ov::Node> process_view_input_new(const NodeContext & context, int inp
         return input;
     }
 
+    // Integer router views can share these strides when their row count is zero.
     // Packed projections can store query and gate in separate halves of each head.
-    if (!context.is_static() && view_input_size == 1) {
+    if (!context.is_static() && view_input_size == 1 && input.get_element_type().is_real()) {
         const auto source = context.get_view_input_src_ggml_shape(input_index, 0);
         const auto view = context.get_view_input_ggml_shape(input_index, 0);
         const auto source_stride = context.get_view_input_src_stride(input_index, 0);
@@ -495,7 +496,8 @@ ov::Output<ov::Node> process_view_input_new(const NodeContext & context, int inp
         }
     }
 
-    if (!context.is_static() && view_input_size == 1 && context.has_input("s_copy_active_slot_len")) {
+    if (!context.is_static() && view_input_size == 1 && input.get_element_type().is_real() &&
+        context.has_input("s_copy_active_slot_len")) {
         const auto source = context.get_view_input_src_ggml_shape(input_index, 0);
         const auto view = context.get_view_input_ggml_shape(input_index, 0);
         const auto source_stride = context.get_view_input_src_stride(input_index, 0);
