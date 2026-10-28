@@ -66,6 +66,7 @@ def get_server(path, log):
         return server
     except BaseException:
         if 'server' in locals():
+            print('Server exit status:', server['process'].poll(), flush=True)
             server['process'].terminate()
             server['process'].wait()
         raise
@@ -95,9 +96,12 @@ if backend == 'ov':
         'GGML_OPENVINO_DEVICE': 'GPU',
         'GGML_OPENVINO_NATIVE_SOFTPLUS': '1',
         'GGML_OPENVINO_REQUANT_KQUANT': 'q4_asym64_all',
+        'GGML_OPENVINO_ENABLE_KV_4D': '1',
         'GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR': os.environ.get('UD_COMPILED_CACHE', str(root / 'tmp/mtp-regression-20261022/rotation-cache')),
         'GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY': os.environ.get('UD_CACHE_ONLY', '1'),
     })
+    if os.environ.get('UD_SPILL_DIR'):
+        os.environ['GGML_OPENVINO_SPILL_DIR'] = os.environ['UD_SPILL_DIR']
 else:
     binary = Path(os.environ.get('UD_VULKAN_BIN_DIR', str(root / 'build/vulkan/bin'))) / 'llama-server'
 if mode == 'mtp':
@@ -124,6 +128,8 @@ assert len(responses) == n_prompts, len(responses)
 assert all(r['timings']['predicted_n'] == n_predict for r in responses)
 assert all(r['events'][-1].get('stop') and r['events'][-1]['tokens_predicted'] == n_predict for r in responses)
 assert all(len(r['token_arrival_times']) == n_predict for r in responses)
+if mode == 'mtp':
+    assert all(r['timings'].get('draft_n', 0) > 0 for r in responses), 'MTP must draft tokens for every request'
 server_log = (out / 'server.log').read_text()
 assert 'missing or incompatible compiled model' not in server_log, 'Missing draft signatures invalidate MTP timing'
 assert 'returned -3' not in server_log, 'Draft computation failed'

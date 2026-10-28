@@ -4,6 +4,74 @@ import argparse
 import json
 from pathlib import Path
 import re
+import statistics
+
+
+def summarize_mmlu(output, report=None):
+    rows = []
+    for mode in ('off', 'mtp'):
+        for concurrency in (1, 4):
+            name = f'ov-unified-{mode}-c{concurrency}'
+            directory = output / name
+            if not (directory / 'complete.json').exists():
+                continue
+            responses = [json.loads(path.read_text()) for path in sorted((directory / 'responses').glob('request-*.json'))]
+            assert len(responses) == 8
+            assert all(response['timings']['predicted_n'] == 512 for response in responses)
+            assert all(len(response['token_arrival_times']) == 512 for response in responses)
+            log = (output / f'{name}.log').read_text()
+            duration_match = re.search(r'Benchmark duration:\s+([\d.]+)', log)
+            if duration_match is None:
+                raise ValueError(f'Missing benchmark duration for {name}.')
+            duration = float(duration_match.group(1))
+            assert duration > 0
+            drafted = sum(response['timings'].get('draft_n', 0) for response in responses)
+            accepted = sum(response['timings'].get('draft_n_accepted', 0) for response in responses)
+            assert mode != 'mtp' or all(response['timings'].get('draft_n', 0) > 0 for response in responses)
+            ttfts = [response['token_arrival_times'][0] - response['submitted_at'] for response in responses]
+            rows.append(dict(mode=mode, concurrency=concurrency, requests=len(responses),
+                             prompt_tokens=[response['timings']['prompt_n'] for response in responses],
+                             ttft=statistics.mean(ttfts), ttft_median=statistics.median(ttfts), ttft_max=max(ttfts),
+                             decode_tps=statistics.mean(response['timings']['predicted_per_second'] for response in responses),
+                             duration=duration, end_to_end_tps=4096 / duration,
+                             drafted=drafted, accepted=accepted))
+    (output / 'server-summary.json').write_text(json.dumps(rows, indent=2) + '\n')
+    lookup = {(row['mode'], row['concurrency']): row for row in rows}
+    lines = [f'Completed {len(rows)}/4 current OV unified-KV MMLU cases.', '',
+             'The target UD model uses the current fused in-place GPU backend, `q4_asym64_all`, native softplus, `ENABLE_KV_4D=1`, enabled KV slicing and compiled-model cache-only loading. Every server has `-np 4 -c 524288`, unified KV and default `-b 2048 -ub 512`; columns distinguish client concurrency from server slot count. MTP uses two draft tokens.', '',
+             'Each case sends the same first eight local MMLU question texts with the native chat template, greedy sampling, `ignore_eos=true`, `cache_prompt=false`, and exactly 512 generated tokens per request. This is a throughput sample using natural text, not an MMLU accuracy evaluation.', '',
+             '| MTP | Requests in flight | TTFT mean / median (s) | Decode t/s per request, excludes prefill | End-to-end aggregate t/s, includes prefill | Draft accepted / generated |',
+             '|---|---:|---:|---:|---:|---:|']
+    for mode in ('off', 'mtp'):
+        for concurrency in (1, 4):
+            row = lookup.get((mode, concurrency))
+            values = [f'{row["ttft"]:.3f} / {row["ttft_median"]:.3f}', f'{row["decode_tps"]:.2f}', f'{row["end_to_end_tps"]:.2f}',
+                      f'{row["accepted"]}/{row["drafted"]} ({row["accepted"] / row["drafted"]:.1%})' if row['drafted'] else '-'] if row else ['Pending'] * 4
+            lines.append(f'| {"On" if mode == "mtp" else "Off"} | {concurrency} | ' + ' | '.join(values) + ' |')
+    lines.extend(['', 'TTFT is measured from client submission to the first counted token arrival. Decode is the mean native server-reported rate per request; four-request values are per request, not aggregate. End-to-end throughput is 4096 generated tokens divided by the harness wall duration, including prefill and scheduling. That duration is printed to 0.01-second precision. Cache preparation and server startup are excluded. First-use compiled-graph import and runtime preparation during requests are included; no request warmup precedes the eight measured questions. TTFT shows both mean and median to expose outliers. Draft acceptance uses native timing counters. Streaming may group buffered tokens at the same observed arrival time.', ''])
+    if rows:
+        lengths = rows[0]['prompt_tokens']
+        assert all(row['prompt_tokens'] == lengths for row in rows)
+        lines.extend([f'Templated prompt lengths: {min(lengths)}-{max(lengths)} tokens, mean {statistics.mean(lengths):.2f}.', ''])
+    if len(rows) == 4:
+        lines.extend(['Native decode comparison, mean tokens/s per request:', '',
+                      '| Requests in flight | MTP off -> on | Change |',
+                      '|---|---:|---:|'])
+        for concurrency in (1, 4):
+            before = lookup[('off', concurrency)]['decode_tps']
+            after = lookup[('mtp', concurrency)]['decode_tps']
+            lines.append(f'| {concurrency} | {before:.2f} -> {after:.2f} | {after / before - 1:+.1%} |')
+        lines.append('')
+    lines.extend([f'Raw commands, provenance, logs, response timings and stream arrivals: `{output}`.', ''])
+    section = '\n'.join(lines)
+    (output / 'server-matrix.md').write_text(section + '\n')
+    if report:
+        text, count = re.subn(r'(?s)(<!-- mmlu-current:start -->\n).*?(<!-- mmlu-current:end -->)',
+                             lambda match: match[1] + section + '\n' + match[2], report.read_text())
+        if count != 1:
+            raise ValueError('Expected one current-MMLU marker pair in the report.')
+        report.write_text(text)
+    print(f'Updated current MMLU server table: {len(rows)}/4 cases.', flush=True)
 
 
 def summarize_batch_comparison(output, report=None, finished=False):
@@ -153,9 +221,13 @@ def main():
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--report', type=Path)
     parser.add_argument('--finished', action='store_true')
+    parser.add_argument('--mmlu', action='store_true', help='Summarize current OV unified-KV MMLU server cases.')
     parser.add_argument('--batch-comparison', action='store_true', help='Summarize the matched default/large OV and Vulkan campaign.')
     parser.add_argument('--default-continuation', action='store_true', help='Summarize the four archived default-batch OV unified-KV 32K continuation rows.')
     args = parser.parse_args()
+    if args.mmlu:
+        summarize_mmlu(args.output, args.report)
+        return
     if args.batch_comparison:
         summarize_batch_comparison(args.output, args.report, args.finished)
         return
