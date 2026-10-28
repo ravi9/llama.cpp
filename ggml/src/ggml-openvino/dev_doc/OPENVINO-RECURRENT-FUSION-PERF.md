@@ -3,7 +3,7 @@
 The measurements below are historical. The current in-place implementation and
 the fused/separate convolution rerun are documented in
 [the 2026-10-27 benchmark campaign](QWEN36-UD-MULTISLOT-BENCHMARK.md#in-place-kv-and-recurrent-convolution-rerun-2026-10-27).
-The current code removes the recurrent rotation ops and buffer banks.
+The current code removes the recurrent rotation ops, buffer banks and separate-convolution mode. `RecurrentConvCacheUpdate` always takes nine inputs, including depthwise weights; see the linked report for cleanup validation and translation revision 12.
 
 2026-10-21. This work supports Qwen3.5 and Qwen3.6 (`qwen35`/`qwen35moe`) in
 llama.cpp's OpenVINO backend, including multi-slot llama-server and draft-MTP

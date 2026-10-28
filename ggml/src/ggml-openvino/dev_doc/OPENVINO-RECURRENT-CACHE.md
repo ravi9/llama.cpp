@@ -3,12 +3,12 @@
 Dynamic stateless GPU graphs use the independent `RecurrentConvCacheUpdate` and
 `RecurrentGatedDeltaNetUpdate` ops for Qwen3.5/Qwen3.6 in llama.cpp. In-place USM
 bindings are primary; private output and copy-back handle incompatible bindings.
-There are no rotation banks. `GGML_OPENVINO_SEPARATE_RECURRENT_CONV=1` selects
-history/QKV output plus ordinary GroupConvolution. See the backend README for
-current settings and the multislot report for the new benchmark campaign.
+The convolution op always includes depthwise computation; separate history/QKV
+output and rotation banks are removed. See the backend README for current
+settings and the multislot report for the benchmark comparisons.
 
 The remaining sections are historical measurements and design notes. Their
-rotation ops, opt-in in-place flag and branch layout describe earlier versions.
+rotation ops, separate-convolution mode, opt-in in-place flag and branch layout describe earlier versions.
 
 ---
 

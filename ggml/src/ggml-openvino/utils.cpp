@@ -170,14 +170,9 @@ static uint64_t ggml_openvino_model_cache_extra_cfg(bool stateful, bool recurren
                                         ggml_openvino_getenv_int("GGML_OPENVINO_MANUAL_GQA_ATTN") > 0 :
                                         ggml_openvino_is_gpu();
 
-    uint64_t extra_cfg = 11;  // Stable in-place caches and optional separate convolution.
+    uint64_t extra_cfg = 12;  // Fused convolution with stable in-place caches.
 #ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
     extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_FUSED_RECURRENCE") ? 0u : 1u);
-#else
-    extra_cfg = extra_cfg * 131;
-#endif
-#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
-    extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_SEPARATE_RECURRENT_CONV") ? 1u : 0u);
 #else
     extra_cfg = extra_cfg * 131;
 #endif
