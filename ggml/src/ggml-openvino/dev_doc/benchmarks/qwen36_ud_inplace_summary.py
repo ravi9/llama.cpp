@@ -7,6 +7,17 @@ import re
 
 
 def summarize_batch_comparison(output, report=None, finished=False):
+    reference = {}
+    if report:
+        text = report.read_text()
+        if '<!-- vulkan-default-reference:2026-10-23 -->' in text:
+            historical = text.split('<!-- compact-matrices:start -->', 1)[1].split('### Server:', 1)[0]
+            for line in historical.splitlines():
+                if line.startswith('| Vulkan `'):
+                    cells = [cell.strip() for cell in line.split('|')[1:-1]]
+                    reference[cells[0]] = cells[1:4]
+            if len(reference) != 3:
+                raise ValueError('Expected three historical Vulkan default-batch rows.')
     observations = {}
     complete = 0
     selection = output / 'metadata' / 'skipped-cases.json'
@@ -43,6 +54,8 @@ def summarize_batch_comparison(output, report=None, finished=False):
         if missing:
             lines[0] += ' Missing rows: ' + ', '.join(f'{count} {state.lower()}' for state, count in missing.items()) + '.'
     labels = {'one': '`-npl 1`', 'split': '`-npl 1,4` split', 'unified': '`-npl 1,4 --kv-unified`'}
+    if reference:
+        lines.extend([f'The default-batch Vulkan rows below use the 2026-10-23 Release build at `dd06588b1`, selected as the reference because the current-build results were similar. OV and large-batch Vulkan rows use the current campaign. This displayed comparison spans source revisions; the {complete} measured campaign rows and their original values remain in the raw artifacts. Historical reference rows do not increase the campaign completion count.', ''])
     for batch, settings in [('default', '2048 / 512'), ('large', '8192 / 8192')]:
         lines.extend([f'### {batch.capitalize()} batch: `-b / -ub = {settings}`', '',
                       '| Backend/configuration | 1K prompt | 8K prompt | 32K prompt |',
@@ -55,9 +68,15 @@ def summarize_batch_comparison(output, report=None, finished=False):
                     cells.append(' / '.join(f'{rows[pl]["t_pp"]:.3f} @ {rows[pl]["speed_tg"]:.2f}'
                                             if pl in rows else state
                                             for pl in ((1,) if layout == 'one' else (1, 4))))
-                lines.append(f'| {"OV fused" if backend == "openvino" else "Vulkan"} {labels[layout]} | ' + ' | '.join(cells) + ' |')
+                if reference and backend == 'vulkan' and batch == 'default':
+                    cells = reference[f'Vulkan {labels[layout]}']
+                backend_label = 'OV fused' if backend == 'openvino' else ('Vulkan reference' if reference and batch == 'default' else 'Vulkan')
+                lines.append(f'| {backend_label} {labels[layout]} | ' + ' | '.join(cells) + ' |')
         lines.append('')
         for backend in ('openvino', 'vulkan'):
+            if reference and backend == 'vulkan' and batch == 'default':
+                lines.extend(['Memory usage was not recorded for the historical Vulkan reference rows. Current-build memory records remain in the raw artifacts.', ''])
+                continue
             results = [result for (name, size, _, _), (_, result, _) in observations.items()
                        if name == backend and size == batch and result]
             if results:

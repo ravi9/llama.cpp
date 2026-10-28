@@ -1,15 +1,18 @@
 # Qwen3.6 UD multi-slot benchmark
 
-## Matched default and large batch measurements (2026-10-28)
+## Batch-size measurements with a historical Vulkan reference (2026-10-28)
 
 OV prefill benefits from larger batches in every completed one-slot and unified-KV comparison. The unresolved exception is unified 32K with four active sequences, which became extremely slow and was canceled. The completed Vulkan comparisons show no useful large-batch prefill advantage. Decode throughput is generally unchanged.
 
+<!-- vulkan-default-reference:2026-10-23 -->
 <!-- batch-comparison:start -->
 Completed 47/60 originally planned timing rows. Selected campaign finished. Missing rows: 1 canceled, 12 skipped.
 
 This campaign compares default `-b 2048 -ub 512` with large `-b 8192 -ub 8192` on the same llama.cpp source. Default batch flags are omitted. OV uses fused in-place recurrent caches, GPU, native softplus, `q4_asym64_all`, `ENABLE_KV_4D=1`, enabled KV slicing and compiled-model cache-only loading. Vulkan uses the stored GGUF weights. GPU workloads run serially, with no elapsed-time cap.
 
 Each cell is **prefill seconds @ aggregate decode tokens/s**; four-slot rows show **one active / four active sequences**. Prompt lengths are 1024/8192/32768 tokens per sequence, with 512 generated tokens each. One-slot context is 131072 and four-slot context is 524288 total. MTP and shared-prompt processing are off; batched-bench uses random token IDs. Each timing row is one pass. Prefill includes first-use runtime shape/kernel preparation, excludes model loading and is not streaming TTFT. Decode excludes prefill.
+
+The default-batch Vulkan rows below use the 2026-10-23 Release build at `dd06588b1`, selected as the reference because the current-build results were similar. OV and large-batch Vulkan rows use the current campaign. This displayed comparison spans source revisions; the 47 measured campaign rows and their original values remain in the raw artifacts. Historical reference rows do not increase the campaign completion count.
 
 ### Default batch: `-b / -ub = 2048 / 512`
 
@@ -18,13 +21,13 @@ Each cell is **prefill seconds @ aggregate decode tokens/s**; four-slot rows sho
 | OV fused `-npl 1` | 1.197 @ 34.61 | 7.703 @ 33.77 | 32.539 @ 24.51 |
 | OV fused `-npl 1,4` split | 8.959 @ 4.54 / 7.095 @ 27.22 | 10.842 @ 5.19 / 38.769 @ 23.06 | 43.922 @ 4.47 / 170.131 @ 14.54 |
 | OV fused `-npl 1,4 --kv-unified` | 1.158 @ 37.46 / 3.479 @ 91.95 | 7.224 @ 33.51 / 30.785 @ 71.41 | 30.326 @ 24.42 / 179.282 @ 40.84 |
-| Vulkan `-npl 1` | 1.591 @ 32.37 | 18.586 @ 30.69 | 253.293 @ 26.04 |
-| Vulkan `-npl 1,4` split | 1.454 @ 32.59 / 5.808 @ 73.90 | 18.586 @ 30.49 / 74.234 @ 66.32 | Skipped / Skipped |
-| Vulkan `-npl 1,4 --kv-unified` | 1.459 @ 32.56 / 5.844 @ 73.63 | 18.573 @ 30.76 / 74.996 @ 56.38 | Skipped / Skipped |
+| Vulkan reference `-npl 1` | 1.498 @ 32.49 | 18.785 @ 30.59 | 255.503 @ 25.99 |
+| Vulkan reference `-npl 1,4` split | 1.508 @ 32.45 / 5.931 @ 72.39 | 18.901 @ 30.31 / 75.542 @ 65.11 | 258.362 @ 25.99 / 1021.572 @ 41.53 |
+| Vulkan reference `-npl 1,4 --kv-unified` | 1.492 @ 32.44 / 5.964 @ 71.82 | 18.785 @ 30.69 / 75.933 @ 55.31 | 254.584 @ 25.42 / Skipped |
 
 OpenVINO recorded-process peak RSS: 21.30-21.31 GiB. Lowest sampled system MemAvailable: 11.45 GiB.
 
-Vulkan recorded-process peak RSS: 0.24-0.66 GiB. Lowest sampled system MemAvailable: 22.14 GiB.
+Memory usage was not recorded for the historical Vulkan reference rows. Current-build memory records remain in the raw artifacts.
 
 ### Large batch: `-b / -ub = 8192 / 8192`
 
@@ -57,9 +60,9 @@ Every completed OV one-slot and unified-KV prefill comparison improved with the 
 
 Larger batches are not a universal improvement. Split four-active 8K/32K prefill is about 7% slower at 8192. Unified four-active 32K with 8192 was stopped with user approval after 2147.7 seconds of process wall time; its completed one-active row is retained. A stack snapshot mapped to the prefill call inside GPU inference, before decode timing, but did not identify the responsible kernel. Defaults are the safer choice for long multi-sequence prefill until this case is profiled. No missing prefill or decode rate is inferred from the process wall time.
 
-The Vulkan rows do not show a useful large-batch prefill advantage. One-slot 8K prefill increases from 18.586 to 24.700 seconds (33% more), and four-active 1K split/unified prefill increases from 5.808/5.844 to 9.641/9.658 seconds (about 65-66% more). Decode is nearly unchanged. This supports keeping Vulkan defaults for this workload; kernel optimization, dispatch/layout choices and first-use preparation need profiling before assigning a cause.
+The Vulkan rows do not show a useful large-batch prefill advantage. Against the old default-batch reference, one-slot 8K prefill increases from 18.785 to 24.700 seconds (32% more), and four-active 1K split/unified prefill increases from 5.931/5.964 to 9.641/9.658 seconds (about 62-63% more). The default reference and large-batch measurements use different source revisions; the original same-build measurements remain available in the campaign artifacts and support the same preliminary conclusion. Decode is nearly unchanged. This supports keeping Vulkan defaults for this workload; kernel optimization, dispatch/layout choices and first-use preparation need profiling before assigning a cause.
 
-With default batches, OV unified four-active decode is 91.95 t/s at 1K and 71.41 t/s at 8K, versus Vulkan split's 73.90/66.32 t/s and Vulkan unified's 73.63/56.38 t/s. OV is about 24%/8% ahead of the faster Vulkan layout in these two cases. At one-slot 32K, OV decode is about 5.9% below Vulkan (24.51 versus 26.04 t/s), while OV prefill is about 7.8 times faster (32.539 versus 253.293 seconds). Fresh Vulkan 32K multi-slot comparisons were deliberately skipped; the older references below remain historical.
+With default batches, OV unified four-active decode is 91.95 t/s at 1K and 71.41 t/s at 8K, versus the old Vulkan split reference's 72.39/65.11 t/s and unified reference's 71.82/55.31 t/s. OV is about 27%/10% ahead of the faster Vulkan layout in these two cases. At one-slot 32K, OV decode is about 5.7% below the old Vulkan reference (24.51 versus 25.99 t/s), while OV prefill is about 7.9 times faster (32.539 versus 255.503 seconds). At four-active 32K, OV unified decode is about 1.7% below the old Vulkan split reference (40.84 versus 41.53 t/s). Vulkan unified four-active 32K remains unmeasured in both builds.
 
 ### Profiling limits and next work
 
