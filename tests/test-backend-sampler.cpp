@@ -1137,16 +1137,19 @@ static sampler_comparison_stats compare_sampler_outputs(
     return result;
 }
 
-static void test_backend_top_k_rows_impl(const test_params & params, uint32_t n_rs_seq, bool hidden = false) {
+static void test_backend_top_k_rows_impl(const test_params & params, uint32_t n_rs_seq, bool hidden = false, int subsets = 0) {
     const int32_t k = 8;
-    llama_sampler_ptr chain0(llama_sampler_chain_init(llama_sampler_chain_default_params()));
-    llama_sampler_ptr chain1(llama_sampler_chain_init(llama_sampler_chain_default_params()));
-    llama_sampler_chain_add(chain0.get(), llama_sampler_init_top_k(k));
-    llama_sampler_chain_add(chain1.get(), llama_sampler_init_top_k(k));
-    std::vector<llama_sampler_seq_config> configs = {{0, chain0.get()}, {1, chain1.get()}};
+    const int n_seq = subsets ? 4 : 2;
+    std::vector<llama_sampler_ptr> chains;
+    std::vector<llama_sampler_seq_config> configs;
+    for (int seq = 0; seq < n_seq; ++seq) {
+        chains.emplace_back(llama_sampler_chain_init(llama_sampler_chain_default_params()));
+        llama_sampler_chain_add(chains.back().get(), llama_sampler_init_top_k(k));
+        configs.push_back({seq, chains.back().get()});
+    }
     std::vector<llama_sampler_seq_config> reference_configs;
-    test_context ctx(params, configs, 2, 6, 8, 3, n_rs_seq);
-    test_context reference(params, reference_configs, 2, 6, 8, 3);
+    test_context ctx(params, configs, n_seq, n_seq * 3, n_seq * 4, 3, n_rs_seq);
+    test_context reference(params, reference_configs, n_seq, n_seq * 3, n_seq * 4, 3);
     if (hidden) {
         llama_set_embeddings_nextn(ctx.ctx.get(), true, false);
         llama_set_embeddings_nextn(reference.ctx.get(), true, false);
@@ -1154,18 +1157,32 @@ static void test_backend_top_k_rows_impl(const test_params & params, uint32_t n_
     llama_sampler_ptr cpu_top_k(llama_sampler_init_top_k(k));
 
     struct batch_case {
-        int counts[2];
+        int counts[4];
         bool output;
     };
-    const batch_case cases[] = {{{2, 2}, true}, {{1, 1}, true}, {{2, 0}, false},
-                                {{0, 3}, true}, {{2, 1}, true}, {{1, 1}, true}, {{1, 0}, true},
-                                {{0, 1}, true}, {{1, 0}, true}};
-    int32_t positions[2] = {0, 0};
+    std::vector<batch_case> cases = {{{2, 2}, true}, {{1, 1}, true}, {{2, 0}, false},
+                                    {{0, 3}, true}, {{2, 1}, true}, {{1, 1}, true}, {{1, 0}, true},
+                                    {{0, 1}, true}, {{1, 0}, true}};
+    if (subsets) {
+        // Prime only slot 3, then exercise every subset with one and multiple output rows.
+        cases = {{{0, 0, 0, 1}, true}};
+        for (int mask = 1; mask <= subsets && subsets > 1; ++mask) {
+            for (int count : {1, 2}) {
+                batch_case c = {{0, 0, 0, 0}, true};
+                for (int seq = 0; seq < n_seq; ++seq) {
+                    c.counts[seq] = (mask & (1 << seq)) ? count : 0;
+                }
+                cases.push_back(c);
+            }
+        }
+    }
+    int32_t positions[4] = {0, 0, 0, 0};
     int case_index = 0;
     for (const auto & c : cases) {
+        fprintf(stderr, "top_k_rows case %d: counts=%d,%d,%d,%d output=%d\n", case_index, c.counts[0], c.counts[1], c.counts[2], c.counts[3], c.output);
         auto make_batch = [&](llama_context * context) {
             common_batch batch(context);
-            for (llama_seq_id seq = 0; seq < 2; ++seq) {
+            for (llama_seq_id seq = 0; seq < n_seq; ++seq) {
                 const int rejected = n_rs_seq > 0 && context == reference.ctx.get() ?
                     (case_index == 4 && seq == 0 ? 1 : case_index == 3 && seq == 1 ? 2 : 0) : 0;
                 const int count = c.counts[seq] - rejected;
@@ -1230,6 +1247,10 @@ static void test_backend_top_k_rows_impl(const test_params & params, uint32_t n_
             std::unordered_map<llama_token, float> selected_logits;
             for (const auto token : actual.candidates) {
                 GGML_ASSERT(token >= 0 && token < ctx.n_vocab);
+                if (raw[token] < cutoff - tolerance) {
+                    fprintf(stderr, "top_k_rows: case=%d row=%d token=%d raw=%.6f cutoff=%.6f\n",
+                            case_index, i, token, raw[token], cutoff);
+                }
                 GGML_ASSERT(raw[token] >= cutoff - tolerance);
                 GGML_ASSERT(selected_logits.emplace(token, raw[token]).second);
             }
@@ -1239,7 +1260,7 @@ static void test_backend_top_k_rows_impl(const test_params & params, uint32_t n_
             // GPU f16 rounding can exchange candidates at the top-k boundary.
             GGML_ASSERT(compare_sampler_outputs("top_k_rows", selected_logits, actual, false, tolerance).n_mismatch == 0);
         }
-        for (int seq = 0; seq < 2; ++seq) {
+        for (int seq = 0; seq < n_seq; ++seq) {
             positions[seq] += c.counts[seq];
         }
         if (n_rs_seq > 0 && case_index == 4) {
@@ -1265,6 +1286,14 @@ static void test_backend_top_k_rows_rollback(const test_params & params) {
 
 static void test_backend_top_k_hidden_rollback(const test_params & params) {
     test_backend_top_k_rows_impl(params, 2, true);
+}
+
+static void test_backend_top_k_subsets(const test_params & params) {
+    test_backend_top_k_rows_impl(params, 0, false, 15);
+}
+
+static void test_backend_top_k_subsets_prime(const test_params & params) {
+    test_backend_top_k_rows_impl(params, 0, false, 1);
 }
 
 // Compare slot transitions against a fresh, independently replayed sequence. This catches
@@ -2344,6 +2373,8 @@ static const backend_test_case BACKEND_TESTS[] = {
     { "top_k_rows",      test_backend_top_k_rows,              true  },
     { "top_k_rollback",  test_backend_top_k_rows_rollback,      false },
     { "top_k_hidden_rollback", test_backend_top_k_hidden_rollback, false },
+    { "top_k_subsets", test_backend_top_k_subsets, false },
+    { "top_k_subsets_prime", test_backend_top_k_subsets_prime, false },
     { "recurrent_slots", test_backend_recurrent_slots, false },
     { "recurrent_no_logits_prefill", test_backend_recurrent_no_logits_prefill, false },
 };

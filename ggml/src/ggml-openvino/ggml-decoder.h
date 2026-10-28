@@ -446,6 +446,7 @@ public:
     // may read them. USM host allocations let the GPU consume them without tiny uploads.
     std::map<std::string, ov::Tensor> runtime_input_storage;
     std::map<std::string, ov::Tensor> runtime_input_tensors;
+    std::map<std::string, ov::Tensor> runtime_output_scratch;
 
     bool m_is_static = false;
     bool m_is_stateful = false;
@@ -569,6 +570,11 @@ public:
         return node != nullptr && node->op == GGML_OP_VIEW && node->src[0] != nullptr &&
                node->src[0]->op == GGML_OP_PAD && node->ne[0] == node->src[0]->ne[0] &&
                node->ne[1] == 1 && node->ne[2] == 1 && node->ne[3] == 1;
+    }
+
+    static bool is_sampling_top_k(const ggml_tensor * node) {
+        return node != nullptr && node->op == GGML_OP_TOP_K && node->src[0] != nullptr &&
+               node->src[0]->op == GGML_OP_RESHAPE && is_sampling_view(node->src[0]->src[0]);
     }
 
     bool is_direct_gdn_view(const ggml_tensor * node) const;

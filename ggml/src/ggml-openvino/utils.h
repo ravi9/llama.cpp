@@ -19,7 +19,7 @@
 // graph during inference, where the same few graphs repeat for the whole session. The list of
 // external input names below tells those apart more precisely, but it walks every node and every
 // src slot, so it is built only when GGML_OPENVINO_FULL_GRAPH_KEY is set. Sampler row names are
-// always included because changing the active sequence changes those Parameters. Op tests run
+// always included to distinguish sampler configurations, even when active subsets share the packed input. Op tests run
 // many small graphs that can share a node count and end names, and need the full key.
 struct graph_key {
     int n_nodes;

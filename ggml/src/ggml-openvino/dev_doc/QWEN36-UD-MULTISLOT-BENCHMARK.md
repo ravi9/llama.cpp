@@ -54,7 +54,51 @@ Raw artifacts: `/home/zijun/llama.cpp/tmp/batch-size-matrix-20261028`. Source pa
 
 <!-- batch-comparison:end -->
 
-## MMLU llama-server: current OV unified KV, fresh servers (2026-10-28)
+## Stable MTP sampling graph (2026-10-28)
+
+Dynamic stateless translation now keeps all pure top-k sampling branches used by Qwen3.5/Qwen3.6 MTP. Their node names and candidate-output ports remain fixed when active slots change. A single packed `sampling_rows` Parameter selects rows at runtime; inactive results use private scratch tensors, with device USM on GPU. This preserves the existing GGML sampling graph and does not add or modify any OpenVINO native op. Other sampler chains continue to respect their selected branches.
+
+The top-k computations are still separate per configured branch, including inactive branches. This avoids compiling a model for each active subset but does not yet combine top-k computations into one batched operation. The trunk, draft and any genuinely different graph stages still have distinct compiled models. Translation revision 13 invalidates previous blobs; prepare a compatible cache once without cache-only mode.
+
+Validation on Qwen3.5-0.8B-F16:
+
+- OpenVINO CPU and GPU pass changing output-row counts and a no-logits batch.
+- GPU passes recurrent rollback and hidden-state output with rollback.
+- CPU passes the existing multi-output distribution transaction test, covering an unaffected stateful sampling chain.
+- A fresh GPU cache is primed with only slot 3 active. A new process in cache-only mode passes all 15 nonempty four-slot subsets, with both one and two output rows per active sequence. All 97 candidate rows match CPU top-k selection applied to a raw-logit reference context on the same backend, allowing the existing f16 boundary tolerance.
+- The cache contains two blobs: one sampling model and one raw-logit reference model. No additional models are compiled for the subset sweep. This tests candidate selection and cache reuse, not full-model numerical equivalence between CPU and GPU.
+
+Target UD validation also passes with GPU `q4_asym64_all`, native softplus, `ENABLE_KV_4D=1`, enabled KV slicing, `-np 4 -c 8192 --kv-unified`, default batch sizes, and two-token MTP. `--no-warmup` isolates the serving graphs from the ordinary startup probe. Fresh preparation sends one 64-token generation to slot 3 and writes exactly two blobs: the trunk and the MTP draft model. Preparation takes 5m43s, including about 5m07s of model loading and weight conversion.
+
+A fresh cache-only process then tests all 15 requested slot subsets with differing output lengths so batches drain, followed by eight 512-token MMLU requests at each concurrency. All 49 requests complete (8,960 generated tokens); the cache still contains only the same two blobs. The first request imports the graphs and has 7.704s of native prompt evaluation; it is excluded from the timing table. The compiled models and runtime paths are warmed before timing begins.
+
+| Requests in flight | Native prompt evaluation, mean (s) | Decode t/s per request, excludes prefill | Draft accepted / generated |
+|---|---:|---:|---:|
+| 1 | 0.418 | 47.33 | 2626/2913 (90.1%) |
+| 4 | 1.129 | 29.09 | 2622/2924 (89.7%) |
+
+These use the same eight MMLU questions and 35-73 templated prompt tokens as the earlier server campaign. All eight sequential generated texts and the total acceptance counters exactly match the earlier run. This follow-up uses direct non-streaming `/completion` requests; client TTFT was not measured. Whole-campaign aggregate throughput, including prefill and scheduling, is 45.36 t/s at concurrency 1 and 105.94 t/s at concurrency 4. These are separate metrics from the per-request decode column.
+
+The earlier table used fresh servers, a 524288-token total context and streaming `server-bench.py`; this follow-up uses warmed graphs and an 8192-token total context. The rates are not a controlled before/after performance comparison. The established result is one reusable MTP draft model across active subsets, with correct sampling and no subset-triggered cache misses. Different graph configurations or startup probes can still require other compiled entries.
+
+Reproduce the compiled reuse test after building `test-backend-sampler`:
+
+```sh
+export GGML_OPENVINO_DEVICE=GPU
+export GGML_OPENVINO_NATIVE_SOFTPLUS=1
+export GGML_OPENVINO_ENABLE_KV_4D=1
+export GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR=/path/to/new-sampling-cache
+SMALL_MODEL="$HOME/models/Qwen3.5-0.8B-GGUF/Qwen3.5-0.8B-F16.gguf"
+
+GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY=0 \
+    build/MtpOVPerf/bin/test-backend-sampler --test top_k_subsets_prime --device gpu "$SMALL_MODEL"
+GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY=1 \
+    build/MtpOVPerf/bin/test-backend-sampler --test top_k_subsets --device gpu "$SMALL_MODEL"
+```
+
+Logs, cache manifests and target-server validation artifacts: `/home/zijun/llama.cpp/tmp/stable-sampling-20261028`.
+
+## MMLU llama-server: before stable sampling, fresh servers (2026-10-28)
 
 <!-- mmlu-current:start -->
 Completed 4/4 current OV unified-KV MMLU cases.
@@ -115,9 +159,9 @@ done
 
 The wrapper defaults to GPU `q4_asym64_all`, enabled KV slicing and 4D in-place KV fusion, unified KV, context 524288, eight questions, 512 output tokens and compiled-model cache-only mode. Full GPU offload and disabled automatic fitting preserve the requested context allocation. The server logs confirm `n_ctx=524288`, `n_batch=2048`, `n_ubatch=512` and a 10240 MiB attention KV allocation; unified slots report a 262144-token per-request model limit. These short prompts do not test that limit. Peak memory was not sampled for this server campaign.
 
-For a fresh compiled cache, prepare both modes before timing. Create the spill directory on real disk storage before running; disk-backed repacked weights reduce preparation RAM pressure and do not change the compiled-cache key. Each preparation uses a small context and primes all 15 nonempty subsets of the four slots; it is excluded from the reported durations.
+The preparation below reproduces the earlier revision-12 campaign; revision 13 no longer needs exhaustive active-subset priming. For that earlier campaign, both modes were prepared before timing. Create the spill directory on real disk storage before running; disk-backed repacked weights reduce preparation RAM pressure and do not change the compiled-cache key. Each preparation uses a small context and primes all 15 nonempty subsets of the four slots; it is excluded from the reported durations.
 
-One shared directory contains multiple compiled graphs, rather than one blob per MTP mode. Context length is generally dynamic, but recurrent slot capacity, rollback mode, split/unified KV translation and graph input/output contracts can distinguish variants. The MTP draft graph contains GPU sampling branches with slot-specific Parameter names. For example, slot 3 uses `sampling_row_logits_seq_3_0`, while slots 0 and 2 have two separately named row inputs and two sets of top-k outputs. The current cache key distinguishes these interfaces to prevent the sampler-input lookup bug described below. Four slots have 15 nonempty active subsets, which can occur as concurrent requests finish at different times. Most additional subset variants contain the MTP layer and output head, rather than the full trunk. A single sampler interface with runtime active-row/slot lists could reduce compilation count, cache footprint and first-use latency; it needs a separate implementation and correctness review.
+One shared directory contains multiple compiled graphs, rather than one blob per MTP mode. Context length is generally dynamic, but recurrent slot capacity, rollback mode, split/unified KV translation and graph input/output contracts can distinguish variants. Before revision 13, the MTP draft graph contained GPU sampling branches with slot-specific Parameter names. For example, slot 3 uses `sampling_row_logits_seq_3_0`, while slots 0 and 2 have two separately named row inputs and two sets of top-k outputs. The revision-12 cache key distinguished these interfaces to prevent the sampler-input lookup bug described below. Four slots have 15 nonempty active subsets, which can occur as concurrent requests finish at different times. Most additional subset variants contain the MTP layer and output head, rather than the full trunk. Revision 13 replaces this subset-dependent interface with the stable sampling graph described above. These earlier timings are retained as measured, including their first-use imports.
 
 MTP preparation initially stopped before all slots were covered. The subsequent cache-only attempt hit a missing fourth-slot draft graph and was discarded. A second preparation lost the server connection while entering two active slots; its log has no explicit cause, and kernel logs were unavailable, so an OOM cause is not established. Preparation with disk-backed weights subsequently completed all 15 subsets in about 13 minutes, including roughly five minutes of weight conversion. The interrupted and failed attempts are preserved separately. Every reported timing run uses cache-only mode and rejects missing graphs or draft-computation failures.
 

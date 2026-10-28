@@ -192,10 +192,10 @@ std::string GgmlOvDecoder::get_tensor_name(const ggml_cgraph * cgraph, const ggm
     if (tensor == nullptr) {
         return "";
     }
-    if ((tensor->flags & GGML_TENSOR_FLAG_COMPUTE) || is_kvcache(tensor, nullptr)) {
+    if (tensor->op != GGML_OP_NONE || is_kvcache(tensor, nullptr)) {
         // Hash-table slots depend on tensor addresses and differ between contexts.
         // Graph ordinals disambiguate duplicate names while keeping compiled-model
-        // ports identical for equivalent graphs in different contexts.
+        // ports identical for equivalent graphs in different contexts, including inactive sampling branches.
         const auto * node = std::find(cgraph->nodes, cgraph->nodes + cgraph->n_nodes, tensor);
         if (node != cgraph->nodes + cgraph->n_nodes) {
             return std::string(tensor->name) + "#n" + std::to_string(node - cgraph->nodes);
@@ -1135,7 +1135,8 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
             compute_params.gdn_attention_rows[get_tensor_ov_name(cgraph, node)] = node->src[2]->ne[2] * node->src[2]->ne[3];
         }
         if (is_sampling_view(node)) {
-            compute_params.sampling_rows[get_tensor_ov_name(cgraph, node)] = node->view_offs / node->src[0]->nb[1];
+            compute_params.sampling_rows[get_tensor_ov_name(cgraph, node)] =
+                (node->flags & GGML_TENSOR_FLAG_COMPUTE) ? node->view_offs / node->src[0]->nb[1] : 0;
         }
         if (is_gdn_snapshot_writeback(node)) {
             const auto * source = node->src[0];
@@ -1570,8 +1571,13 @@ void GgmlOvDecoder::add_extra_inputs() {
         }
     }
 #endif
-    for (const auto & [node_name, row] : m_compute_params.sampling_rows) {
-        create_1d_input("sampling_row_" + node_name, row);
+    if (!m_is_static && !m_compute_params.sampling_rows.empty()) {
+        m_model_extra_inputs["sampling_rows"] =
+            {ov::element::i64, ov::Shape{m_compute_params.sampling_rows.size()}, 0, true, {}, -1};
+    } else {
+        for (const auto & [node_name, row] : m_compute_params.sampling_rows) {
+            create_1d_input("sampling_row_" + node_name, row);
+        }
     }
     for (const auto & [node_name, rows] : m_compute_params.gdn_attention_rows) {
         create_1d_input("gdn_attention_rows_" + node_name, rows);
@@ -1701,7 +1707,8 @@ void GgmlOvDecoder::compute_model_outputs() {
         if (::is_inplace_op(cur_node) && ggml_nbytes(cur_node) == 0 && !runtime_recurrent_write) {
             continue;
         }
-        if (cur_node->flags & GGML_TENSOR_FLAG_OUTPUT) {
+        const bool inactive_top_k = is_sampling_top_k(cur_node) && !(cur_node->flags & GGML_TENSOR_FLAG_COMPUTE);
+        if ((cur_node->flags & GGML_TENSOR_FLAG_OUTPUT) || inactive_top_k) {
             const auto name = get_tensor_ov_name(m_cgraph, cur_node);
             m_model_outputs[name] = cur_node;
             m_model_output_names.insert(name);

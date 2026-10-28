@@ -25,6 +25,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <set>
 #include <openvino/core/node.hpp>
 #include <openvino/core/preprocess/pre_post_process.hpp>
 #include <openvino/core/shape.hpp>
@@ -313,6 +314,22 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
 
     for (const auto & it : ggml_model_decoder->get_model_weights()) {
         (*tensor_map)[it.first] = it.second;
+    }
+
+    if (tensor_map->count("sampling_rows")) {
+        // Match ComputeParams::sampling_rows ordering without one Parameter per sampling branch.
+        std::set<std::string> names;
+        ggml_model_decoder->visit_subgraph([&](const std::shared_ptr<GgmlDecoder> & decoder, int node_idx) {
+            if (decoder->get_op_type(node_idx) == "GGML_OP_VIEW" && decoder->get_op_case(node_idx) == 3) {
+                names.insert("sampling_row_" + decoder->get_op_name(node_idx));
+            }
+        });
+        int64_t index = 0;
+        for (const auto & name : names) {
+            (*tensor_map)[name] = std::make_shared<v8::Gather>(tensor_map->at("sampling_rows"),
+                v0::Constant::create(element::i64, {1}, {index++}),
+                v0::Constant::create(element::i64, {}, {0}));
+        }
     }
 
 #ifdef GGML_OPENVINO_HAS_CACHE_UPDATE

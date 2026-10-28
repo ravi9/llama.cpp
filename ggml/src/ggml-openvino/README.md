@@ -15,7 +15,7 @@ Rotation banks and the older three-op native path are removed.
 The convolution Update op always takes depthwise weights and produces convolution
 and the updated cache; the separate history/QKV mode is removed.
 `GGML_OPENVINO_DISABLE_FUSED_RECURRENCE=1` retains the ordinary GGML decomposition.
-Rebuild both repos and regenerate compiled-model blobs for translation revision 12.
+Rebuild both repos for these native ops. The current backend translation revision is 13; regenerate compiled-model blobs once without cache-only mode.
 
 Set `GGML_OPENVINO_ENABLE_KV_4D=1` to enable the upstream stateless in-place
 attention KV update pattern where eligible. It binds full-capacity cache tensors
@@ -65,6 +65,14 @@ Cache-only mode uses the settings provided by the current process. Keep these va
 `GGML_OPENVINO_DISABLE_KV_SLICE` is a runtime binding option and can differ between cache population and cache-only runs. The same dynamic compiled graph accepts full-capacity and live-prefix attention K/V tensors. Slicing is enabled by default for contiguous ordinary K/V roots with one allocated stream, one active sequence at offset zero, and no sliding-window attention. Recurrent convolution/GDN caches and their rollback snapshots always retain their full stored row bank. Other layouts use full bindings. Repopulate caches made before this option was removed from the fingerprint once without cache-only mode.
 
 A missing or incompatible graph fails with an error instead of compiling with absent weights. The fingerprint uses the dynamic graph's topology, ports, model parameters, weights, settings, and OpenVINO version; changing only dynamic token or KV sizes does not require a new entry. A different workload can still require another graph; populate it first without cache-only mode.
+
+## MTP sampling and active slots
+
+Qwen3.5/Qwen3.6 MTP uses a pure top-k backend sampler. Dynamic stateless execution retains its sampling branches for every configured slot and output row, including inactive branches. One packed `sampling_rows` input selects logits rows at runtime. Graph node names and candidate-output ports stay fixed, so changing the active subset of four slots reuses the same compiled draft model instead of creating up to 15 variants.
+
+Active candidate IDs and scores are written to the normal GGML outputs. Inactive branches read row 0 (the padding row when there are no logits) and write to private scratch tensors (device USM on GPU), without changing sampler state or touching inactive GGML buffers. The top-k computations remain separate per branch; this trades some extra sampling work for a stable graph interface. Other sampler chains retain their existing branch-selection behavior.
+
+This is one draft model per compatible graph configuration, not one compiled blob for the whole server. The trunk and other graph stages still have their own entries. Different sampler configurations, recurrent capacities, rollback modes or incompatible KV layouts can require additional models. Cache-only mode still requires initial preparation; changing just the active subset no longer requires exhaustive subset priming. See the [sampling validation](dev_doc/QWEN36-UD-MULTISLOT-BENCHMARK.md#stable-mtp-sampling-graph-2026-10-28) for the cache-only reuse tests.
 
 The generic recurrent-cache translation invalidates blobs made with the former single-slot shortcuts. Run once without `GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY` to populate compatible entries before enabling cache-only mode again.
 
