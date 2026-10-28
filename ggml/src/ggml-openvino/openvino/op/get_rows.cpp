@@ -73,7 +73,7 @@ OutputVector translate_get_rows(const NodeContext & context) {
     if (indices_rank.get_length() > 2) {
         // Keep zero-token batches: GPU Squeeze-to-Reshape can treat a zero dimension as a copy marker.
         indices = std::make_shared<ov::op::v1::Reshape>(
-            indices, get_dimensions(indices.get_node_shared_ptr(),
+            indices, get_dimensions(std::make_shared<ov::op::v3::ShapeOf>(indices),
                                     {int(indices_rank.get_length() - 2), int(indices_rank.get_length() - 1)}), false);
     }
     if (row_offset != 0) {
