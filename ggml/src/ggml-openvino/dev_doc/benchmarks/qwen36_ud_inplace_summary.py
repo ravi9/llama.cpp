@@ -79,11 +79,14 @@ def summarize_batch_comparison(output, report=None, finished=False):
     if report:
         text = report.read_text()
         if '<!-- vulkan-default-reference:2026-10-23 -->' in text:
-            historical = text.split('<!-- compact-matrices:start -->', 1)[1].split('### Server:', 1)[0]
+            if '<!-- compact-matrices:start -->' in text:
+                historical = text.split('<!-- compact-matrices:start -->', 1)[1].split('### Server:', 1)[0]
+            else:
+                historical = text.split('### Default batch:', 1)[1].split('### Large batch:', 1)[0]
             for line in historical.splitlines():
-                if line.startswith('| Vulkan `'):
+                if line.startswith(('| Vulkan `', '| Vulkan reference `')):
                     cells = [cell.strip() for cell in line.split('|')[1:-1]]
-                    reference[cells[0]] = cells[1:4]
+                    reference[cells[0].replace('Vulkan reference ', 'Vulkan ')] = cells[1:4]
             if len(reference) != 3:
                 raise ValueError('Expected three historical Vulkan default-batch rows.')
     observations = {}

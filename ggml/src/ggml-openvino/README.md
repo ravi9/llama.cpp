@@ -1,6 +1,6 @@
 # Qwen MTP
 
-Dynamic GPU execution supports Qwen MTP sampling and recurrent state snapshots. Build against the OpenVINO runtime and GPU plugin that provide ordinary `GatedDeltaNet` with `snapshot_count` and the two-output contract: output 0 is attention; output 1 is the final state when `snapshot_count=1`, or newest-first snapshots when it is greater than one. Snapshot entry 0 is the final state and entry i is the state after token T-i; only min(K,T) entries are valid. The initial state before the batch is not included. The backend and runtime must be rebuilt together.
+The default Qwen3.5/Qwen3.6 GPU path is dynamic stateless execution with in-place fused recurrent ops and stable MTP sampling. Build against the matching OpenVINO runtime/GPU plugin with independent `RecurrentConvCacheUpdate` and `RecurrentGatedDeltaNetUpdate` ops. The native Update ops return computation results plus the full updated cache, including rollback snapshots where required. No recurrent/sampling opt-in flag is needed on supported graphs. See the [development documentation index](dev_doc/README.md) for implementation, validation, graph examples and benchmarks.
 
 Use `--spec-type draft-mtp --spec-draft-n-max 2` with a GGUF that contains MTP weights. Parallel execution uses `-np` and `--kv-unified`. CPU snapshot execution, NPU execution, and forced static MTP are not supported.
 
@@ -25,11 +25,11 @@ split multi-slot KV retains the ordinary full-cache path. This option does not
 change recurrent cache handling. Unified KV is recommended for multi-slot GPU
 execution because it enables this in-place attention update.
 
-The current performance target is `~/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf`, using GPU with `GGML_OPENVINO_REQUANT_KQUANT=q4_asym64_all` and `GGML_OPENVINO_NATIVE_SOFTPLUS=1`. Leave `GGML_OPENVINO_DISABLE_KV_SLICE` unset to use live-prefix attention cache bindings where supported. The [large-context comparison](dev_doc/OPENVINO-RECURRENT-FUSION-PERF.md#large-context-attention-kv-slicing-2026-10-22) measures the benefit and documents the single-stream restriction. Earlier [performance measurements](dev_doc/OPENVINO-QWEN35-08B-PERF-RESULTS.md) used disabled slicing; yamini-model results remain historical references.
+The current performance target is `~/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf`, using GPU with `GGML_OPENVINO_REQUANT_KQUANT=q4_asym64_all` and `GGML_OPENVINO_NATIVE_SOFTPLUS=1`. Leave `GGML_OPENVINO_DISABLE_KV_SLICE` unset. See [attention KV layout](dev_doc/OPENVINO-RECURRENT-CACHE.md#attention-kv-layout) for eligibility and [benchmark results](dev_doc/QWEN36-UD-MULTISLOT-BENCHMARK.md) for measured limits.
 
 `q4_asym64_all` converts Q4_K/Q5_K/Q6_K/Q8_0/Q5_1 weights, including dense Q8_0 projections, to asymmetric INT4 with group size 64. `token_embd.weight` and `output.weight` retain symmetric channel-wise INT8. Q8_0/Q5_1 rows whose width is not divisible by 64 also use channel-wise INT8. This follows the primary/backup precision scheme of NNCF `INT4_ASYM`, `ratio=1.0`, `group_size=64`, `backup_mode=INT8_SYM` for these supported source types; it requantizes GGUF values rather than the original floating-point model and leaves floating-point weights unchanged. Earlier versions kept dense Q8_0 at INT8/group-32. Repopulate compiled-model caches without cache-only mode after this change; the cache fingerprint invalidates the old precision policy.
 
-See the [recurrent-cache report](dev_doc/OPENVINO-RECURRENT-CACHE.md) for the measured baseline and proposed native cache-operation fusions.
+See the [implementation guide](dev_doc/OPENVINO-RECURRENT-CACHE.md) for buffer ownership, rollback and validation.
 
 # Compiled model cache
 
