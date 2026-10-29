@@ -1525,7 +1525,8 @@ void GgmlOvDecoder::add_extra_inputs() {
     }
 #ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
     m_compute_params.recurrent_controls.clear();
-    if (!m_is_static && !m_is_stateful && !m_model_is_splitted && ggml_openvino_is_gpu() &&
+    // Naive graphs have no full-model cache fusion and node cases are not initialized here.
+    if (!m_naive && !m_is_static && !m_is_stateful && !m_model_is_splitted && ggml_openvino_is_gpu() &&
         !ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_FUSED_RECURRENCE")) {
         for (int i = 0; i < m_cgraph->n_nodes; ++i) {
             const auto node = m_cgraph->nodes[i];
@@ -1674,7 +1675,7 @@ void GgmlOvDecoder::compute_model_inputs() {
             note_kvcache_4d(src, node, m_model_inputs[src_name].shape);
         }
     }
-    if (!m_is_static && !m_is_stateful && !m_model_is_splitted && ggml_openvino_is_gpu() &&
+    if (!m_naive && !m_is_static && !m_is_stateful && !m_model_is_splitted && ggml_openvino_is_gpu() &&
         m_compute_params.s_copy_active_slot_len > 0) {
         const ggml_tensor * rows = nullptr;
         for (const auto & [name, tensor] : m_inputs) {

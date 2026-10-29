@@ -14,8 +14,12 @@ remain generic. Incompatible bindings use private output plus Result copy-back.
 Rotation banks and the older three-op native path are removed.
 The convolution Update op always takes depthwise weights and produces convolution
 and the updated cache; the separate history/QKV mode is removed.
-`GGML_OPENVINO_DISABLE_FUSED_RECURRENCE=1` retains the ordinary GGML decomposition.
-Rebuild both repos for these native ops. The current backend translation revision is 13; regenerate compiled-model blobs once without cache-only mode.
+`GGML_OPENVINO_DISABLE_FUSED_RECURRENCE=1` retains the ordinary GGML cache decomposition.
+Snapshot GDN still uses the independent Update op with a temporary cache bank.
+Ordinary GDN is unchanged. Snapshot/rollback (speculative decoding) on OpenVINO
+requires the patched package; unpatched packages support ordinary execution and
+report snapshot GDN as unsupported, allowing fallback to another backend.
+Rebuild both repos for these native ops. The current backend translation revision is 14; regenerate compiled-model blobs once without cache-only mode.
 
 Set `GGML_OPENVINO_ENABLE_KV_4D=1` to enable the upstream stateless in-place
 attention KV update pattern where eligible. It binds full-capacity cache tensors

@@ -25,7 +25,7 @@ RecurrentCacheFusion::RecurrentCacheFusion(const std::shared_ptr<GgmlDecoder> & 
         return;
     }
     auto actual = std::dynamic_pointer_cast<GgmlOvDecoder>(decoder);
-    if (!actual || !tensors->count("cache_rs_reset_idx") || !tensors->count("cache_rs_reset_len") ||
+    if (!actual || actual->m_naive || !tensors->count("cache_rs_reset_idx") || !tensors->count("cache_rs_reset_len") ||
         !tensors->count("s_copy_active_slot_len")) {
         return;
     }

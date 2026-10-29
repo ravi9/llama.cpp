@@ -99,6 +99,51 @@ static bool match_gdn_l2_norm(const Output<Node> & normalized, Output<Node> & in
     return true;
 }
 
+#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
+static OutputVector translate_gdn_snapshots(const Output<Node> & q,
+                                          const Output<Node> & k,
+                                          const Output<Node> & v,
+                                          const Output<Node> & state,
+                                          const Output<Node> & g,
+                                          const Output<Node> & beta,
+                                          int64_t features,
+                                          bool norm,
+                                          float q_eps,
+                                          float k_eps,
+                                          int64_t snapshot_count) {
+    // Standalone/unmatched graphs have no full-model cache controls. Use a temporary
+    // bank in GGML [head,value,key] order instead of extending ordinary GDN semantics.
+    auto i64 = [](const Shape & shape, const std::vector<int64_t> & values) {
+        return ov::op::v0::Constant::create(ov::element::i64, shape, values);
+    };
+    auto shape = std::make_shared<ov::op::v3::ShapeOf>(q, ov::element::i64);
+    auto batch = std::make_shared<ov::op::v8::Gather>(shape, i64({1}, {0}), i64({}, {0}));
+    auto tokens = std::make_shared<ov::op::v8::Gather>(shape, i64({1}, {1}), i64({}, {0}));
+    auto initial = std::make_shared<ov::op::v1::Reshape>(state, i64({4}, {1, 1, -1, features}), false);
+    auto spare_rows = std::make_shared<ov::op::v1::Multiply>(batch, i64({1}, {snapshot_count - 1}));
+    auto spare_shape = std::make_shared<ov::op::v0::Concat>(
+        OutputVector{i64({2}, {1, 1}), spare_rows, i64({1}, {features})}, 0);
+    auto spare = std::make_shared<ov::op::v3::Broadcast>(
+        ov::op::v0::Constant::create(state.get_element_type(), {}, {0}), spare_shape);
+    auto cache = std::make_shared<ov::op::v0::Concat>(OutputVector{initial, spare}, 2);
+    auto rows = std::make_shared<ov::op::v4::Range>(
+        i64({}, {0}), std::make_shared<ov::op::v0::Squeeze>(batch), i64({}, {1}), ov::element::i64);
+    auto active = std::make_shared<ov::op::v1::Reshape>(rows, i64({4}, {1, 1, 1, -1}), false);
+    auto control = std::make_shared<ov::op::v1::Reshape>(
+        std::make_shared<ov::op::v0::Concat>(OutputVector{i64({1}, {0}), batch, batch, i64({1}, {0})}, 0),
+        i64({4}, {1, 1, 1, 4}), false);
+    auto update = std::make_shared<ov::op::internal::RecurrentGatedDeltaNetUpdate>(
+        OutputVector{q, k, v, cache, g, beta, active, i64({1, 1, 1, 0}, {}),
+                     i64({1, 1, 1, 1}, {0}), i64({1, 1, 1, 1}, {0}), i64({1, 1, 1, 2}, {0, 0}), control},
+        norm, q_eps, k_eps, snapshot_count);
+    auto valid_rows = std::make_shared<ov::op::v1::Multiply>(
+        std::make_shared<ov::op::v1::Minimum>(tokens, i64({1}, {snapshot_count})), batch);
+    auto snapshots = std::make_shared<ov::op::v8::Slice>(
+        update->output(1), i64({1}, {0}), valid_rows, i64({1}, {1}), i64({1}, {2}));
+    return {update->output(0), snapshots};
+}
+#endif
+
 static OutputVector translate_gdn(const NodeContext & context, const OutputVector * cache_inputs) {
     auto v_shape = context.get_input_shape(2).to_shape();  // [B, T, H_v, S_v]
     auto q_shape = context.get_input_shape(0).to_shape();  // [B, T, H_k, S_k]
@@ -160,7 +205,7 @@ static OutputVector translate_gdn(const NodeContext & context, const OutputVecto
     // ggml state layout (OV notation): [B, H_v, value_dim, key_dim]
     // GatedDeltaNet op expects: [B, H_v, key_dim, value_dim]
     auto state_perm = ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{0, 1, 3, 2});
-    if (!cache_inputs) {
+    if (!cache_inputs && snapshot_count == 1) {
         state = std::make_shared<ov::op::v1::Transpose>(state, state_perm);
     }
 
@@ -209,41 +254,33 @@ static OutputVector translate_gdn(const NodeContext & context, const OutputVecto
     }
 #endif
 
-    auto gdn = std::make_shared<ov::op::internal::GatedDeltaNet>(q, k, v, state, g, beta, fuse_qk_l2norm, q_eps, k_eps, snapshot_count);
-    auto attn_4d = gdn->output(0);
-
-    // std::cout << "GatedDeltaNet output shapes: attn=" << gdn->output(0).get_partial_shape()
-    //           << ", new_state=" << gdn->output(1).get_partial_shape() << std::endl;
+    Output<Node> attn_4d, states;
+    if (snapshot_count > 1) {
+#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
+        auto outputs = translate_gdn_snapshots(q, k, v, state, g, beta, H_v * S_v * q_shape[3],
+                                               fuse_qk_l2norm, q_eps, k_eps, snapshot_count);
+        attn_4d = outputs[0];
+        states = outputs[1];
+#else
+        FRONT_END_OP_CONVERSION_CHECK(false,
+                                      "GATED_DELTA_NET snapshot/rollback requires a patched OpenVINO package");
+#endif
+    } else {
+        auto gdn = std::make_shared<ov::op::internal::GatedDeltaNet>(
+            q, k, v, state, g, beta, fuse_qk_l2norm, q_eps, k_eps);
+        attn_4d = gdn->output(0);
+        states = std::make_shared<ov::op::v1::Transpose>(gdn->output(1), state_perm);
+    }
 
     if (snapshot_count == 1 && context.get_output_names().size() == 2) {
-        auto state_transposed = std::make_shared<ov::op::v1::Transpose>(gdn->output(1), state_perm);
         // The canonical graph consumes the packed GGML result only through separate attention
         // and state VIEWs. Publish the native outputs under those VIEW names to avoid
         // flatten -> concat -> reshape -> slice -> reshape chains. This also works for B > 1.
-        return rename_outputs_with_suffix({attn_4d, state_transposed}, context.get_name());
+        return rename_outputs_with_suffix({attn_4d, states}, context.get_name());
     }
 
     auto flat_shape_1d = ov::op::v0::Constant::create(ov::element::i64, {1}, {-1});
     auto attn = std::make_shared<ov::op::v1::Reshape>(attn_4d, flat_shape_1d, false);
-    Output<Node> states;
-    if (snapshot_count > 1) {
-        auto snapshots = std::make_shared<ov::op::v1::Transpose>(
-            gdn->output(1), ov::op::v0::Constant::create(ov::element::i64, {5}, {0, 1, 2, 4, 3}));
-        auto token_count =
-            std::make_shared<ov::op::v8::Gather>(std::make_shared<ov::op::v3::ShapeOf>(attn_4d, ov::element::i64),
-                                                 ov::op::v0::Constant::create(ov::element::i64, {1}, {1}),
-                                                 ov::op::v0::Constant::create(ov::element::i64, {}, {0}));
-        auto valid_count = std::make_shared<ov::op::v1::Minimum>(
-            token_count, ov::op::v0::Constant::create(ov::element::i64, {1}, {snapshot_count}));
-        auto indices = std::make_shared<ov::op::v4::Range>(
-            ov::op::v0::Constant::create(ov::element::i64, {}, {0}),
-            std::make_shared<ov::op::v0::Squeeze>(valid_count),
-            ov::op::v0::Constant::create(ov::element::i64, {}, {1}), ov::element::i64);
-        states = std::make_shared<ov::op::v8::Gather>(snapshots, indices,
-                                                      ov::op::v0::Constant::create(ov::element::i64, {}, {0}));
-    } else {
-        states = std::make_shared<ov::op::v1::Transpose>(gdn->output(1), state_perm);
-    }
     auto new_state = std::make_shared<ov::op::v1::Reshape>(states, flat_shape_1d, false);
     auto packed = std::make_shared<ov::op::v0::Concat>(ov::OutputVector{attn, new_state}, 0);
     auto out_shape = ov::op::v0::Constant::create(ov::element::i64, {4},

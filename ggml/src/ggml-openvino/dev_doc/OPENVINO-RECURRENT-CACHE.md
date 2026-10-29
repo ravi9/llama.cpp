@@ -2,7 +2,7 @@
 
 As of 2026-10-29, the default Qwen3.5/Qwen3.6 path is dynamic stateless execution with `RecurrentConvCacheUpdate`, `RecurrentGatedDeltaNetUpdate`, and stable pure-top-k MTP translation. It supports one or multiple slots and rollback. The implementation applies to `qwen35` and `qwen35moe`; the performance target is the UD Qwen3.6-35B-A3B MTP GGUF.
 
-Build against the matching OpenVINO runtime/GPU plugin with the independent Update ops. The tested runtime is `qwen-mtp-inplace-primary`, commit `9299cc3d78`; llama.cpp stable sampling is `71c0bbc4d`. Configure `GGML_OPENVINO_DEVICE=GPU`, native softplus, and the documented requantization policy. The current cache translation revision is 13.
+Build against the matching OpenVINO runtime/GPU plugin with the independent Update ops. The tested runtime is `qwen-mtp-inplace-primary`, commit `9299cc3d78`; llama.cpp stable sampling is `71c0bbc4d`. Configure `GGML_OPENVINO_DEVICE=GPU`, native softplus, and the documented requantization policy. The current cache translation revision is 14.
 
 ## Buffer ownership and operation boundaries
 
@@ -25,7 +25,7 @@ The GPU plugin uses two stages: first preserve required original rows in scratch
 
 Exact compatible layouts/storage and exclusive cache readers permit mutation, including eligible optimized Reshape aliases. Shared original-cache readers, incompatible layouts, unrelated overlaps or unsupported execution paths retain immutable-input semantics using a private output and required Result copy-back. Restore or clear state after a failed aliased inference before retrying. GPU replay is disabled for these ops because stage selection depends on bindings.
 
-`GGML_OPENVINO_DISABLE_FUSED_RECURRENCE=1` retains the ordinary decomposition for diagnosis. The primitive/unmatched GDN path retains its snapshot support. Rotation, the former three-op cache solution, the history-only/separate-convolution mode and single-slot no-rollback shortcuts are removed. Stateful and NPU MTP are not the supported default; this validation does not claim those paths.
+`GGML_OPENVINO_DISABLE_FUSED_RECURRENCE=1` retains the ordinary cache decomposition for diagnosis. Naive graphs skip full-model recurrence fusion setup. Unmatched/naive snapshot GDN uses the independent Update op with a temporary cache bank; ordinary GDN remains unchanged. Snapshot/rollback (speculative decoding) on OpenVINO requires a patched runtime/GPU plugin. Unpatched packages reject snapshot GDN with a warning and allow scheduler fallback to another backend. Rotation, the former three-op cache solution, the history-only/separate-convolution mode and single-slot no-rollback shortcuts are removed. Stateful and NPU MTP are not the supported default; this validation does not claim those paths.
 
 ## Attention KV layout
 
@@ -37,7 +37,7 @@ Leave `GGML_OPENVINO_DISABLE_KV_SLICE` unset. Live-prefix slicing applies to eli
 
 The [graph walkthrough](MTP-SAMPLING-GRAPH.md) describes the fixed sampling interface. The backend keeps pure top-k branches for all configured slots, packs runtime row indices, and uses scratch for inactive outputs. It does not change the original cgraph or execute inactive stateful sampler chains. Only the small sampling branches stay at configured capacity; the expensive draft layer processes active rows.
 
-One compatible draft graph is shared across active subsets. Trunk and genuinely different graph stages/configurations remain separate. Prepare a compatible revision-13 cache once, then use cache-only mode. Exhaustive active-subset priming is no longer required, though first-use model import and runtime preparation still have a cost.
+One compatible draft graph is shared across active subsets. Trunk and genuinely different graph stages/configurations remain separate. Prepare a compatible revision-14 cache once, then use cache-only mode. Exhaustive active-subset priming is no longer required, though first-use model import and runtime preparation still have a cost.
 
 ## Validation
 
