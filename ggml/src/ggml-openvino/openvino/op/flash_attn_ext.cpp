@@ -224,7 +224,6 @@ OutputVector translate_flash_attn_ext(const NodeContext & context) {
         } else {
             probs = std::make_shared<ov::op::v1::Multiply>(qk, scale_node);
         }
-        probs = std::make_shared<ov::op::v8::Softmax>(probs, /*axis=*/-1);
 
         if (has_mask) {
             // Mask arrives as [B, 1, S_q, S_k]. Row j * S_q + s of the scores belongs to query position s, so
