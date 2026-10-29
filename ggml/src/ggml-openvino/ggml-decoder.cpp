@@ -452,6 +452,14 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         }
         break;
     }
+    case GGML_OP_SET_ROWS: {
+        // `-fa off` writes the V cache transposed, through a [1, n] reshape of the cache: one element per row
+        if (node->src[2] != nullptr && node->src[2]->op == GGML_OP_RESHAPE && node->src[2]->ne[0] == 1 &&
+            is_kvcache(node->src[2]->src[0], nullptr)) {
+            op_case = 1;
+        }
+        break;
+    }
     case GGML_OP_MUL_MAT: {
         if (node->src[1]->op == GGML_OP_SOFT_MAX) {
             // In the case of `-fa off`, softmax is used, v_trans=true, the dynamic dim is ne[0] for cache_v
@@ -762,6 +770,16 @@ static int get_swa_window_from_mask(const ggml_tensor * mask) {
     return window > 0 ? (int) window : -1;
 }
 
+// The KQ product that the SOFT_MAX of an attention reads: directly, or through the logit soft-capping of gemma-2
+// (SCALE, TANH, SCALE)
+static const ggml_tensor * softmax_scores_source(const ggml_tensor * scores) {
+    while (scores != nullptr && (scores->op == GGML_OP_SCALE ||
+                                 (scores->op == GGML_OP_UNARY && ggml_get_unary_op(scores) == GGML_UNARY_OP_TANH))) {
+        scores = scores->src[0];
+    }
+    return scores;
+}
+
 std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgraph * cgraph, bool is_static) {
     ModelParams model_params;
     ComputeParams compute_params;
@@ -804,12 +822,12 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
                 break;
             }
             break;
-        case GGML_OP_SOFT_MAX:
-            // case 2: node op is SOFT_MAX, src 0 not null & op is MUL_MAT & the src 0 of MUL_MAT is PERMUTE & the permuted tensor src is the view of cache k
-            if (node->src[0] != nullptr && node->src[1] != nullptr && node->src[0]->op == GGML_OP_MUL_MAT &&
-                node->src[0]->src[0] != nullptr && node->src[0]->src[1] != nullptr &&
-                node->src[0]->src[0]->op == GGML_OP_PERMUTE && node->src[0]->src[0]->src[0] != nullptr &&
-                node->src[0]->src[0]->src[0]->op == GGML_OP_VIEW) {
+        case GGML_OP_SOFT_MAX: {
+            // case 2: node op is SOFT_MAX, its scores come from a MUL_MAT (see softmax_scores_source) & the src 0 of MUL_MAT is PERMUTE & the permuted tensor src is the view of cache k
+            const ggml_tensor * kq = softmax_scores_source(node->src[0]);
+            if (kq != nullptr && node->src[1] != nullptr && kq->op == GGML_OP_MUL_MAT && kq->src[0] != nullptr &&
+                kq->src[1] != nullptr && kq->src[0]->op == GGML_OP_PERMUTE && kq->src[0]->src[0] != nullptr &&
+                kq->src[0]->src[0]->op == GGML_OP_VIEW) {
                 return 2;
             }
             // case 3: node op is SOFT_MAX, src 0 not null & op is ADD & the src 0 of ADD is MUL_MAT & the src 0 of MUL_MAT is PERMUTE
@@ -819,6 +837,7 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
                 return 3;
             }
             break;
+        }
         default:
             break;
         }
@@ -836,6 +855,22 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
         case 2:
         case 3:
             return node->src[1];
+        default:
+            return nullptr;
+        }
+    };
+
+    // The PERMUTE of the K cache view an attention node reads, for the same src layouts
+    auto get_attention_cache_k_permute = [&get_attention_pattern_case](const ggml_tensor * node) -> ggml_tensor * {
+        switch (get_attention_pattern_case(node)) {
+        case 0:
+            return node->src[1];
+        case 1:
+            return node->src[1]->src[0];
+        case 2:
+            return softmax_scores_source(node->src[0])->src[0];
+        case 3:
+            return node->src[0]->src[0]->src[0];
         default:
             return nullptr;
         }
@@ -874,14 +909,7 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
             if (mask == nullptr) {
                 continue;
             }
-            const ggml_tensor * cache_k_permute = nullptr;
-            switch (get_attention_pattern_case(cgraph->nodes[i])) {
-            case 0:  cache_k_permute = cgraph->nodes[i]->src[1];                     break;
-            case 1:  cache_k_permute = cgraph->nodes[i]->src[1]->src[0];             break;
-            case 2:  cache_k_permute = cgraph->nodes[i]->src[0]->src[0];             break;
-            default: cache_k_permute = cgraph->nodes[i]->src[0]->src[0]->src[0];     break;
-            }
-            const ggml_tensor * cache_k_view = cache_k_permute->src[0];
+            const ggml_tensor * cache_k_view = get_attention_cache_k_permute(cgraph->nodes[i])->src[0];
             if (cache_k_view->op != GGML_OP_VIEW) {
                 continue;
             }
@@ -950,26 +978,23 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
             node->src[2]->ne[0] == 1 && is_kvcache(node->src[2]->src[0], nullptr)) {
             model_params.v_trans = true;
         }
+        if (node->op == GGML_OP_FLASH_ATTN_EXT) {
+            float logit_softcap = 0.0f;
+            memcpy(&logit_softcap, (const float *) node->op_params + 2, sizeof(float));
+            model_params.softcap_attn = model_params.softcap_attn || logit_softcap != 0.0f;
+        }
         const int attention_pattern_case = get_attention_pattern_case(node);
         if (attention_pattern_case != -1) {
-            ggml_tensor * cache_k_permute = nullptr;
+            ggml_tensor * cache_k_permute = get_attention_cache_k_permute(node);
             ggml_tensor * mask = nullptr;
 
             switch (attention_pattern_case) {
             case 0:
-                cache_k_permute = node->src[1];
-                mask = node->src[3];
-                break;
             case 1:
-                cache_k_permute = node->src[1]->src[0];
                 mask = node->src[3];
                 break;
             case 2:
-                cache_k_permute = node->src[0]->src[0];
-                mask = node->src[1];
-                break;
             case 3:
-                cache_k_permute = node->src[0]->src[0]->src[0];
                 mask = node->src[1];
                 break;
             case 4:
@@ -1036,7 +1061,7 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
                 compute_params.mask_name = mask_name;
             }
             if (is_static) {
-                const bool slice_prefill = ggml_openvino_static_kv_slice_enabled() && compute_params.input_len > 1;
+                const bool slice_prefill = ggml_openvino_kv_slice_enabled() && compute_params.input_len > 1;
                 if (!slice_prefill) {
                     compute_params.attention_size = model_params.ctx_per_seq;
                 }
@@ -1059,7 +1084,7 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
             node->src[0]->src[0]->op == GGML_OP_VIEW) {
             compute_params.attention_size = node->ne[0];
             compute_params.mask_name.clear();
-            if (is_static && !(ggml_openvino_static_kv_slice_enabled() && compute_params.input_len > 1)) {
+            if (is_static && !(ggml_openvino_kv_slice_enabled() && compute_params.input_len > 1)) {
                 compute_params.attention_size = model_params.ctx_per_seq;
             }
         }
@@ -1215,7 +1240,7 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
             // Both masks are named "attn_inp_kq_mask", so tell them apart by tensor identity.
             const bool swa_mask = is_swa_mask(input);
             int attention_size = swa_mask ? m_model_params.ctx_per_seq_swa * m_model_params.n_seq : m_model_params.ctx;
-            if (m_is_prefill && ggml_openvino_static_kv_slice_enabled()) {
+            if (m_is_prefill && ggml_openvino_kv_slice_enabled()) {
                 attention_size = swa_mask ? m_compute_params.attention_size_swa : m_compute_params.attention_size;
             }
             input_shape = ov::PartialShape{1, 1, m_is_prefill ? m_prefill_chunk_size : 1, attention_size};
@@ -1241,7 +1266,7 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
         if (!m_is_static && !is_flat_kv) {
             // do not fix ctx size to make llama-bench work across test params
             input_shape[2] = -1;
-        } else if (m_is_prefill && ggml_openvino_static_kv_slice_enabled()) {
+        } else if (m_is_prefill && ggml_openvino_kv_slice_enabled()) {
             const auto layer = extract_layer_from_name(name);
             if (layer.has_value() && !is_swa_layer(*layer) && m_compute_params.attention_size > 0 &&
                 m_compute_params.attention_size < input_shape[2].get_length()) {
@@ -1593,8 +1618,9 @@ bool GgmlOvDecoder::is_kvcache_4d(const ggml_tensor * cache) const {
         return false;
     }
     // `-fa off` (transposed V cache): keep the [1, 1, ctx, n_heads_kv * head_size] layout. The 4-D K cache breaks the
-    // MUL_MAT attention of the Phi-3 models (Phi-3.5 mini, Phi-4 mini).
-    if (m_model_params.v_trans) {
+    // MUL_MAT attention of the Phi-3 models (Phi-3.5 mini, Phi-4 mini), and the soft-capped manual attention of
+    // gemma-2 with `-fa on` ("could not construct a memory descriptor using strides" in the GPU plugin's oneDNN path).
+    if (m_model_params.v_trans || m_model_params.softcap_attn) {
         return false;
     }
     if (cache->op != GGML_OP_NONE || cache->view_src != nullptr || !is_kvcache(cache, nullptr)) {
