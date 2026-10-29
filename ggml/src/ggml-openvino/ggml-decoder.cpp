@@ -2106,6 +2106,9 @@ void GgmlOvDecoder::dump_cgraph(const ggml_cgraph * cgraph, std::string & filena
              << std::setw(5) << node->nb[2] << ", "
              << std::setw(5) << node->nb[3] << "] "
              << std::right << std::setw(15) << buf_name << std::right
+             << " compute=" << ((node->flags & GGML_TENSOR_FLAG_COMPUTE) != 0)
+             << " output=" << ((node->flags & GGML_TENSOR_FLAG_OUTPUT) != 0)
+             << " view_offs=" << node->view_offs
              << "\n";
 
         for (int i = 0; i < GGML_MAX_SRC; i++) {
