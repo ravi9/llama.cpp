@@ -74,6 +74,17 @@ The new fresh streaming run imports only the draft and trunk models, at 3.899s a
 
 Commands, effective environments, logs, responses and `comparison.json`: `/home/zijun/llama.cpp/tmp/stable-sampling-ctx524288-20261029`. Its local harness copies retain their original paths as provenance, not as instructions for the current checkout.
 
+### Stable translation: MTP off -> on (continuous requests)
+
+Native decode tokens/s per request, excluding prompt evaluation. Fresh servers use four slots, total context 524288, unified KV, default batches, the first eight MMLU questions and 512 generated tokens per request. The streaming harness replaces completed requests immediately, with one or four requests in flight.
+
+| Requests in flight | MTP off -> on | Change |
+|---|---:|---:|
+| 1 | 37.22 -> 49.13 | +32.0% |
+| 4 | 21.58 -> 27.03 | +25.2% |
+
+MTP-off values reuse the 2026-10-28 baseline and were not rerun. Stable MTP values are fresh-request streaming measurements from 2026-10-29; the new one-request run is in `tmp/stable-sampling-ctx524288-20261029/streaming-fresh-c1`, and the four-request run is in `streaming-fresh`. Both use cache-only mode with no request priming. The stable runs disable the ordinary startup probe with `--no-warmup`; the stored baseline kept it. These are observed improvements against the retained baseline, not a fully matched fresh A/B experiment. Exact values and source paths are in `mtp-off-on.json` in the same artifact directory.
+
 ## MMLU before stable sampling: fresh servers (2026-10-28)
 
 This stored baseline uses `-np 4 -c 524288 --kv-unified`, default batches, cache-only loading, and the original streaming harness with continuous request replacement. No request warmup precedes measurement. The first MTP prompt evaluations include graph imports (77.291s at concurrency 1; about 110.689s for the first four concurrent requests).
