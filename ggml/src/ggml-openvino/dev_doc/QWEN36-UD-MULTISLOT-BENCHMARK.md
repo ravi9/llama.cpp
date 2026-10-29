@@ -54,16 +54,7 @@ Process RSS excludes some GPU/system allocations. Raw commands, per-process memo
 
 ## Stable MTP sampling graph (2026-10-28)
 
-The UD model uses `-np 4 -c 8192 --kv-unified --no-warmup`, default batches, two draft tokens and the same OV configuration as above. A single slot-3 request prepares two blobs, one trunk and one draft. A new cache-only process serves all 15 requested slot subsets and 49 requests / 8960 generated tokens without another model. The first request's 7.704s prompt evaluation includes import and is excluded from warmed timing.
-
-Eight MMLU questions (35-73 templated tokens, mean 53.25) generate exactly 512 tokens each. These are natural-text throughput tests, not MMLU accuracy evaluations.
-
-| Requests in flight | Mean native prompt evaluation (s) | Native decode t/s per request | Accepted / drafted |
-|---|---:|---:|---:|
-| 1 | 0.418 | 47.33 | 2626/2913 |
-| 4 | 1.129 | 29.09 | 2622/2924 |
-
-The grouped, non-streaming client waits for each group of four to finish. Aggregate end-to-end rates, including prefill and scheduling, are 45.36 and 105.94 t/s. Client TTFT was not measured. All eight sequential generated texts and total acceptance match the earlier sequential run. Artifacts: `tmp/stable-sampling-20261028` under the main checkout.
+At `-np 4 -c 8192 --kv-unified --no-warmup`, a single slot-3 request prepares two blobs, one trunk and one draft. A new cache-only process serves all 15 requested slot subsets without another model: 33 validation requests / 768 generated tokens. These short requests check correctness and cache reuse; throughput uses the continuous streaming harness below. Validation artifacts and the validation-only `target_validate.py`: `tmp/stable-sampling-20261028`.
 
 ## Matched-context and streaming-harness follow-up (2026-10-29)
 
@@ -72,14 +63,12 @@ All rows use four slots and eight 512-token MMLU outputs. Larger-context runs re
 | Implementation / measurement | Total context | Request scheduling | Request warmup | Native decode t/s per request |
 |---|---:|---|---|---:|
 | Earlier translation, stored result | 524288 | Streaming server-bench, continuous replacement | None | 22.79 |
-| Stable translation, earlier follow-up | 8192 | Two separate groups of four | Yes | 29.09 |
-| Stable translation, context-matched | 524288 | Two separate groups of four | Yes | 28.55 |
 | Stable translation, original harness | 524288 | Streaming server-bench, continuous replacement | Yes | 27.71 |
 | Stable translation, original harness | 524288 | Streaming server-bench, continuous replacement | None | 27.03 |
 
-Context allocation changes the grouped result by only 1.9%; single-request warmed rates are 47.33 at 8192 and 46.88 at 524288. Streaming `server-bench.py` immediately replaces completed requests, allowing new prefill to delay ongoing decode; the grouped client does not.
+All retained four-request MTP throughput tests use `scripts/server-bench.py`: eight MMLU questions, exactly 512 outputs per request, and four requests in flight with immediate replacement when a request completes. Incoming prefill can delay ongoing decode. This is the default serving benchmark approach.
 
-The closest observed comparison is **22.79 -> 27.03 t/s per request (+18.6%)**. This supports stable translation and removal of active-subset-specific models/first-use work as the main contributor. It does not establish a 27.6% raw-kernel speedup or an exact causal decomposition. These are single-pass comparisons with a stored baseline; the new runs disable the ordinary startup probe, while the earlier run kept it. Request warmup is separate from that startup probe.
+The closest observed comparison is **22.79 -> 27.03 t/s per request (+18.6%)**. This supports stable translation and removal of active-subset-specific models/first-use work as the main contributor. It does not establish a raw-kernel speedup or an exact causal decomposition. These are single-pass comparisons with a stored baseline; the new runs disable the ordinary startup probe, while the earlier run kept it. Request warmup is separate from that startup probe.
 
 The new fresh streaming run imports only the draft and trunk models, at 3.899s and 28.026s, before generation. Earlier variant imports at 2:43.605, 2:47.778 and 2:53.037 overlap generation and can lower native decode rate. Warm/fresh stable streaming aggregate end-to-end rates are 102.65/63.42 t/s; acceptance is 2634/2897 and 2627/2909. Each run completes eight requests and 4096 outputs.
 
