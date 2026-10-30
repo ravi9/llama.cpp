@@ -110,8 +110,11 @@ static ov::Output<ov::Node> reshape_flat_kv(const ov::Output<ov::Node> & kv_flat
 }
 
 OutputVector translate_flash_attn_ext(const NodeContext & context) {
-    num_inputs_check(context, 3, 4);
-    const bool has_mask = context.get_input_size() == 4;
+    num_inputs_check(context, 3, 5);
+    // Inputs are q, k, v, then the optional mask and sinks; supports_op rejects sinks without a mask
+    const bool has_mask = context.get_input_size() >= 4;
+    const bool has_sink = context.get_input_size() == 5;
+
     auto q_f32 = context.get_input(0);
     auto k = context.get_input(1);
     auto v = context.get_input(2);
@@ -160,6 +163,16 @@ OutputVector translate_flash_attn_ext(const NodeContext & context) {
         }
     }
 
+    ov::Output<ov::Node> sink;
+    if (has_sink) {
+        sink = context.get_input(4);
+        if (sink.get_element_type() != q->get_element_type()) {
+            sink = std::make_shared<ov::op::v0::Convert>(sink, q->get_element_type());
+        }
+        sink = std::make_shared<ov::op::v1::Reshape>(
+            sink, ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{1, -1, 1, 1}), false);
+    }
+
     //auto tile_kv = [&](int64_t num_heads, int64_t num_heads_kv, int64_t head_size, ov::Output<Node> kv) {
     //    int64_t factor = num_heads / num_heads_kv;
     //    if (factor > 1 && num_heads_kv > 1) {
@@ -185,8 +198,10 @@ OutputVector translate_flash_attn_ext(const NodeContext & context) {
     // from Q's (e.g. MLA) take the SDPA path.
     const bool same_head_size = k_shape[3] == q_shape[3] && v_shape[3] == q_shape[3];
     // SDPA has no logit soft-capping (gemma-2), so soft-capped attention always takes the manual path, also in
-    // stateful execution
+    // stateful execution. Only SDPA applies sinks, so attention with sinks never takes the manual path
+    // (supports_op rejects sinks with soft-capping)
     const bool use_manual_gqa_attention =
+        !has_sink &&
         (logit_softcap != 0.0f || (manual_gqa_enabled && factor > 1 && num_heads_kv > 1 && !context.is_stateful())) &&
         same_head_size;
     FRONT_END_OP_CONVERSION_CHECK(logit_softcap == 0.0f || use_manual_gqa_attention,
@@ -285,8 +300,9 @@ OutputVector translate_flash_attn_ext(const NodeContext & context) {
         return kv;
     };
 
-    const bool use_hfa_gate = ggml_openvino_npu_hfa_prefill_enabled() && context.is_static() &&
-                              context.is_prefill() && has_mask;
+    // the HFA prefill path has no sinks
+    const bool use_hfa_gate =
+        ggml_openvino_npu_hfa_prefill_enabled() && context.is_static() && context.is_prefill() && has_mask && !has_sink;
     if (use_hfa_gate) {
         const int layer = extract_layer(context.get_input_names()[1]);
         auto past_k = context.get_input("ggml_hfa_past_cache_k_l" + std::to_string(layer));
@@ -336,7 +352,11 @@ OutputVector translate_flash_attn_ext(const NodeContext & context) {
     }
 
     constexpr auto causal = false;
-    if (has_mask) {
+    if (has_mask && has_sink) {
+        auto sdpa = std::make_shared<ov::op::v13::ScaledDotProductAttention>(q, k, v, mask, scale_node, sink, causal);
+        res = std::make_shared<ov::op::v1::Transpose>(
+            sdpa, ov::op::v0::Constant::create(ov::element::i64, {4}, {0, 2, 1, 3}));
+    } else if (has_mask) {
         auto sdpa = std::make_shared<ov::op::v13::ScaledDotProductAttention>(q, k, v, mask, scale_node, causal);
         res = std::make_shared<ov::op::v1::Transpose>(
             sdpa, ov::op::v0::Constant::create(ov::element::i64, {4}, {0, 2, 1, 3}));
