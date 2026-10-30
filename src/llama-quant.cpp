@@ -1114,6 +1114,27 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
     }
     if (!prune_list.empty()) {
         gguf_set_val_u32(ctx_out.get(), ml.llm_kv(LLM_KV_BLOCK_COUNT).c_str(), blk_id);
+
+        if (model->arch == LLM_ARCH_QWEN35 || model->arch == LLM_ARCH_QWEN35MOE) {
+            std::vector<int8_t> recurrent_layers;
+            uint32_t            n_layer_nextn = 0;
+
+            for (uint32_t il = 0; il < model->hparams.n_layer_all; ++il) {
+                if (std::find(prune_list.begin(), prune_list.end(), il) != prune_list.end()) {
+                    continue;
+                }
+
+                recurrent_layers.push_back(model->hparams.is_recr(il));
+                n_layer_nextn += il >= model->hparams.n_layer();
+            }
+
+            gguf_set_arr_data(ctx_out.get(), ml.llm_kv(LLM_KV_ATTENTION_RECURRENT_LAYERS).c_str(), GGUF_TYPE_BOOL,
+                              recurrent_layers.data(), recurrent_layers.size());
+
+            if (model->hparams.n_layer_nextn > 0) {
+                gguf_set_val_u32(ctx_out.get(), ml.llm_kv(LLM_KV_NEXTN_PREDICT_LAYERS).c_str(), n_layer_nextn);
+            }
+        }
     }
 
     // keep_split requires that the weights are sorted by split index

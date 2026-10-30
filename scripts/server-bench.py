@@ -6,6 +6,7 @@ import os
 import random
 import sqlite3
 import subprocess
+from pathlib import Path
 from time import sleep, time
 from typing import Optional, Union
 
@@ -126,27 +127,50 @@ def send_prompt(data: dict) -> tuple[float, list[float]]:
         response.raise_for_status()
         prompt: str = json.loads(response.text)["prompt"]
 
-        json_data: dict = {"prompt": prompt, "seed": data["seed"], "n_predict": data["n_predict"], "stream": True}
+        json_data: dict = {"prompt": prompt, "seed": data["seed"], "n_predict": data["n_predict"], "stream": True,
+                           "ignore_eos": True, "cache_prompt": False}
         response = session.post(f"{server_address}/completion", json=json_data, stream=True)
     response.raise_for_status()
 
-    lines = []
+    events = []
     token_arrival_times: list[float] = []
+    native_tokens_predicted = 0
     for line in response.iter_lines(decode_unicode=False):
-        if not line.startswith(b"data: "):
+        if not line.startswith(b"data: ") or line[6:] == b"[DONE]":
             continue
-        lines.append(line)
-        token_arrival_times.append(time())
-    token_arrival_times = token_arrival_times[:-1]
-    if len(lines) > 1 and "timings" in json.loads(lines[-2][6:]):
-        token_arrival_times = token_arrival_times[:-1]
+        event = json.loads(line[6:])
+        if "error" in event:
+            raise RuntimeError(f"Server stream error: {event['error']}")
+        events.append(event)
+        # Native streams can withhold token IDs while buffering incomplete UTF-8.
+        # Their cumulative counter includes that work, including the final event.
+        if not data["external_server"] and "tokens_predicted" in event:
+            predicted = event["tokens_predicted"]
+            if predicted < native_tokens_predicted:
+                raise RuntimeError("Server token counter decreased during streaming")
+            token_arrival_times.extend([time()] * (predicted - native_tokens_predicted))
+            native_tokens_predicted = predicted
+            continue
+        if event.get("stop"):
+            continue
+        # Count native token IDs, excluding empty begin/progress events.
+        # If an event groups tokens, they share the same arrival time.
+        count = len(event["tokens"]) if "tokens" in event else 1
+        token_arrival_times.extend([time()] * count)
 
+    if data.get("results_dir"):
+        timing = next((event["timings"] for event in reversed(events) if "timings" in event), None)
+        Path(data["results_dir"]).mkdir(parents=True, exist_ok=True)
+        Path(data["results_dir"], f"request-{data['request_index']:04d}.json").write_text(
+            json.dumps({"prompt": data["prompt"], "request": json_data, "timings": timing,
+                        "events": events, "token_arrival_times": token_arrival_times,
+                        "submitted_at": t_submit, "completed_at": time()}, indent=2))
     return (t_submit, token_arrival_times)
 
 
 def benchmark(
         path_server: str, path_log: Optional[str], path_db: Optional[str], name: Optional[str], prompt_source: str, n_prompts: int,
-        n_predict: int, n_predict_min: int, seed_offset: int):
+        n_predict: int, n_predict_min: int, seed_offset: int, results_dir: Optional[str] = None):
     external_server: bool = path_server.startswith("http://") or path_server.startswith("https://")
     if os.environ.get("LLAMA_ARG_N_PARALLEL") is None:
         logger.info("LLAMA_ARG_N_PARALLEL not explicitly set, using 32")
@@ -196,6 +220,7 @@ def benchmark(
             data.append({
                 "session": session, "server_address": server_address, "external_server": external_server, "prompt": p,
                 "synthetic_prompt": synthetic_prompts, "n_predict": random.randint(n_predict_min, n_predict),
+                "results_dir": results_dir, "request_index": i,
                 "seed": (3 * (seed_offset + 1000 * i) + 2) if seed_offset >= 0 else -1})
 
         if not synthetic_prompts:
@@ -262,7 +287,7 @@ def benchmark(
     plt.ylabel("Time to first token [ms]")
     plt.savefig("prompt_time.png", dpi=240)
 
-    bin_max = np.ceil(token_t_last) + 1
+    bin_max = int(np.ceil(token_t_last)) + 1
     plt.figure()
     plt.hist(token_t, np.linspace(0, bin_max, bin_max, endpoint=False).tolist())
     plt.xlim(0, bin_max + 1)
@@ -281,6 +306,7 @@ if __name__ == "__main__":
         "particularly when the server is fast vs. the network or Python script (e.g. when serving a very small model).")
     parser.add_argument("--path_server", type=str, default="llama-server", help="Path to the llama.cpp server binary")
     parser.add_argument("--path_log", type=str, default="server-bench-{port}.log", help="Path to the model to use for the benchmark")
+    parser.add_argument("--results_dir", type=str, default=None, help="Save each response and native server timings for token-count and MTP analysis")
     parser.add_argument("--path_db", type=str, default=None, help="Path to an sqlite database to store the benchmark results in")
     parser.add_argument("--name", type=str, default=None, help="Name to label plots and database entries with")
     parser.add_argument(

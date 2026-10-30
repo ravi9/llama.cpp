@@ -2,6 +2,7 @@
 #include "llama.h"
 #include "llama-cpp.h"
 #include "common.h"
+#include "../src/llama-ext.h"
 #include "sampling.h"
 
 #ifdef NDEBUG
@@ -88,7 +89,8 @@ struct test_context {
             int32_t n_seq_max = -1,
             uint32_t n_outputs_max = 0,
             uint32_t n_ubatch = 0,
-            uint32_t n_outputs_max_per_seq = 1) {
+            uint32_t n_outputs_max_per_seq = 1,
+            uint32_t n_rs_seq = 0) {
         auto * model = params.model.get();
 
         GGML_ASSERT(model);
@@ -102,6 +104,7 @@ struct test_context {
         }
         cparams.n_outputs_max = n_outputs_max;
         cparams.n_outputs_max_per_seq = n_outputs_max_per_seq;
+        cparams.n_rs_seq = n_rs_seq;
         cparams.samplers = configs.data();
         cparams.n_samplers = configs.size();
         cparams.kv_unified = true;
@@ -464,6 +467,10 @@ static void test_top_k(const test_params & params) {
 
     llama_token * candidates = llama_get_sampled_candidates_ith(test_ctx.ctx.get(), batch_idx);
     uint32_t n_candidates = llama_get_sampled_candidates_count_ith(test_ctx.ctx.get(), batch_idx);
+    GGML_ASSERT(n_candidates == (uint32_t) k && n_logits == (uint32_t) k);
+    std::vector<llama_token> sorted_candidates(candidates, candidates + n_candidates);
+    std::sort(sorted_candidates.begin(), sorted_candidates.end());
+    GGML_ASSERT(std::adjacent_find(sorted_candidates.begin(), sorted_candidates.end()) == sorted_candidates.end());
     for (size_t i = 0; i < n_candidates; ++i) {
         printf("top_k candidate[%zu] = %d : %s\n", i, candidates[i],
                test_ctx.token_to_piece(candidates[i], false).c_str());
@@ -1073,7 +1080,8 @@ static sampler_comparison_stats compare_sampler_outputs(
         const char * name,
         const std::unordered_map<llama_token, float> & expected,
         const backend_sampler_output & actual,
-        bool allow_extra_candidates = false) {
+        bool allow_extra_candidates = false,
+        float tolerance = 1e-3f) {
     GGML_ASSERT(actual.logits.size() == actual.candidates.size());
 
     sampler_comparison_stats result;
@@ -1106,7 +1114,7 @@ static sampler_comparison_stats compare_sampler_outputs(
 
         const float diff = fabsf(it->second - logit);
         result.max_diff = std::max(result.max_diff, diff);
-        if (!std::isfinite(logit) || diff > 1e-3f) {
+        if (!std::isfinite(logit) || diff > tolerance) {
             if (result.n_mismatch < 5) {
                 printf("%s mismatch token %d: cpu=%.6f backend=%.6f diff=%.6f\n",
                         name, token, it->second, logit, diff);
@@ -1127,6 +1135,276 @@ static sampler_comparison_stats compare_sampler_outputs(
     printf("%s logits: max_diff=%.6f n_masked=%d n_mismatch=%d\n",
             name, result.max_diff, result.n_masked, result.n_mismatch);
     return result;
+}
+
+static void test_backend_top_k_rows_impl(const test_params & params, uint32_t n_rs_seq, bool hidden = false, int subsets = 0) {
+    const int32_t k = 8;
+    const int n_seq = subsets ? 4 : 2;
+    std::vector<llama_sampler_ptr> chains;
+    std::vector<llama_sampler_seq_config> configs;
+    for (int seq = 0; seq < n_seq; ++seq) {
+        chains.emplace_back(llama_sampler_chain_init(llama_sampler_chain_default_params()));
+        llama_sampler_chain_add(chains.back().get(), llama_sampler_init_top_k(k));
+        configs.push_back({seq, chains.back().get()});
+    }
+    std::vector<llama_sampler_seq_config> reference_configs;
+    test_context ctx(params, configs, n_seq, n_seq * 3, n_seq * 4, 3, n_rs_seq);
+    test_context reference(params, reference_configs, n_seq, n_seq * 3, n_seq * 4, 3);
+    if (hidden) {
+        llama_set_embeddings_nextn(ctx.ctx.get(), true, false);
+        llama_set_embeddings_nextn(reference.ctx.get(), true, false);
+    }
+    llama_sampler_ptr cpu_top_k(llama_sampler_init_top_k(k));
+
+    struct batch_case {
+        int counts[4];
+        bool output;
+    };
+    std::vector<batch_case> cases = {{{2, 2}, true}, {{1, 1}, true}, {{2, 0}, false},
+                                    {{0, 3}, true}, {{2, 1}, true}, {{1, 1}, true}, {{1, 0}, true},
+                                    {{0, 1}, true}, {{1, 0}, true}};
+    if (subsets) {
+        // Prime only slot 3, then exercise every subset with one and multiple output rows.
+        cases = {{{0, 0, 0, 1}, true}};
+        for (int mask = 1; mask <= subsets && subsets > 1; ++mask) {
+            for (int count : {1, 2}) {
+                batch_case c = {{0, 0, 0, 0}, true};
+                for (int seq = 0; seq < n_seq; ++seq) {
+                    c.counts[seq] = (mask & (1 << seq)) ? count : 0;
+                }
+                cases.push_back(c);
+            }
+        }
+    }
+    int32_t positions[4] = {0, 0, 0, 0};
+    int case_index = 0;
+    for (const auto & c : cases) {
+        fprintf(stderr, "top_k_rows case %d: counts=%d,%d,%d,%d output=%d\n", case_index, c.counts[0], c.counts[1], c.counts[2], c.counts[3], c.output);
+        auto make_batch = [&](llama_context * context) {
+            common_batch batch(context);
+            for (llama_seq_id seq = 0; seq < n_seq; ++seq) {
+                const int rejected = n_rs_seq > 0 && context == reference.ctx.get() ?
+                    (case_index == 4 && seq == 0 ? 1 : case_index == 3 && seq == 1 ? 2 : 0) : 0;
+                const int count = c.counts[seq] - rejected;
+                for (int i = 0; i < count; ++i) {
+                    const llama_token token = (100 + seq * 100 + positions[seq] + i) % ctx.n_vocab;
+                    batch.add(token, positions[seq] + i, seq, c.output);
+                }
+            }
+            return batch;
+        };
+        auto batch = make_batch(ctx.ctx.get());
+        auto reference_batch = make_batch(reference.ctx.get());
+        GGML_ASSERT(llama_process(ctx.ctx.get(), LLAMA_PROCESS_TYPE_DECODE, batch.get()) == 0);
+        GGML_ASSERT(llama_process(reference.ctx.get(), LLAMA_PROCESS_TYPE_DECODE, reference_batch.get()) == 0);
+        if (hidden) {
+            const int32_t n_embd = llama_model_n_embd(params.model.get());
+            for (int i = 0; i < batch.size(); ++i) {
+                if (n_rs_seq > 0 && ((case_index == 4 && i == 1) || (case_index == 3 && i > 0))) {
+                    continue;
+                }
+                const int reference_row = i - (n_rs_seq > 0 && case_index == 4 && i > 1);
+                const float * actual = llama_get_embeddings_nextn_ith(ctx.ctx.get(), i);
+                const float * expected = llama_get_embeddings_nextn_ith(reference.ctx.get(), reference_row);
+                GGML_ASSERT(actual != nullptr && expected != nullptr);
+                double error = 0.0;
+                double norm = 0.0;
+                float max_diff = 0.0f;
+                for (int j = 0; j < n_embd; ++j) {
+                    GGML_ASSERT(std::isfinite(actual[j]) && std::isfinite(expected[j]));
+                    const float diff = actual[j] - expected[j];
+                    max_diff = std::max(max_diff, std::abs(diff));
+                    error += double(diff) * diff;
+                    norm += double(expected[j]) * expected[j];
+                }
+                const double relative_error = std::sqrt(error / std::max(norm, 1e-12));
+                printf("top_k_rows h_nextn: max_diff=%.6f relative_error=%.6f\n", max_diff, relative_error);
+                GGML_ASSERT(relative_error < 1e-2);
+            }
+        }
+        for (int i = 0; c.output && i < batch.size(); ++i) {
+            if (n_rs_seq > 0 && ((case_index == 4 && i == 1) || (case_index == 3 && i > 0))) {
+                continue;
+            }
+            const int reference_row = i - (n_rs_seq > 0 && case_index == 4 && i > 1);
+            const float * raw = llama_get_logits_ith(reference.ctx.get(), reference_row);
+            GGML_ASSERT(raw != nullptr);
+            const auto expected = apply_cpu_sampler(std::vector<float>(raw, raw + ctx.n_vocab), cpu_top_k.get());
+            const uint32_t n_logits = llama_get_sampled_logits_count_ith(ctx.ctx.get(), i);
+            const uint32_t n_candidates = llama_get_sampled_candidates_count_ith(ctx.ctx.get(), i);
+            GGML_ASSERT(n_logits == (uint32_t) k && n_candidates == (uint32_t) k);
+            const float * logits = llama_get_sampled_logits_ith(ctx.ctx.get(), i);
+            const llama_token * candidates = llama_get_sampled_candidates_ith(ctx.ctx.get(), i);
+            GGML_ASSERT(logits != nullptr && candidates != nullptr);
+            backend_sampler_output actual;
+            actual.logits.assign(logits, logits + n_logits);
+            actual.candidates.assign(candidates, candidates + n_candidates);
+            const float tolerance = 2e-2f;
+            float cutoff = expected.front().logit;
+            for (const auto & candidate : expected) {
+                cutoff = std::min(cutoff, candidate.logit);
+            }
+            std::unordered_map<llama_token, float> selected_logits;
+            for (const auto token : actual.candidates) {
+                GGML_ASSERT(token >= 0 && token < ctx.n_vocab);
+                if (raw[token] < cutoff - tolerance) {
+                    fprintf(stderr, "top_k_rows: case=%d row=%d token=%d raw=%.6f cutoff=%.6f\n",
+                            case_index, i, token, raw[token], cutoff);
+                }
+                GGML_ASSERT(raw[token] >= cutoff - tolerance);
+                GGML_ASSERT(selected_logits.emplace(token, raw[token]).second);
+            }
+            for (const auto & candidate : expected) {
+                GGML_ASSERT(candidate.logit <= cutoff + tolerance || selected_logits.count(candidate.id) != 0);
+            }
+            // GPU f16 rounding can exchange candidates at the top-k boundary.
+            GGML_ASSERT(compare_sampler_outputs("top_k_rows", selected_logits, actual, false, tolerance).n_mismatch == 0);
+        }
+        for (int seq = 0; seq < n_seq; ++seq) {
+            positions[seq] += c.counts[seq];
+        }
+        if (n_rs_seq > 0 && case_index == 4) {
+            GGML_ASSERT(llama_memory_seq_rm(llama_get_memory(ctx.ctx.get()), 0, positions[0] - 1, -1));
+            --positions[0];
+        }
+        if (n_rs_seq > 0 && case_index == 3) {
+            GGML_ASSERT(llama_memory_seq_rm(llama_get_memory(ctx.ctx.get()), 1, positions[1] - 2, -1));
+            positions[1] -= 2;
+        }
+        ++case_index;
+    }
+    printf("backend top-k changing rows test PASSED\n");
+}
+
+static void test_backend_top_k_rows(const test_params & params) {
+    test_backend_top_k_rows_impl(params, 0);
+}
+
+static void test_backend_top_k_rows_rollback(const test_params & params) {
+    test_backend_top_k_rows_impl(params, 2);
+}
+
+static void test_backend_top_k_hidden_rollback(const test_params & params) {
+    test_backend_top_k_rows_impl(params, 2, true);
+}
+
+static void test_backend_top_k_subsets(const test_params & params) {
+    test_backend_top_k_rows_impl(params, 0, false, 15);
+}
+
+static void test_backend_top_k_subsets_prime(const test_params & params) {
+    test_backend_top_k_rows_impl(params, 0, false, 1);
+}
+
+// Compare slot transitions against a fresh, independently replayed sequence. This catches
+// resets of the wrong cache row and writes that clobber inactive or copied sequences.
+static void test_backend_recurrent_slots(const test_params & params) {
+    std::vector<llama_sampler_seq_config> configs;
+    test_context reference(params, configs, 1, 1, 64);
+    for (uint32_t rollback : {0u, 2u}) {
+        test_context ctx(params, configs, 4, 12, 16, 3, rollback);
+        std::vector<std::vector<llama_token>> history(4);
+        int next_token = 100;
+        auto run = [&](std::vector<int> counts) {
+            common_batch batch(ctx.ctx.get());
+            std::vector<int> rows(4, -1);
+            for (int seq = 0; seq < 4; ++seq) {
+                for (int i = 0; i < counts[seq]; ++i) {
+                    const llama_token token = next_token++ % ctx.n_vocab;
+                    batch.add(token, history[seq].size(), seq, i + 1 == counts[seq]);
+                    history[seq].push_back(token);
+                    rows[seq] = batch.size() - 1;
+                }
+            }
+            GGML_ASSERT(llama_process(ctx.ctx.get(), LLAMA_PROCESS_TYPE_DECODE, batch.get()) == 0);
+            for (int seq = 0; seq < 4; ++seq) {
+                if (rows[seq] < 0) {
+                    continue;
+                }
+                llama_memory_clear(llama_get_memory(reference.ctx.get()), true);
+                common_batch replay(reference.ctx.get());
+                for (size_t i = 0; i < history[seq].size(); ++i) {
+                    replay.add(history[seq][i], i, 0, i + 1 == history[seq].size());
+                }
+                GGML_ASSERT(llama_process(reference.ctx.get(), LLAMA_PROCESS_TYPE_DECODE, replay.get()) == 0);
+                const float * actual = llama_get_logits_ith(ctx.ctx.get(), rows[seq]);
+                const float * expected = llama_get_logits_ith(reference.ctx.get(), replay.size() - 1);
+                GGML_ASSERT(actual && expected);
+                double error = 0.0, norm = 0.0;
+                for (int j = 0; j < ctx.n_vocab; ++j) {
+                    GGML_ASSERT(std::isfinite(actual[j]) && std::isfinite(expected[j]));
+                    const double diff = double(actual[j]) - expected[j];
+                    error += diff * diff;
+                    norm += double(expected[j]) * expected[j];
+                }
+                const double relative_error = std::sqrt(error / std::max(norm, 1e-12));
+                printf("recurrent_slots rollback=%u seq=%d tokens=%zu relative_error=%.6f\n",
+                       rollback, seq, history[seq].size(), relative_error);
+                GGML_ASSERT(relative_error < 1e-2);
+            }
+        };
+        auto memory = llama_get_memory(ctx.ctx.get());
+        run({3, 3, 3, 3});
+        run({0, 0, 1, 0});
+        // Export/import after recurrent state changes. Restoring one sequence
+        // must preserve the other sequences and their stable cache allocations.
+        const size_t checkpoint_size = llama_state_seq_get_size(ctx.ctx.get(), 2);
+        GGML_ASSERT(checkpoint_size > 0);
+        std::vector<uint8_t> checkpoint(checkpoint_size);
+        GGML_ASSERT(llama_state_seq_get_data(ctx.ctx.get(), checkpoint.data(), checkpoint.size(), 2) == checkpoint_size);
+        GGML_ASSERT(llama_memory_seq_rm(memory, 2, 0, -1));
+        GGML_ASSERT(llama_state_seq_set_data(ctx.ctx.get(), checkpoint.data(), checkpoint.size(), 2) == checkpoint_size);
+        run({0, 0, 1, 0});
+        GGML_ASSERT(llama_memory_seq_rm(memory, 1, 0, -1));
+        history[1].clear();
+        run({0, 2, 0, 0});
+        run({3, 1, 1, 3});
+        if (rollback) {
+            for (int seq : {0, 3}) {
+                const int reject = seq == 0 ? 2 : 1;
+                history[seq].resize(history[seq].size() - reject);
+                GGML_ASSERT(llama_memory_seq_rm(memory, seq, history[seq].size(), -1));
+            }
+        }
+        run({1, 1, 1, 1});
+        GGML_ASSERT(llama_memory_seq_rm(memory, 1, 0, -1));
+        llama_memory_seq_cp(memory, 2, 1, 0, -1);
+        history[1] = history[2];
+        run({0, 2, 1, 0});
+        run({1, 1, 1, 1});
+        llama_memory_clear(memory, true);
+        for (auto & tokens : history)
+            tokens.clear();
+        run({1, 1, 1, 1});
+    }
+    printf("backend recurrent slot reset/copy/rollback test PASSED\n");
+}
+
+static void test_backend_recurrent_no_logits_prefill(const test_params & params) {
+    std::vector<llama_sampler_seq_config> configs;
+    for (uint32_t rollback : {0u, 2u}) {
+        test_context ctx(params, configs, 4, 12, 16, 3, rollback);
+        // Alternate prefill without logits and logits batches on the same context.
+        for (int step = 0; step < 4; ++step) {
+            common_batch batch(ctx.ctx.get());
+            const int sequences = step == 3 ? 1 : 4;
+            const bool logits = step % 2 != 0;
+            for (int seq = 0; seq < sequences; ++seq) {
+                batch.add((100 + step * 4 + seq) % ctx.n_vocab, step, seq, logits);
+            }
+            GGML_ASSERT(llama_process(ctx.ctx.get(), LLAMA_PROCESS_TYPE_DECODE, batch.get()) == 0);
+            if (logits) {
+                for (int seq = 0; seq < sequences; ++seq) {
+                    const float * values = llama_get_logits_ith(ctx.ctx.get(), seq);
+                    GGML_ASSERT(values);
+                    for (int i = 0; i < ctx.n_vocab; ++i) {
+                        GGML_ASSERT(std::isfinite(values[i]));
+                    }
+                }
+            }
+        }
+    }
+    printf("backend recurrent prefill without logits test PASSED\n");
 }
 
 static float find_backend_logit(const backend_sampler_output & output, llama_token token) {
@@ -2092,6 +2370,13 @@ static const backend_test_case BACKEND_TESTS[] = {
     { "test_multi_output_dist_transaction",       test_multi_output_dist_transaction,    true },
     { "test_multi_output_sampling_chain",         test_multi_output_sampling_chain,      true },
     { "test_multi_output_cpu_suffix",             test_multi_output_cpu_suffix,          true },
+    { "top_k_rows",      test_backend_top_k_rows,              true  },
+    { "top_k_rollback",  test_backend_top_k_rows_rollback,      false },
+    { "top_k_hidden_rollback", test_backend_top_k_hidden_rollback, false },
+    { "top_k_subsets", test_backend_top_k_subsets, false },
+    { "top_k_subsets_prime", test_backend_top_k_subsets_prime, false },
+    { "recurrent_slots", test_backend_recurrent_slots, false },
+    { "recurrent_no_logits_prefill", test_backend_recurrent_no_logits_prefill, false },
 };
 
 // TODO: add usage, examples
@@ -2183,7 +2468,9 @@ static std::vector<const backend_test_case *> collect_tests_to_run(const std::st
                 test.name == "test_mixed"                       ||
                 test.name == "test_top_p"                       ||
                 test.name == "test_multi_output_sampling_chain" ||
-                test.name == "test_multi_output_cpu_suffix") {
+                test.name == "test_multi_output_cpu_suffix" ||
+                test.name == "top_k_rows" || test.name == "top_k_rollback" ||
+                test.name == "top_k_hidden_rollback") {
                 fprintf(stderr, "Skipping test '%s' on HIP backend (no backend TOP_K support)\n", test.name.c_str());
                 continue;
             }
