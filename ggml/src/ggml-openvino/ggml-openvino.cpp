@@ -1576,6 +1576,10 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         if (op->type == GGML_TYPE_BF16) {
             return {false, "SCALE with BF16 type is not supported"};
         }
+        // The result is copied back densely, so an in-place SCALE on a strided view would be written wrongly.
+        if (op->view_src != nullptr && !ggml_is_contiguous(op)) {
+            return {false, "SCALE in place on a non-contiguous view is not supported"};
+        }
         break;
     }
     case GGML_OP_ADD_ID: {
@@ -1652,8 +1656,10 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         if (max_bias > 0) {
             return {false, "FLASH_ATTN_EXT with max_bias > 0 (max_bias=" + std::to_string(max_bias) + ") is not supported"};
         }
-        if (logit_softcap != 0) {
-            return {false, "FLASH_ATTN_EXT with logit_softcap != 0 (logit_softcap=" + std::to_string(logit_softcap) + ") is not supported"};
+        // soft-capping (gemma-2) is applied on the manual attention path of translate_flash_attn_ext, which needs one
+        // head size for Q, K and V
+        if (logit_softcap != 0 && (op->src[1]->ne[0] != op->src[0]->ne[0] || op->src[2]->ne[0] != op->src[0]->ne[0])) {
+            return {false, "FLASH_ATTN_EXT with logit_softcap != 0 needs one head size for Q, K and V"};
         }
         break;
     }

@@ -31,7 +31,7 @@ Exact compatible layouts/storage and exclusive cache readers permit mutation, in
 
 `GGML_OPENVINO_ENABLE_KV_4D=1` enables eligible native stateless in-place attention updates. The current eligibility covers one physical stream, including unified KV. Explicit split multi-slot KV retains the full-cache path and can be much slower even with only one active slot. Use `--kv-unified` for multi-slot OV GPU serving.
 
-Leave `GGML_OPENVINO_DISABLE_KV_SLICE` unset. Live-prefix slicing applies to eligible ordinary attention K/V roots, not recurrent caches. In-place KV fusion can bind the full allocation while exposing a live prefix internally. KV-slice on/off is a runtime binding choice and does not require different compiled blobs; incompatible graph layouts/capacities can still do so.
+Leave `GGML_OPENVINO_KV_SLICE` at its default (`1`). Live-prefix slicing applies to eligible ordinary attention K/V roots, not recurrent caches. In-place KV fusion can bind the full allocation while exposing a live prefix internally. KV-slice on/off is a runtime binding choice and does not require different compiled blobs; incompatible graph layouts/capacities can still do so.
 
 ## Stable MTP sampling
 
