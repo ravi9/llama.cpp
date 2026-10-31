@@ -151,8 +151,13 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
 
     // ggml state layout (OV notation): [B, H_v, value_dim, key_dim]
     // GatedDeltaNet op expects: [B, H_v, key_dim, value_dim]
+    // With native state the buffer already holds the op layout, so skip both transposes. This is safe because
+    // resets and slot copies move whole states, and supports_op aborts instead of falling back to CPU.
+    const bool native_state = ggml_openvino_gdn_native_state_enabled();
     auto state_perm = ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{0, 1, 3, 2});
-    state = std::make_shared<ov::op::v1::Transpose>(state, state_perm);
+    if (!native_state) {
+        state = std::make_shared<ov::op::v1::Transpose>(state, state_perm);
+    }
 
     g = std::make_shared<ov::op::v0::Squeeze>(g, ov::op::v0::Constant::create(ov::element::i64, {1}, {3}));
     beta = std::make_shared<ov::op::v0::Squeeze>(beta, ov::op::v0::Constant::create(ov::element::i64, {1}, {3}));
@@ -190,8 +195,9 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
     // std::cout << "GatedDeltaNet output shapes: attn=" << gdn->output(0).get_partial_shape()
     //           << ", new_state=" << gdn->output(1).get_partial_shape() << std::endl;
 
-    // Transpose output state back to ggml layout [B, H_v, value_dim, key_dim]
-    auto state_transposed = std::make_shared<ov::op::v1::Transpose>(state_4d, state_perm);
+    // Without native state, transpose the output state back to ggml layout [B, H_v, value_dim, key_dim]
+    Output<Node> state_transposed =
+        native_state ? state_4d : std::make_shared<ov::op::v1::Transpose>(state_4d, state_perm)->output(0);
     if (context.get_output_names().size() == 2) {
         // The canonical graph consumes the packed GGML result only through separate attention
         // and state VIEWs. Publish the native outputs under those VIEW names to avoid
