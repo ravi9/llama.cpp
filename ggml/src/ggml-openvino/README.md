@@ -1,25 +1,26 @@
 # Qwen MTP
 
-The default Qwen3.5/Qwen3.6 GPU path is dynamic stateless execution with in-place fused recurrent ops and stable MTP sampling. Build against the matching OpenVINO runtime/GPU plugin with independent `RecurrentConvCacheUpdate` and `RecurrentGatedDeltaNetUpdate` ops. The native Update ops return computation results plus the full updated cache, including rollback snapshots where required. No recurrent/sampling opt-in flag is needed on supported graphs. See the [development documentation index](dev_doc/README.md) for the implementation and the MTP sampling graph.
+The default Qwen3.5/Qwen3.6 GPU path is dynamic stateless execution with in-place fused recurrent ops and stable MTP sampling. The recurrent ops are llama.cpp custom ops with OpenCL kernels (`openvino/kernels/`), loaded through the GPU plugin `CONFIG_FILE` custom-layer mechanism, so a stock OpenVINO runtime is sufficient. No recurrent/sampling opt-in flag is needed on supported graphs. See the [development documentation index](dev_doc/README.md) for the implementation and the MTP sampling graph.
 
 Use `--spec-type draft-mtp --spec-draft-n-max 2` with a GGUF that contains MTP weights. Parallel execution uses `-np` and `--kv-unified`. CPU snapshot execution, NPU execution, and forced static MTP are not supported.
 
 Stateless recurrent execution uses the same reset, reorder, and partial cache-writeback paths at every slot capacity, including one slot without MTP.
 
-The matched stateless GPU path uses `RecurrentConvCacheUpdate` and
-`RecurrentGatedDeltaNetUpdate`. In-place cache mutation is the primary path:
-Parameter and Result share a stable caller-owned USM allocation. Required source
-rows are staged on device before writes, so resets, cyclic reorders and rollback
-remain generic. Incompatible bindings use private output plus Result copy-back.
-Rotation banks and the older three-op native path are removed.
-The convolution Update op always takes depthwise weights and produces convolution
-and the updated cache; the separate history/QKV mode is removed.
+`GgmlRecurrentConvUpdate` and `GgmlRecurrentGdnUpdate` return only the convolution/attention
+result and write the cache input in place. The cache input must be a whole remote (USM) cache
+Parameter, possibly through Reshapes, with no later reader; otherwise the fusion is skipped and the
+ordinary GGML decomposition is used. A `GgmlRecurrentCacheStage` op first copies every source row
+the update reads, so resets, cyclic reorders and rollback stay generic.
 `GGML_OPENVINO_DISABLE_FUSED_RECURRENCE=1` retains the ordinary GGML cache decomposition.
-Snapshot GDN still uses the independent Update op with a temporary cache bank.
-Ordinary GDN is unchanged. Snapshot/rollback (speculative decoding) on OpenVINO
-requires the patched package; unpatched packages support ordinary execution and
-report snapshot GDN as unsupported, allowing fallback to another backend.
-Rebuild both repos for these native ops. The current backend translation revision is 14; regenerate compiled-model blobs once without cache-only mode.
+Unmatched snapshot GDN uses `GgmlRecurrentGdnSnapshots`, which returns the newest states as a second output.
+
+The GPU plugin compiles custom kernels per layer and input shape. The token axis is padded to a
+power of two, so a new prompt length usually reuses a compiled bucket; the first use of each
+bucket or batch size still compiles every layer (about 6.5 s for Qwen3.5-0.8B). The Intel GPU
+driver's persistent cache (`~/.cache/neo_compiler_cache`) removes that cost on later runs.
+Custom ops cannot be exported in compiled models, so they are disabled when
+`GGML_OPENVINO_CACHE_DIR` or `GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR` is set; snapshot GDN then
+falls back to another backend. The current backend translation revision is 15.
 
 Set `GGML_OPENVINO_ENABLE_KV_4D=1` to enable the upstream stateless in-place
 attention KV update pattern where eligible. It binds full-capacity cache tensors

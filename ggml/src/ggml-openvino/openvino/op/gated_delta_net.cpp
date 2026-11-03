@@ -3,9 +3,7 @@
 #include "../node_context.h"
 #include "../op_table.h"
 #include "../utils.h"
-#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
 #include "recurrent_cache_update.hpp"
-#endif
 #include "ggml-openvino/ggml-openvino-extra.h"
 
 #include <cmath>
@@ -99,7 +97,6 @@ static bool match_gdn_l2_norm(const Output<Node> & normalized, Output<Node> & in
     return true;
 }
 
-#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
 static OutputVector translate_gdn_snapshots(const Output<Node> & q,
                                           const Output<Node> & k,
                                           const Output<Node> & v,
@@ -111,38 +108,26 @@ static OutputVector translate_gdn_snapshots(const Output<Node> & q,
                                           float q_eps,
                                           float k_eps,
                                           int64_t snapshot_count) {
-    // Standalone/unmatched graphs have no full-model cache controls. Use a temporary
-    // bank in GGML [head,value,key] order instead of extending ordinary GDN semantics.
+    // Standalone/unmatched graphs have no full-model cache controls. The snapshot op reads the
+    // initial states as cache rows 0..B-1 and returns the newest states as output 1.
     auto i64 = [](const Shape & shape, const std::vector<int64_t> & values) {
         return ov::op::v0::Constant::create(ov::element::i64, shape, values);
     };
-    auto shape = std::make_shared<ov::op::v3::ShapeOf>(q, ov::element::i64);
-    auto batch = std::make_shared<ov::op::v8::Gather>(shape, i64({1}, {0}), i64({}, {0}));
-    auto tokens = std::make_shared<ov::op::v8::Gather>(shape, i64({1}, {1}), i64({}, {0}));
+    auto batch = std::make_shared<ov::op::v8::Gather>(std::make_shared<ov::op::v3::ShapeOf>(q, ov::element::i64),
+                                                      i64({1}, {0}), i64({}, {0}));
     auto initial = std::make_shared<ov::op::v1::Reshape>(state, i64({4}, {1, 1, -1, features}), false);
-    auto spare_rows = std::make_shared<ov::op::v1::Multiply>(batch, i64({1}, {snapshot_count - 1}));
-    auto spare_shape = std::make_shared<ov::op::v0::Concat>(
-        OutputVector{i64({2}, {1, 1}), spare_rows, i64({1}, {features})}, 0);
-    auto spare = std::make_shared<ov::op::v3::Broadcast>(
-        ov::op::v0::Constant::create(state.get_element_type(), {}, {0}), spare_shape);
-    auto cache = std::make_shared<ov::op::v0::Concat>(OutputVector{initial, spare}, 2);
     auto rows = std::make_shared<ov::op::v4::Range>(
         i64({}, {0}), std::make_shared<ov::op::v0::Squeeze>(batch), i64({}, {1}), ov::element::i64);
     auto active = std::make_shared<ov::op::v1::Reshape>(rows, i64({4}, {1, 1, 1, -1}), false);
     auto control = std::make_shared<ov::op::v1::Reshape>(
         std::make_shared<ov::op::v0::Concat>(OutputVector{i64({1}, {0}), batch, batch, i64({1}, {0})}, 0),
         i64({4}, {1, 1, 1, 4}), false);
-    auto update = std::make_shared<ov::op::internal::RecurrentGatedDeltaNetUpdate>(
-        OutputVector{q, k, v, cache, g, beta, active, i64({1, 1, 1, 0}, {}),
-                     i64({1, 1, 1, 1}, {0}), i64({1, 1, 1, 1}, {0}), i64({1, 1, 1, 2}, {0, 0}), control},
-        norm, q_eps, k_eps, snapshot_count);
-    auto valid_rows = std::make_shared<ov::op::v1::Multiply>(
-        std::make_shared<ov::op::v1::Minimum>(tokens, i64({1}, {snapshot_count})), batch);
-    auto snapshots = std::make_shared<ov::op::v8::Slice>(
-        update->output(1), i64({1}, {0}), valid_rows, i64({1}, {1}), i64({1}, {2}));
-    return {update->output(0), snapshots};
+    // No extra rows: extra offsets {0, 1} leave an empty window of the one-element extra input.
+    return make_gdn_snapshots(OutputVector{q, k, v, initial, g, beta, active, i64({1, 1, 1, 1}, {0}),
+                                           i64({1, 1, 1, 1}, {0}), i64({1, 1, 1, 1}, {0}), i64({1, 1, 1, 2}, {0, 1}),
+                                           control, initial},
+                              norm, q_eps, k_eps, snapshot_count);
 }
-#endif
 
 static OutputVector translate_gdn(const NodeContext & context, const OutputVector * cache_inputs) {
     auto v_shape = context.get_input_shape(2).to_shape();  // [B, T, H_v, S_v]
@@ -185,14 +170,6 @@ static OutputVector translate_gdn(const NodeContext & context, const OutputVecto
             q, ov::op::v0::Constant::create(ov::element::f32, ov::Shape{1}, {ggml_openvino_gdn_q_scale()}));
     }
 
-    // ggml maps GQA heads in tiled order, while OV GDN maps repeated heads in grouped order.
-    if (H_v != H_k) {
-        const int64_t repeat = H_v / H_k;
-        auto repeats = ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{1, 1, repeat, 1});
-        q = std::make_shared<ov::op::v0::Tile>(q, repeats);
-        k = std::make_shared<ov::op::v0::Tile>(k, repeats);
-    }
-
     if (context.get_view_input_size(2)) {
         // Same as l2_norm case 1
         v = std::make_shared<ov::op::v0::Squeeze>(v, ov::op::v0::Constant::create(ov::element::i64, {1}, {0}));
@@ -200,6 +177,37 @@ static OutputVector translate_gdn(const NodeContext & context, const OutputVecto
         std::vector<int64_t> reshape_pattern = {0, 0, (int64_t) v_shape[2], (int64_t) v_shape[3]};
         v = std::make_shared<ov::op::v1::Reshape>(
             v, ov::op::v0::Constant::create(ov::element::i64, {4}, reshape_pattern), true);
+    }
+
+    // Custom GPU ops take untiled Q/K (GGML head order) and [B,T,H,1] gate/beta.
+    if (cache_inputs) {
+        // cache_inputs: cache, active rows, extra rows, reset begin/length, extra offsets, write control.
+        const auto & c = *cache_inputs;
+        auto stage = make_cache_stage(c);
+        auto fused = make_gdn_update(OutputVector{q, k, v, c[0], g, beta, c[1], c[2], c[3], c[4], c[5], c[6], stage},
+                                     fuse_qk_l2norm, q_eps, k_eps, snapshot_count,
+                                     context.get_name() + "/RecurrentGdnUpdate");
+        // The cache is updated in place. Its state VIEW feeds only the fused writeback,
+        // which also returns the cache input.
+        if (context.get_output_names().size() == 3) {
+            return {fused, fused, c[0]};
+        }
+        return {fused, c[0]};
+    }
+    Output<Node> attn_4d, states;
+    if (snapshot_count > 1) {
+        auto outputs = translate_gdn_snapshots(q, k, v, state, g, beta, H_v * S_v * q_shape[3], fuse_qk_l2norm,
+                                               q_eps, k_eps, snapshot_count);
+        attn_4d = outputs[0];
+        states = outputs[1];
+    }
+
+    // ggml maps GQA heads in tiled order, while OV GDN maps repeated heads in grouped order.
+    if (H_v != H_k) {
+        const int64_t repeat = H_v / H_k;
+        auto repeats = ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{1, 1, repeat, 1});
+        q = std::make_shared<ov::op::v0::Tile>(q, repeats);
+        k = std::make_shared<ov::op::v0::Tile>(k, repeats);
     }
 
     // ggml state layout (OV notation): [B, H_v, value_dim, key_dim]
@@ -238,34 +246,7 @@ static OutputVector translate_gdn(const NodeContext & context, const OutputVecto
     //           << ", v=" << v.get_partial_shape() << ", g=" << g.get_partial_shape()
     //           << ", beta=" << beta.get_partial_shape() << ", state=" << state.get_partial_shape() << std::endl;
 
-#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
-    if (cache_inputs) {
-        OutputVector args{q, k, v, (*cache_inputs)[0], g, beta};
-        args.insert(args.end(), cache_inputs->begin() + 1, cache_inputs->end());
-        auto fused = std::make_shared<ov::op::internal::RecurrentGatedDeltaNetUpdate>(
-            args, fuse_qk_l2norm, q_eps, k_eps, snapshot_count);
-        fused->set_friendly_name(context.get_name() + "/RecurrentGatedDeltaNetUpdate");
-        // The matched state VIEW is consumed only by the overridden full-cache
-        // writeback. Route that cache directly instead of materializing snapshots.
-        if (context.get_output_names().size() == 3) {
-            return {fused->output(0), fused->output(0), fused->output(1)};
-        }
-        return {fused->output(0), fused->output(1)};
-    }
-#endif
-
-    Output<Node> attn_4d, states;
-    if (snapshot_count > 1) {
-#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
-        auto outputs = translate_gdn_snapshots(q, k, v, state, g, beta, H_v * S_v * q_shape[3],
-                                               fuse_qk_l2norm, q_eps, k_eps, snapshot_count);
-        attn_4d = outputs[0];
-        states = outputs[1];
-#else
-        FRONT_END_OP_CONVERSION_CHECK(false,
-                                      "GATED_DELTA_NET snapshot/rollback requires a patched OpenVINO package");
-#endif
-    } else {
+    if (snapshot_count == 1) {
         auto gdn = std::make_shared<ov::op::internal::GatedDeltaNet>(
             q, k, v, state, g, beta, fuse_qk_l2norm, q_eps, k_eps);
         attn_4d = gdn->output(0);
@@ -301,11 +282,9 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
     return translate_gdn(context, nullptr);
 }
 
-#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
 OutputVector translate_recurrent_gated_delta_net(const NodeContext & context, const OutputVector & cache_inputs) {
     return translate_gdn(context, &cache_inputs);
 }
-#endif
 
 static OutputVector translate_gated_delta_net_ref(const NodeContext & context) {
     num_inputs_check(context, 6, 6);

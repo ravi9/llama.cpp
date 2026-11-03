@@ -5,9 +5,7 @@
 #include "ggml-openvino/openvino/node_context.h"
 #include "ggml-openvino/openvino/utils.h"
 #include "input_model.h"
-#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
 #include "recurrent_cache_fusion.h"
-#endif
 #include "pass/mark_decompression_convert_constant_folding.h"
 #include "pass/mark_dequantization_subgraph.h"
 #include "pass_registry/pipeline.h"
@@ -326,9 +324,7 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
         }
     }
 
-#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
     RecurrentCacheFusion recurrent_fusion(ggml_model_decoder, tensor_map);
-#endif
     auto translate_node = [&](const std::shared_ptr<GgmlDecoder> & decoder, int node_idx) {
         auto operation_type = decoder->get_op_type(node_idx);
         if (operation_type == "GGML_OP_NONE") {
@@ -349,10 +345,7 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
         FRONT_END_OP_CONVERSION_CHECK(it != m_translator_map.end(), "Translation for operation type ", operation_type,
                                       " is not implemented.");
         NodeContext node_context(decoder, tensor_map, node_idx, this);
-        ov::OutputVector converted_outputs;
-#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
-        converted_outputs = recurrent_fusion.translate(node_idx, node_context);
-#endif
+        ov::OutputVector converted_outputs = recurrent_fusion.translate(node_idx, node_context);
         if (converted_outputs.empty()) {
             converted_outputs = it->second(node_context);
         }
@@ -415,6 +408,9 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
     ggml_model_decoder->visit_subgraph(node_visitor);
 
     for (const auto & name : ggml_model_decoder->get_model_output_names()) {
+        if (recurrent_fusion.is_inplace_output(name)) {
+            continue;  // written in place by the fused recurrent ops
+        }
         FRONT_END_GENERAL_CHECK(tensor_map->find(name) != tensor_map->end(),
                                 "Output name not found in tensor map: ", name);
         auto result = std::make_shared<v0::Result>(tensor_map->at(name));
