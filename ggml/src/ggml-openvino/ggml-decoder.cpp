@@ -1548,11 +1548,9 @@ void GgmlOvDecoder::add_extra_inputs() {
             create_1d_input("rs_snapshot_stride_" + node_name, writeback.snapshot_stride);
         }
     }
-#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
     m_compute_params.recurrent_controls.clear();
     // Naive graphs have no full-model cache fusion and node cases are not initialized here.
-    if (!m_naive && !m_is_static && !m_is_stateful && !m_model_is_splitted && ggml_openvino_is_gpu() &&
-        !ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_FUSED_RECURRENCE")) {
+    if (!m_naive && !m_is_static && !m_is_stateful && !m_model_is_splitted && ggml_openvino_recurrent_fusion_enabled()) {
         for (int i = 0; i < m_cgraph->n_nodes; ++i) {
             const auto node = m_cgraph->nodes[i];
             const auto op_case = m_node_info_list[i].node_op_case;
@@ -1596,7 +1594,6 @@ void GgmlOvDecoder::add_extra_inputs() {
             }
         }
     }
-#endif
     if (!m_is_static && !m_compute_params.sampling_rows.empty()) {
         m_model_extra_inputs["sampling_rows"] =
             {ov::element::i64, ov::Shape{m_compute_params.sampling_rows.size()}, 0, true, {}, -1};

@@ -1804,18 +1804,13 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
             return {false, "GATED_DELTA_NET with kda (per-key-dimension gating) is not supported"};
         }
         if (op->op_params[0] > 1) {
-#ifndef GGML_OPENVINO_HAS_CACHE_UPDATE
-            static std::atomic_flag warned = ATOMIC_FLAG_INIT;
-            if (!warned.test_and_set()) {
-                GGML_LOG_WARN("OpenVINO snapshot/rollback (speculative decoding) is not supported by this package; "
-                              "a patched OpenVINO package with recurrent cache-update ops is required.\n");
+            // Snapshots use the custom GPU kernel, which splits the key dimension over 16 lanes.
+            if (!ggml_openvino_custom_ops_enabled() || ggml_openvino_getenv_int("GGML_OPENVINO_FORCE_STATIC")) {
+                return {false, "GATED_DELTA_NET snapshots require dynamic GPU execution without model caching"};
             }
-            return {false, "GATED_DELTA_NET snapshots require a patched OpenVINO package"};
-#else
-            if (!ggml_openvino_is_gpu() || ggml_openvino_getenv_int("GGML_OPENVINO_FORCE_STATIC")) {
-                return {false, "GATED_DELTA_NET snapshots require dynamic GPU execution"};
+            if (op->src[0]->ne[0] % 16 != 0 || op->src[0]->ne[0] > 256) {
+                return {false, "GATED_DELTA_NET snapshots require a key size that is a multiple of 16, at most 256"};
             }
-#endif
         }
         break;
     }

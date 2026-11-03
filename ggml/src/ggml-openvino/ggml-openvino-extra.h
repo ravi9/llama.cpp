@@ -140,6 +140,17 @@ bool ggml_openvino_npu_parallel_compile_enabled();
 // Check if running on a GPU (GPU, GPU.0, GPU.1, ...)
 bool ggml_openvino_is_gpu();
 
+// Path of the GPU custom-layer config with the recurrent cache kernels, written on first use.
+const std::string & ggml_openvino_custom_kernel_config();
+
+// Whether the recurrent cache custom GPU ops can be used. Off with compiled-model caching:
+// OpenVINO does not serialize the shape inference and work-size rules of dynamic custom kernels.
+bool ggml_openvino_custom_ops_enabled();
+
+// Whether matched Qwen recurrent cache groups use the in-place custom ops
+// (off with GGML_OPENVINO_DISABLE_FUSED_RECURRENCE=1).
+bool ggml_openvino_recurrent_fusion_enabled();
+
 // Read n_seq_active and attention_size(_swa) from the KQ mask shape (off with GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK=1)
 bool ggml_openvino_shape_from_mask_enabled();
 

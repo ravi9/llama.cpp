@@ -9,7 +9,10 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
+#include <random>
 #include <openvino/runtime/intel_gpu/ocl/ocl.hpp>
 #include <openvino/runtime/intel_npu/level_zero/level_zero.hpp>
 #include <openvino/runtime/properties.hpp>
@@ -202,6 +205,10 @@ void ggml_openvino_device_config::init() {
         compile_config.insert(ov::enable_profiling(true));
     }
 
+    if (has_prefix(device_name, "GPU")) {
+        compile_config["CONFIG_FILE"] = ggml_openvino_custom_kernel_config();
+    }
+
     // Initialize remote context with queue sharing for GPU
     if (has_prefix(device_name, "GPU")) {
         // Use the OpenCL context OpenVINO created for this device, so GPU.N gets its own device
@@ -348,6 +355,71 @@ bool ggml_openvino_is_npu() {
 
 bool ggml_openvino_is_gpu() {
     return has_prefix(ggml_openvino_get_device_name(), "GPU");
+}
+
+// {file name, contents} pairs generated from openvino/kernels at configure time.
+static const std::pair<const char *, const char *> custom_kernel_files[] = {
+#include "ggml-openvino-kernels.inc"
+};
+
+const std::string & ggml_openvino_custom_kernel_config() {
+    static const std::string path = []() {
+        uint64_t hash = 1469598103934665603ULL;
+        for (const auto & [name, content] : custom_kernel_files) {
+            for (const char * c : {name, content}) {
+                for (; *c; ++c) {
+                    hash = (hash ^ static_cast<unsigned char>(*c)) * 1099511628211ULL;
+                }
+            }
+        }
+        char suffix[17];
+        snprintf(suffix, sizeof(suffix), "%016llx", static_cast<unsigned long long>(hash));
+        namespace fs = std::filesystem;
+        const fs::path dir = fs::temp_directory_path() / (std::string("ggml-openvino-kernels-") + suffix);
+        fs::create_directories(dir);
+        for (const auto & [name, content] : custom_kernel_files) {
+            const fs::path file = dir / name;
+            if (fs::exists(file)) {
+                continue;
+            }
+            // Write then rename so concurrent processes never read a partial file.
+            const fs::path tmp = dir / (std::string(name) + ".tmp" + std::to_string(std::random_device{}()));
+            {
+                std::ofstream out(tmp, std::ios::binary);
+                out << content;
+                if (!out) {
+                    GGML_ABORT("ggml-openvino: failed to write %s", tmp.string().c_str());
+                }
+            }
+            std::error_code ec;
+            fs::rename(tmp, file, ec);
+            if (ec) {
+                fs::remove(tmp, ec);
+            }
+        }
+        return (dir / "recurrent_cache.xml").string();
+    }();
+    return path;
+}
+
+bool ggml_openvino_custom_ops_enabled() {
+    static const bool enabled = [] {
+        if (!ggml_openvino_is_gpu()) {
+            return false;
+        }
+        const char * cache_dir = ggml_openvino_getenv_str("GGML_OPENVINO_CACHE_DIR");
+        const char * model_cache_dir = ggml_openvino_getenv_str("GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR");
+        if ((cache_dir && *cache_dir) || (model_cache_dir && *model_cache_dir)) {
+            GGML_LOG_WARN("ggml-openvino: recurrent cache custom ops are disabled with compiled-model caching\n");
+            return false;
+        }
+        return true;
+    }();
+    return enabled;
+}
+
+bool ggml_openvino_recurrent_fusion_enabled() {
+    return ggml_openvino_custom_ops_enabled() && !ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_FUSED_RECURRENCE");
 }
 
 bool ggml_openvino_kv_slice_enabled() {

@@ -9,11 +9,15 @@ class RecurrentCacheFusion {
 public:
     RecurrentCacheFusion(const std::shared_ptr<GgmlDecoder> & decoder, const std::shared_ptr<TensorMap> & tensors);
     OutputVector translate(int index, const NodeContext & context);
+    // Cache roots updated in place by fused ops; they have no model Result.
+    bool is_inplace_output(const std::string & name) const;
 private:
     struct Group {
         int reset = -1, gather = -1, remainder = -1, concat = -1, compute = -1, writeback = -1;
         std::vector<int> snapshots;
-        Output<Node> old_cache, conv, updated;
+        Output<Node> old_cache, conv;
+        std::string root_name;
+        bool enabled = false;
     };
 
     std::shared_ptr<GgmlDecoder> m_decoder;

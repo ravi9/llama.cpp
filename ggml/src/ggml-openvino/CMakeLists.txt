@@ -32,19 +32,21 @@ if (GGML_OPENVINO)
     endif()
 endif()
 
-# Released runtimes retain the ordinary cache translators.
-include(CheckCXXSourceCompiles)
-unset(GGML_OPENVINO_HAS_CACHE_UPDATE CACHE)
-set(CMAKE_REQUIRED_LIBRARIES openvino::runtime)
-set(CMAKE_REQUIRED_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/openvino/op")
-check_cxx_source_compiles("#include <recurrent_cache_update.hpp>
-int main() {
-    auto conv = std::make_shared<ov::op::internal::RecurrentConvCacheUpdate>(ov::OutputVector{}, 3);
-    auto gdn = std::make_shared<ov::op::internal::RecurrentGatedDeltaNetUpdate>(ov::OutputVector{});
-}"
-    GGML_OPENVINO_HAS_CACHE_UPDATE)
-unset(CMAKE_REQUIRED_LIBRARIES)
-unset(CMAKE_REQUIRED_INCLUDES)
-if(GGML_OPENVINO_HAS_CACHE_UPDATE)
-    target_compile_definitions(ggml-openvino PRIVATE GGML_OPENVINO_HAS_CACHE_UPDATE=1)
-endif()
+# Embed the GPU custom-layer kernels; they are written to a temp directory at runtime.
+set(GGML_OPENVINO_KERNEL_FILES
+    recurrent_cache.xml
+    recurrent_common.cl
+    recurrent_cache_stage.cl
+    recurrent_conv_update.cl
+    recurrent_gdn_update.cl)
+set(GGML_OPENVINO_KERNEL_INC "")
+foreach(kernel_file ${GGML_OPENVINO_KERNEL_FILES})
+    set(kernel_path "${CMAKE_CURRENT_SOURCE_DIR}/openvino/kernels/${kernel_file}")
+    file(READ "${kernel_path}" kernel_content)
+    string(APPEND GGML_OPENVINO_KERNEL_INC "{\"${kernel_file}\", R\"ggmlovk(${kernel_content})ggmlovk\"},\n")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${kernel_path}")
+endforeach()
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/ggml-openvino-kernels.inc.tmp" "${GGML_OPENVINO_KERNEL_INC}")
+configure_file("${CMAKE_CURRENT_BINARY_DIR}/ggml-openvino-kernels.inc.tmp"
+               "${CMAKE_CURRENT_BINARY_DIR}/ggml-openvino-kernels.inc" COPYONLY)
+target_include_directories(ggml-openvino PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")

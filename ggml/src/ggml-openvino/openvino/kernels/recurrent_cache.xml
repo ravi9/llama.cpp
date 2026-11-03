@@ -1,0 +1,110 @@
+<!-- OpenVINO GPU custom layers for the llama.cpp Qwen3.5/3.6 recurrent cache ops.
+     Work sizes are derived from output 0 dims (B,F,Y,X). Cache inputs use ANY to avoid
+     an inserted reorder: the update kernels write the bound cache allocation in place. -->
+<CustomLayer name="GgmlRecurrentCacheStage" type="SimpleGPU" version="1">
+    <Kernel entry="ggml_recurrent_cache_stage">
+        <Source filename="recurrent_common.cl"/>
+        <Source filename="recurrent_cache_stage.cl"/>
+    </Kernel>
+    <Buffers>
+        <Tensor arg-index="0" type="input" port-index="0" format="ANY"/>
+        <Tensor arg-index="1" type="input" port-index="1" format="ANY"/>
+        <Tensor arg-index="2" type="input" port-index="2" format="ANY"/>
+        <Tensor arg-index="3" type="input" port-index="3" format="ANY"/>
+        <Tensor arg-index="4" type="input" port-index="4" format="ANY"/>
+        <Tensor arg-index="5" type="input" port-index="5" format="ANY"/>
+        <Tensor arg-index="6" type="output" port-index="0" format="BFYX"/>
+    </Buffers>
+    <WorkSizes global="((Y*X+255)/256)*256,1,1" local="256,1,1"/>
+</CustomLayer>
+
+<CustomLayer name="GgmlRecurrentConvUpdate" type="SimpleGPU" version="1">
+    <Kernel entry="ggml_recurrent_conv_update">
+        <Source filename="recurrent_common.cl"/>
+        <Source filename="recurrent_conv_update.cl"/>
+        <Define name="HISTORY" type="int" param="history" default="3"/>
+    </Kernel>
+    <Buffers>
+        <Tensor arg-index="0" type="input" port-index="0" format="ANY"/>
+        <Tensor arg-index="1" type="input" port-index="1" format="ANY"/>
+        <Tensor arg-index="2" type="input" port-index="2" format="ANY"/>
+        <Tensor arg-index="3" type="input" port-index="3" format="ANY"/>
+        <Tensor arg-index="4" type="input" port-index="4" format="ANY"/>
+        <Tensor arg-index="5" type="input" port-index="5" format="ANY"/>
+        <Tensor arg-index="6" type="input" port-index="6" format="ANY"/>
+        <Tensor arg-index="7" type="input" port-index="7" format="ANY"/>
+        <Tensor arg-index="8" type="input" port-index="8" format="ANY"/>
+        <Tensor arg-index="9" type="input" port-index="9" format="ANY"/>
+        <Tensor arg-index="10" type="input" port-index="10" format="ANY"/>
+        <Tensor arg-index="11" type="output" port-index="0" format="BFYX"/>
+    </Buffers>
+    <WorkSizes global="((F*Y*X+255)/256)*256,1,1" local="256,1,1"/>
+</CustomLayer>
+
+<CustomLayer name="GgmlRecurrentGdnUpdate" type="SimpleGPU" version="1">
+    <Kernel entry="ggml_recurrent_gdn_update">
+        <Source filename="recurrent_common.cl"/>
+        <Source filename="recurrent_gdn_update.cl"/>
+        <Define name="K_HEAD_DIM" type="int" param="k_head_dim" default="128"/>
+        <Define name="V_HEAD_DIM" type="int" param="v_head_dim" default="128"/>
+        <Define name="SNAPSHOT_COUNT" type="int" param="snapshot_count" default="1"/>
+        <Define name="SNAPSHOT_OUTPUT" type="int" default="0"/>
+        <Define name="FUSE_QK_L2NORM" type="int" param="fuse_qk_l2norm" default="0"/>
+        <Define name="Q_L2_NORM_EPS" type="float" param="q_l2_norm_eps" default="1e-6f"/>
+        <Define name="K_L2_NORM_EPS" type="float" param="k_l2_norm_eps" default="1e-6f"/>
+        <Define name="SUBGROUP_SIZE" type="int" default="16"/>
+    </Kernel>
+    <Buffers>
+        <Tensor arg-index="0" type="input" port-index="0" format="ANY"/>
+        <Tensor arg-index="1" type="input" port-index="1" format="ANY"/>
+        <Tensor arg-index="2" type="input" port-index="2" format="ANY"/>
+        <Tensor arg-index="3" type="input" port-index="3" format="ANY"/>
+        <Tensor arg-index="4" type="input" port-index="4" format="ANY"/>
+        <Tensor arg-index="5" type="input" port-index="5" format="ANY"/>
+        <Tensor arg-index="6" type="input" port-index="6" format="ANY"/>
+        <Tensor arg-index="7" type="input" port-index="7" format="ANY"/>
+        <Tensor arg-index="8" type="input" port-index="8" format="ANY"/>
+        <Tensor arg-index="9" type="input" port-index="9" format="ANY"/>
+        <Tensor arg-index="10" type="input" port-index="10" format="ANY"/>
+        <Tensor arg-index="11" type="input" port-index="11" format="ANY"/>
+        <Tensor arg-index="12" type="input" port-index="12" format="ANY"/>
+        <Tensor arg-index="13" type="input" port-index="13" format="ANY"/>
+        <Tensor arg-index="14" type="output" port-index="0" format="BFYX"/>
+    </Buffers>
+    <WorkSizes global="B,Y,((X+3)/4)*16" local="1,1,16"/>
+</CustomLayer>
+
+<!-- Standalone snapshot GDN: states go to output 1 and the state input is not written. -->
+<CustomLayer name="GgmlRecurrentGdnSnapshots" type="SimpleGPU" version="1">
+    <Kernel entry="ggml_recurrent_gdn_update">
+        <Source filename="recurrent_common.cl"/>
+        <Source filename="recurrent_gdn_update.cl"/>
+        <Define name="K_HEAD_DIM" type="int" param="k_head_dim" default="128"/>
+        <Define name="V_HEAD_DIM" type="int" param="v_head_dim" default="128"/>
+        <Define name="SNAPSHOT_COUNT" type="int" param="snapshot_count" default="1"/>
+        <Define name="SNAPSHOT_OUTPUT" type="int" default="1"/>
+        <Define name="FUSE_QK_L2NORM" type="int" param="fuse_qk_l2norm" default="0"/>
+        <Define name="Q_L2_NORM_EPS" type="float" param="q_l2_norm_eps" default="1e-6f"/>
+        <Define name="K_L2_NORM_EPS" type="float" param="k_l2_norm_eps" default="1e-6f"/>
+        <Define name="SUBGROUP_SIZE" type="int" default="16"/>
+    </Kernel>
+    <Buffers>
+        <Tensor arg-index="0" type="input" port-index="0" format="ANY"/>
+        <Tensor arg-index="1" type="input" port-index="1" format="ANY"/>
+        <Tensor arg-index="2" type="input" port-index="2" format="ANY"/>
+        <Tensor arg-index="3" type="input" port-index="3" format="ANY"/>
+        <Tensor arg-index="4" type="input" port-index="4" format="ANY"/>
+        <Tensor arg-index="5" type="input" port-index="5" format="ANY"/>
+        <Tensor arg-index="6" type="input" port-index="6" format="ANY"/>
+        <Tensor arg-index="7" type="input" port-index="7" format="ANY"/>
+        <Tensor arg-index="8" type="input" port-index="8" format="ANY"/>
+        <Tensor arg-index="9" type="input" port-index="9" format="ANY"/>
+        <Tensor arg-index="10" type="input" port-index="10" format="ANY"/>
+        <Tensor arg-index="11" type="input" port-index="11" format="ANY"/>
+        <Tensor arg-index="12" type="input" port-index="12" format="ANY"/>
+        <Tensor arg-index="13" type="input" port-index="13" format="ANY"/>
+        <Tensor arg-index="14" type="output" port-index="0" format="BFYX"/>
+        <Tensor arg-index="15" type="output" port-index="1" format="BFYX"/>
+    </Buffers>
+    <WorkSizes global="B,Y,((X+3)/4)*16" local="1,1,16"/>
+</CustomLayer>
