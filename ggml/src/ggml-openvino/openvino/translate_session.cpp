@@ -8,15 +8,9 @@
 #ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
 #include "recurrent_cache_fusion.h"
 #endif
-#include "pass/align_eltwise_ranks.h"
-#include "pass/fuse_argsort_topk.h"
-#include "pass/fuse_moe_compressed.h"
-#include "pass/fuse_moe_router.h"
-#include "pass/fuse_to_conv.h"
-#include "pass/kv_state_seq_axis.h"
-#include "pipelines/pipeline.h"
 #include "pass/mark_decompression_convert_constant_folding.h"
 #include "pass/mark_dequantization_subgraph.h"
+#include "pass_registry/pipeline.h"
 #include "rt_info/weightless_caching_attributes.hpp"
 
 #include <algorithm>

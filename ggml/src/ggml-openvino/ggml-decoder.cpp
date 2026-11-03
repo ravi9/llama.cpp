@@ -2658,11 +2658,9 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
             if (m_node_dynamic_dims[node->src[0]] != -1) {
                 auto dynamic_dim_idx = m_node_dynamic_dims[node->src[0]];
                 // auto dynamic_dim_value = node->src[0]->ne[dynamic_dim_idx];
-                for (int i = 0; i < GGML_MAX_DIMS; i++) {
-                    if (node->op_params[i] == dynamic_dim_idx) {
-                        m_node_dynamic_dims[node] = i;
-                        break;
-                    }
+                // src dim i moves to dim op_params[i]
+                if (dynamic_dim_idx >= 0 && dynamic_dim_idx < GGML_MAX_DIMS) {
+                    m_node_dynamic_dims[node] = node->op_params[dynamic_dim_idx];
                 }
                 // OPENVINO_ASSERT(dynamic_dim_value == node->ne[m_node_dynamic_dims[node]],
                 //                 "Dynamic dim value mismatch for node: " + std::string(node->name) +
@@ -2801,11 +2799,19 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
             break;
         case GGML_OP_CONCAT: {
             const int axis = node->op_params[0];
+            const int src0_dynamic_dim = m_node_dynamic_dims[node->src[0]];
+            const int src1_dynamic_dim = m_node_dynamic_dims[node->src[1]];
+            if (src0_dynamic_dim != -1 && src0_dynamic_dim != axis &&
+                src1_dynamic_dim != -1 && src1_dynamic_dim != axis && src0_dynamic_dim != src1_dynamic_dim) {
+                GGML_LOG_WARN("ggml-openvino: different dynamic dims for CONCAT node '%s', src[0]: '%s', src[1]: '%s'\n",
+                              node->name, node->src[0]->name, node->src[1]->name);
+            }
             m_node_dynamic_dims[node] = axis;
             for (int i = 0; i < 2; ++i) {
                 const int dynamic_axis = m_node_dynamic_dims[node->src[i]];
                 if (dynamic_axis != -1 && dynamic_axis != axis) {
                     m_node_dynamic_dims[node] = dynamic_axis;
+                    break;
                 }
             }
             break;

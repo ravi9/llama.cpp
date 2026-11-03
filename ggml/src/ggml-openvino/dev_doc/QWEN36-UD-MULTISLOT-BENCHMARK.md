@@ -2,19 +2,19 @@
 
 The current Qwen GPU implementation uses in-place fused recurrent ops and stable MTP sampling. See [implementation and validation](OPENVINO-RECURRENT-CACHE.md) and the [sampling graph](MTP-SAMPLING-GRAPH.md). The tables below retain their actual measurement dates and configurations; newer implementation decisions do not relabel historical results.
 
-## Unified-KV measurements (2026-10-30)
+## Unified-KV measurements (2026-10-30; Vulkan completion 2026-11-03)
 
 Qwen3.6-35B-A3B-UD-Q4_K_M on Intel Arc B390, OpenVINO `8e4210a33b`, GPU, `q4_asym64_all`, native softplus, total context 524288, and default batch/microbatch 2048/512 (flags omitted). GPU workloads ran serially. Fresh compiled caches were prepared at context 8192 outside timing; timed processes used cache-only loading.
 
-Batched-bench uses one or four active sequences, 1024/8192 prompt tokens per sequence, and 512 outputs per sequence. Each cell is **prefill seconds @ aggregate decode tokens/s**, **one active / four active sequences**. The fused 32K pair was measured in a separate `-npl 1,4` run on the same date. The unfused 32K cases were not measured.
+Batched-bench uses one or four active sequences, 1024/8192/32768 prompt tokens per sequence, and 512 outputs per sequence. Each cell is **prefill seconds @ aggregate decode tokens/s**, **one active / four active sequences**. The fused 32K pair was measured in a separate `-npl 1,4` run on 2026-10-30. The unfused 32K cases were not measured.
 
 | Backend/configuration | 1K prompt | 8K prompt | 32K prompt |
 |---|---:|---:|---:|
 | OV fused `-npl 1,4 --kv-unified` | 1.052 @ 37.37 / 2.825 @ 92.23 | 5.543 @ 32.81 / 25.330 @ 71.70 | 25.261 @ 24.38 / 154.406 @ 40.81 |
 | OV unfused recurrence `-npl 1,4 --kv-unified` | 1.201 @ 19.44 / 3.037 @ 49.68 | 5.905 @ 16.35 / 26.875 @ 42.87 | Unmeasured / Unmeasured |
-| Vulkan reference `-npl 1,4 --kv-unified` | 1.492 @ 32.44 / 5.964 @ 71.82 | 18.785 @ 30.69 / 75.933 @ 55.31 | 254.584 @ 25.42 / Unmeasured |
+| Vulkan reference `-npl 1,4 --kv-unified` | 1.492 @ 32.44 / 5.964 @ 71.82 | 18.785 @ 30.69 / 75.933 @ 55.31 | 254.584 @ 25.42 / 1054.650 @ 31.79 |
 
-Vulkan reference values were measured on 2026-10-23 at `dd06588b1`, using the stored GGUF weights and full GPU offload. They use the same context size, default batches, prompts and output length; they are an earlier source revision.
+Vulkan uses stored GGUF weights and full GPU offload with the preserved Release build at `dd06588b1`. The 32K/four-active result was measured on 2026-11-03 in a separate `-npl 4` run, retaining four available sequence slots. Other Vulkan references are from 2026-10-23. They use the same context size, default batches, prompt lengths and output length; they are an earlier source revision.
 
 The unfused run sets `GGML_OPENVINO_DISABLE_FUSED_RECURRENCE=1`. This non-MTP workload uses ordinary convolution/GDN and separate recurrent cache updates. Existing unified attention KV updates remain enabled in both configurations.
 
@@ -29,7 +29,7 @@ All 32 timed MMLU requests completed with 512 outputs each; every MTP request dr
 
 Timed servers use `--no-warmup` with no request priming. First-use imports remain included in client TTFT/end-to-end measurements. These are single-pass measurements.
 
-Artifacts: `/home/zijun/llama.cpp/tmp/ov-inplace-refactor-perf-20261030` for MMLU, `/home/zijun/llama.cpp/tmp/ov-inplace-op-ab-20261030` for matched fused/unfused 1K/8K, `/home/zijun/llama.cpp/tmp/pr370-update-20261030` for the fused 32K pair, and `/home/zijun/llama.cpp/tmp/ud-backend-matrix-20261023` for Vulkan references. Commands, binary/library SHA256 values, timing rows, and memory records are retained.
+Artifacts: `/home/zijun/llama.cpp/tmp/ov-inplace-refactor-perf-20261030` for MMLU, `/home/zijun/llama.cpp/tmp/ov-inplace-op-ab-20261030` for matched fused/unfused 1K/8K, `/home/zijun/llama.cpp/tmp/pr370-update-20261030` for the fused 32K pair, and `/home/zijun/llama.cpp/tmp/ud-backend-matrix-20261023` for historical Vulkan references, and `/home/zijun/llama.cpp/tmp/pr370-vulkan-32k-20261103` for the completed Vulkan 32K/four-active case. Commands, binary/library SHA256 values, timing rows, and memory records are retained.
 
 ## Non-MTP batched-bench: default and large batches (2026-10-28)
 

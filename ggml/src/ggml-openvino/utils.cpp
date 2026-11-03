@@ -1,13 +1,13 @@
 #include "utils.h"
 
+#include "device/npu_config.h"
+#include "device/npu_quant_policy.h"
 #include "ggml-impl.h"
 #include "ggml-openvino-extra.h"
 #include "ggml-openvino.h"
 #include "ggml-openvino/ggml-decoder.h"
 #include "ggml.h"
 #include "model-cache.h"
-#include "npu/npu_config.h"
-#include "npu/npu_quant_policy.h"
 #include "openvino/frontend.h"
 #include "openvino/input_model.h"
 
@@ -57,8 +57,7 @@ namespace {
 std::optional<ov::Tensor> try_make_kv_sliced_tensor(const std::shared_ptr<GgmlOvDecoder> & ggml_decoder,
                                                     const std::string & name,
                                                     const ggml_tensor * ggml_tensor) {
-    // Static graphs bake the sliced length into the prefill graph (see ggml_openvino_kv_slice_enabled);
-    // decode keeps its full-context graph.
+    // Static graphs bake the sliced length into the prefill graph; decode keeps its full-context graph.
     const bool slice =
         ggml_openvino_kv_slice_enabled() && (!ggml_decoder->is_static() || ggml_decoder->m_is_prefill);
     if (!slice || ggml_decoder->is_stateful()) {
@@ -1117,12 +1116,6 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::share
     const int64_t graph_param_compute_time = ggml_time_us() - graph_param_compute_start_time;
 
     const bool cache_enabled = !model_is_splitted && !cache_disabled;
-    if (r_ctx->stateful && m_params.v_trans) {
-        GGML_LOG_WARN(
-            "ggml-openvino: disabling stateful execution for this context: the graph writes a transposed V cache "
-            "(flash attention is off), which the stateful KV cache does not support\n");
-        r_ctx->stateful = false;
-    }
     const bool stateful_recurrent = r_ctx->stateful && m_params.state_size >= 0;
     const bool stateful_kv_only = r_ctx->stateful && !stateful_recurrent;
     if (r_ctx->stateful &&
@@ -1907,7 +1900,6 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, const std::shared
                 base_extra = base_extra * 131 + (self_contained ? 1u : 0u);
                 base_extra = ggml_openvino_model_cache_mix_string(
                     base_extra, ggml_openvino_getenv_str("GGML_OPENVINO_NPU_TOKEN_EMBD_QUANT"));
-                base_extra = base_extra * 131 + static_cast<uint64_t>(ggml_openvino_getenv_int("GGML_OPENVINO_NPU_KEEP_Q4_0"));
                 base_extra = base_extra * 131 + (ggml_openvino_kv_slice_enabled() ? 1u : 0u);
                 base_extra = ggml_openvino_model_cache_mix_string(
                     base_extra, ggml_openvino_getenv_str("GGML_OPENVINO_NPU_CONFIG"));

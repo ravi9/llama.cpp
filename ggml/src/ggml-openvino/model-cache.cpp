@@ -176,6 +176,7 @@ static const char * cache_settings[] = {
     // GGML_OPENVINO_KV_SLICE only changes dynamic runtime bindings. Dynamic
     // attention graphs accept either shape and share the same compiled blob.
     "GGML_OPENVINO_MANUAL_GQA_ATTN",
+    "GGML_OPENVINO_EXACT_ZERO_POINT",
     "GGML_OPENVINO_STATEFUL_EXECUTION",
     "GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT",
     "GGML_OPENVINO_DISABLE_REMOTE_OUTPUTS",
