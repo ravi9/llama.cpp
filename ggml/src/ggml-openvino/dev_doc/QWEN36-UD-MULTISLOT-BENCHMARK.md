@@ -2,6 +2,78 @@
 
 The current Qwen GPU implementation uses in-place fused recurrent ops and stable MTP sampling. See [implementation and validation](OPENVINO-RECURRENT-CACHE.md) and the [sampling graph](MTP-SAMPLING-GRAPH.md). The tables below retain their actual measurement dates and configurations; newer implementation decisions do not relabel historical results.
 
+## Native OpenVINO GenAI comparison
+
+### Available benchmark paths
+
+GenAI has several relevant benchmarks, but none provides this exact workload out of the box:
+
+- `tools/llm_bench/benchmark.py` supports fixed `--batch_size` and speculative decoding via `--draft_model` plus `--sd_generation_config`. A batch of four runs four copies of one prompt; it does not continuously replace distinct requests.
+- `tools/continuous_batching/benchmark/continuous_batching_benchmark.cpp` supports request counts, arrival rates, continuous batching, and draft models, but it does not cap active requests at exactly one or four.
+- `samples/python/text_generation/benchmark_genai.py` measures repeated single-prompt generation and reports GenAI TTFT, TPOT, and throughput.
+
+GenAI's docs describe stateless cache management as a developer responsibility, but the local GenAI `LLMPipeline` and `ContinuousBatchingPipeline` do not expose an explicit KV/recurrent-cache IO pipeline for this model. The stateful MTP-on/off measurements below use GenAI's continuous-batching API. The stateless measurements use OpenVINO Runtime directly, with GenAI's tokenizer and text-embedding model.
+
+### Completed OpenVINO GenAI measurements
+
+Target: local `Qwen3.6-35B-A3B-int4-ov` IR on the Arc B390 GPU. OpenVINO/GenAI are 2026.4.0 / 2026.4.0.0. Each request uses an exact-length MMLU-text chat prompt and generates exactly 512 tokens. The stateful GenAI runs use eight requests per row; the stateless rows use four.
+
+The prompt builder reads the first 64 question texts from the local MMLU test parquet. It tokenizes those questions with blank-line separators, rotates the starting question per request, and repeats or truncates the resulting natural-text token sequence to the exact requested body length inside Qwen's chat template. These are repeated text tokens, not random token IDs; the long prompts are synthetic and repetitive, so MTP acceptance may differ from ordinary conversations.
+
+Each cell is `mean TTFT seconds @ aggregate decode tokens/s`, one active / four active requests. Aggregate decode rate is mean per-request decode rate multiplied by the number of active requests; it excludes prefill. For example, the four-request cell reports the sum across the four generating sequences.
+
+| Backend/configuration | 1K prompt | 8K prompt | 32K prompt |
+|---|---:|---:|---:|
+| OV GenAI stateful, MTP off | 0.603 @ 48.11 / 1.547 @ 109.35 | 4.192 @ 46.26 / 8.100 @ 65.94 | 26.938 @ 38.97 / 52.114 @ 22.16 |
+| OV GenAI stateful, MTP on | 0.687 @ 50.43 / 1.298 @ 120.04 | 4.931 @ 45.30 / 10.951 @ 64.77 | 33.871 @ 26.13 / 71.385 @ 23.12 |
+| OV Runtime stateless USM, MTP off | 0.777 @ 26.88 / 2.462 @ 49.68 | 5.285 @ 12.31 / 24.115 @ 15.44 | Unmeasured / Unmeasured |
+
+The stateful and stateless paths share the same model weights, prompt source, exact context lengths, and 512-token output length, but are not identical serving harnesses. Stateful GenAI schedules distinct requests and immediately replaces completed requests. The stateless runner executes fixed dense batches of equal-length sequences. Both cap prefill at 2,048 aggregate prompt tokens per model call: 2,048 per sequence for one active request, or 512 per sequence for four. Aggregate end-to-end output throughput, which includes TTFT/prefill, is retained in the JSON results.
+
+### How the stateless model and runner work
+
+The C++ helper [`qwen36_stateless_export.cpp`](benchmarks/qwen36_stateless_export.cpp) applies OpenVINO's `ov::pass::StatefulToStateless` to the existing stateful `openvino_language_model.xml`. It removes 80 `ReadValue`/`Assign` states and exposes 80 cache inputs and 80 cache outputs: 20 KV tensors, 30 convolution-cache tensors, and 30 SSM tensors. The resulting graph has 83 inputs and 81 outputs. The pass does not change weights or quantization; the exported BIN is about 17 GiB.
+
+The helper also changes the generation output to gather only the final prompt hidden state before the LM head and return its greedy token ID. That avoids producing logits for every prompt token and lets the next token ID feed the text-embedding model on-device. The model outputs otherwise retain their cache tensors. Stateless MTP is off because this path does not expose the recurrent-state snapshots required for MTP rollback.
+
+The runner [`qwen36_stateless_bench.py`](benchmarks/qwen36_stateless_bench.py) binds input/output tensors as GPU USM `RemoteTensor`s. KV outputs are allocated at their current sequence length; fixed-size convolution/SSM states ping-pong between two device buffers. It uses `start_async()`/`wait()` instead of Python `InferRequest.infer()` so the wrapper does not materialize returned cache outputs as NumPy arrays on the host.
+
+The first host-copy version called `.infer()` and ignored its return value. OpenVINO's Python wrapper still constructs an output dictionary, converting outputs to NumPy by default. That moved all 80 cache results to host on every token. Those preliminary numbers are retained in `tmp/qwen36-genai-stateless-20261103.json` for debugging only and should not be compared as stateless performance. The USM measurements above are in `tmp/qwen36-genai-stateless-usm-20261103.json`. Per the benchmark scope, no stateless 32K rows were run.
+
+The stateless USM path is still slower than stateful GenAI, especially at 8K: 12.31 vs. 46.26 tok/s/request for one active sequence and 3.86 vs. 16.49 for four. USM removed the avoidable Python output materialization, but the explicit-cache graph still returns growing full KV tensors on every step and uses a different cache/update path from GenAI's managed stateful pipeline. This result points to remaining full-cache graph/update work; a device trace is needed to separate cache allocation, graph updates, and kernel time.
+
+### Reproduction commands
+
+Stateful MTP-off matrix:
+
+```sh
+/tmp/qwen36-genai-bench-venv/bin/python ggml/src/ggml-openvino/dev_doc/benchmarks/qwen36_genai_bench.py \
+  --device GPU --context-tokens 1024,8192,32768 --concurrency 1,4 --mtp off \
+  --requests 8 --output-tokens 512 --output tmp/qwen36-genai-stateful-20261103.json
+```
+
+Stateless USM MTP-off matrix (intentionally limited to 1K/8K):
+
+```sh
+/tmp/qwen36-genai-bench-venv/bin/python ggml/src/ggml-openvino/dev_doc/benchmarks/qwen36_stateless_bench.py \
+  --device GPU --context-tokens 1024,8192 --concurrency 1,4 --requests 4 \
+  --output-tokens 512 --max-batched-tokens 2048 \
+  --output tmp/qwen36-genai-stateless-usm-20261103.json
+```
+
+Stateful MTP-on matrix (two assistant tokens):
+
+```sh
+/tmp/qwen36-genai-bench-venv/bin/python ggml/src/ggml-openvino/dev_doc/benchmarks/qwen36_genai_bench.py \
+  --device GPU --context-tokens 1024,8192,32768 --concurrency 1,4 --mtp on \
+  --assistant-tokens 2 --requests 8 --output-tokens 512 \
+  --output tmp/qwen36-genai-stateful-mtp-20261103.json
+```
+
+Raw stateful MTP-on results are in `tmp/qwen36-genai-stateful-mtp-20261103.json`.
+
+The model card requires OpenVINO 2026.4.0 and GenAI 2026.4.0.0 or newer; the local pip environment already provides both, so no GenAI source build or model download was required.
+
 ## Unified-KV measurements (2026-10-30; Vulkan completion 2026-11-03)
 
 Qwen3.6-35B-A3B-UD-Q4_K_M on Intel Arc B390, OpenVINO `8e4210a33b`, GPU, `q4_asym64_all`, native softplus, total context 524288, and default batch/microbatch 2048/512 (flags omitted). GPU workloads ran serially. Fresh compiled caches were prepared at context 8192 outside timing; timed processes used cache-only loading.
