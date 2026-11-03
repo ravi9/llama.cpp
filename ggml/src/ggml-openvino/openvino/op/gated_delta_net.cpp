@@ -196,18 +196,18 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
     //           << ", new_state=" << gdn->output(1).get_partial_shape() << std::endl;
 
     // Without native state, transpose the output state back to ggml layout [B, H_v, value_dim, key_dim]
-    Output<Node> state_transposed =
+    Output<Node> state_op_layout =
         native_state ? state_4d : std::make_shared<ov::op::v1::Transpose>(state_4d, state_perm)->output(0);
     if (context.get_output_names().size() == 2) {
         // The canonical graph consumes the packed GGML result only through separate attention
         // and state VIEWs. Publish the native outputs under those VIEW names to avoid
         // flatten -> concat -> reshape -> slice -> reshape chains. This also works for B > 1.
-        return rename_outputs_with_suffix({attn_4d, state_transposed}, context.get_name());
+        return rename_outputs_with_suffix({attn_4d, state_op_layout}, context.get_name());
     }
 
     auto flat_shape_1d = ov::op::v0::Constant::create(ov::element::i64, {1}, {-1});
     auto attn = std::make_shared<ov::op::v1::Reshape>(attn_4d, flat_shape_1d, false);
-    auto new_state = std::make_shared<ov::op::v1::Reshape>(state_transposed, flat_shape_1d, false);
+    auto new_state = std::make_shared<ov::op::v1::Reshape>(state_op_layout, flat_shape_1d, false);
     auto packed = std::make_shared<ov::op::v0::Concat>(ov::OutputVector{attn, new_state}, 0);
     auto out_shape = ov::op::v0::Constant::create(ov::element::i64, {4},
                                                   std::vector<int64_t>{1, 1, -1 /*T * B + S_v * B*/, S_v * H_v});
