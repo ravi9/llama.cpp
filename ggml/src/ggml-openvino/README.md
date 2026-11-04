@@ -1,10 +1,10 @@
 # Qwen MTP
 
-The default Qwen3.5/Qwen3.6 GPU path is dynamic stateless execution with in-place fused recurrent ops and stable MTP sampling. Build against the matching OpenVINO runtime/GPU plugin with independent `RecurrentConvCacheUpdate` and `RecurrentGatedDeltaNetUpdate` ops. The native Update ops return computation results plus the full updated cache, including rollback snapshots where required. No recurrent/sampling opt-in flag is needed on supported graphs. See the [development documentation index](dev_doc/README.md) for implementation, validation, graph examples and benchmarks.
+The default Qwen3.5/Qwen3.6 GPU path is dynamic stateless execution with in-place fused recurrent ops and stable MTP sampling. Build against the matching OpenVINO runtime/GPU plugin with independent `RecurrentConvCacheUpdate` and `RecurrentGatedDeltaNetUpdate` ops. The native Update ops return computation results plus the full updated cache, including rollback snapshots where required. No recurrent/sampling opt-in flag is needed on supported graphs. See the [development documentation index](dev_doc/README.md) for the implementation and the MTP sampling graph.
 
 Use `--spec-type draft-mtp --spec-draft-n-max 2` with a GGUF that contains MTP weights. Parallel execution uses `-np` and `--kv-unified`. CPU snapshot execution, NPU execution, and forced static MTP are not supported.
 
-Stateless recurrent execution uses the same reset, reorder, and partial cache-writeback paths at every slot capacity, including one slot without MTP. `test-backend-sampler --test recurrent_slots` compares four-slot reset, copy, inactive-slot preservation, and rollback against independently replayed sequences.
+Stateless recurrent execution uses the same reset, reorder, and partial cache-writeback paths at every slot capacity, including one slot without MTP.
 
 The matched stateless GPU path uses `RecurrentConvCacheUpdate` and
 `RecurrentGatedDeltaNetUpdate`. In-place cache mutation is the primary path:
@@ -29,11 +29,11 @@ split multi-slot KV retains the ordinary full-cache path. This option does not
 change recurrent cache handling. Unified KV is recommended for multi-slot GPU
 execution because it enables this in-place attention update.
 
-The current performance target is `~/models/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf`, using GPU with `GGML_OPENVINO_REQUANT_KQUANT=q4_asym64_all` and `GGML_OPENVINO_NATIVE_SOFTPLUS=1`. Leave `GGML_OPENVINO_KV_SLICE` at its default (`1`). See [attention KV layout](dev_doc/OPENVINO-RECURRENT-CACHE.md#attention-kv-layout) for eligibility and [benchmark results](dev_doc/QWEN36-UD-MULTISLOT-BENCHMARK.md) for measured limits.
+The recommended Qwen3.6-35B-A3B Q4_K_M setup uses GPU with `GGML_OPENVINO_REQUANT_KQUANT=q4_asym64_all` and `GGML_OPENVINO_NATIVE_SOFTPLUS=1`. Leave `GGML_OPENVINO_KV_SLICE` at its default (`1`). See [attention KV layout](dev_doc/OPENVINO-RECURRENT-CACHE.md#attention-kv-layout) for eligibility.
 
 `q4_asym64_all` converts Q4_K/Q5_K/Q6_K/Q8_0/Q5_1 weights, including dense Q8_0 projections, to asymmetric INT4 with group size 64. `token_embd.weight` and `output.weight` retain symmetric channel-wise INT8. Q8_0/Q5_1 rows whose width is not divisible by 64 also use channel-wise INT8. This follows the primary/backup precision scheme of NNCF `INT4_ASYM`, `ratio=1.0`, `group_size=64`, `backup_mode=INT8_SYM` for these supported source types; it requantizes GGUF values rather than the original floating-point model and leaves floating-point weights unchanged. Earlier versions kept dense Q8_0 at INT8/group-32. Repopulate compiled-model caches without cache-only mode after this change; the cache fingerprint invalidates the old precision policy.
 
-See the [implementation guide](dev_doc/OPENVINO-RECURRENT-CACHE.md) for buffer ownership, rollback and validation.
+See the [implementation guide](dev_doc/OPENVINO-RECURRENT-CACHE.md) for buffer ownership and rollback.
 
 # Compiled model cache
 
@@ -76,7 +76,7 @@ Qwen3.5/Qwen3.6 MTP uses a pure top-k backend sampler. Dynamic stateless executi
 
 Active candidate IDs and scores are written to the normal GGML outputs. Inactive branches read row 0 (the padding row when there are no logits) and write to private scratch tensors (device USM on GPU), without changing sampler state or touching inactive GGML buffers. The top-k computations remain separate per branch; this trades some extra sampling work for a stable graph interface. Other sampler chains retain their existing branch-selection behavior.
 
-This is one draft model per compatible graph configuration, not one compiled blob for the whole server. The trunk and other graph stages still have their own entries. Different sampler configurations, recurrent capacities, rollback modes or incompatible KV layouts can require additional models. Cache-only mode still requires initial preparation; changing just the active subset no longer requires exhaustive subset priming. See the [sampling validation](dev_doc/QWEN36-UD-MULTISLOT-BENCHMARK.md#stable-mtp-sampling-graph-2026-10-28) for the cache-only reuse tests.
+This is one draft model per compatible graph configuration, not one compiled blob for the whole server. The trunk and other graph stages still have their own entries. Different sampler configurations, recurrent capacities, rollback modes or incompatible KV layouts can require additional models. Cache-only mode still requires initial preparation; changing just the active subset no longer requires exhaustive subset priming.
 
 The generic recurrent-cache translation invalidates blobs made with the former single-slot shortcuts. Run once without `GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY` to populate compatible entries before enabling cache-only mode again.
 

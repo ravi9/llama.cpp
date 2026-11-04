@@ -1,6 +1,6 @@
 # Current Qwen GPU implementation
 
-As of 2026-10-29, the default Qwen3.5/Qwen3.6 path is dynamic stateless execution with `RecurrentConvCacheUpdate`, `RecurrentGatedDeltaNetUpdate`, and stable pure-top-k MTP translation. It supports one or multiple slots and rollback. The implementation applies to `qwen35` and `qwen35moe`; the performance target is the UD Qwen3.6-35B-A3B MTP GGUF.
+As of 2026-10-29, the default Qwen3.5/Qwen3.6 path is dynamic stateless execution with `RecurrentConvCacheUpdate`, `RecurrentGatedDeltaNetUpdate`, and stable pure-top-k MTP translation. It supports one or multiple slots and rollback. The implementation applies to `qwen35` and `qwen35moe`; the reference model is the UD Qwen3.6-35B-A3B MTP GGUF.
 
 Build against the matching OpenVINO runtime/GPU plugin with the independent Update ops. The tested runtime is `qwen-mtp-inplace-primary`, commit `9299cc3d78`; llama.cpp stable sampling is `71c0bbc4d`. Configure `GGML_OPENVINO_DEVICE=GPU`, native softplus, and the documented requantization policy. The current cache translation revision is 14.
 
@@ -42,22 +42,6 @@ One compatible draft graph is shared across active subsets. Trunk and genuinely 
 ## Validation
 
 Native OV tests cover shape/attribute serialization, reset, cycles, duplicates, overlapping writes, mixed precision, changing shapes, aliased/distinct buffers, exclusive Reshapes, shared readers, host/device USM and export/import. Convolution is checked against a host reference; GDN uses an independent cache mapping around ordinary GDN. See `docs/dev/qwen35-llamacpp-recurrent-cache.md` and `recurrent_cache_update.cpp` in the OV checkout for contracts and tests.
-
-The llama.cpp tests below cover state transitions, no-logits prefill, row selection, hidden outputs and rollback. The reference top-k is computed on CPU from raw logits produced by the same model backend; this is not a claim of full-model CPU/GPU numerical equivalence.
-
-```sh
-SMALL_MODEL="$HOME/models/Qwen3.5-0.8B-GGUF/Qwen3.5-0.8B-F16.gguf"
-export GGML_OPENVINO_DEVICE=GPU
-export GGML_OPENVINO_NATIVE_SOFTPLUS=1
-export GGML_OPENVINO_ENABLE_KV_4D=1
-for test in recurrent_slots recurrent_no_logits_prefill top_k_rows top_k_rollback top_k_hidden_rollback; do
-    build/MtpOVPerf/bin/test-backend-sampler --device gpu --test "$test" "$SMALL_MODEL"
-done
-```
-
-For strict compiled reuse, set a fresh `GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR`, run `top_k_subsets_prime` with cache-only disabled, then `top_k_subsets` with cache-only enabled. Only slot 3 is primed. All 15 subsets and one/two output rows per active sequence must pass; the two test blobs are the sampled and raw-logit reference models.
-
-Full UD validation passes with four slots, unified KV and two-token MTP. The same cache is reused at total context 8192 and 524288. [The benchmark report](QWEN36-UD-MULTISLOT-BENCHMARK.md) records counts, timings and comparison limits.
 
 ## Debugging and source map
 

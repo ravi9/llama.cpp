@@ -42,4 +42,4 @@ Only small sampling work executes for inactive slots. The MTP layer and output p
 
 Dump shapes use GGML order `[width, rows, dim2, dim3]`; OV reverses it. `view_offs` is in bytes: one logits row occupies `248320 * 4 = 993280` bytes. Buffer labels describe GGML storage, not the device executing imported GPU operations.
 
-Actual full cgraphs, sampling excerpts, compiled ports and capture scripts remain under `/home/zijun/llama.cpp/tmp/mtp-graph-examples-20261029`: `draft-slots-3.txt`, `draft-slots-0-2.txt`, and `draft-slots-0-1-2-3.txt`. `WORK-NOTE.md` is the user's standalone OneNote copy. Captures used cache-only mode, four slots, context 8192 and the default two-token MTP settings. The [benchmark report](QWEN36-UD-MULTISLOT-BENCHMARK.md) contains reuse validation and measured performance.
+The captures used cache-only mode, four slots, context 8192 and the default two-token MTP settings.
