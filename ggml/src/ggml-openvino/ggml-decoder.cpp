@@ -2591,7 +2591,7 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
             //     root_src = src->org_src;
             // }
             if (root_src) {
-                if (is_inp_tok(root_src, node) || is_inp_pos(root_src, node) || is_output_idx(root_src, node)) {
+                if (is_inp_tok(root_src, node) || is_inp_pos(root_src, node) || is_get_rows_input_idx(root_src, node)) {
                     m_node_dynamic_dims[root_src] = 0;
                     m_node_dynamic_dims[src] = m_node_dynamic_dims[root_src];
                     continue;
@@ -2599,7 +2599,7 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
                 self(self, root_src);
                 m_node_dynamic_dims[src] = m_node_dynamic_dims[root_src];
             } else {
-                if (is_inp_tok(src, node) || is_inp_pos(src, node) || is_output_idx(src, node)) {
+                if (is_inp_tok(src, node) || is_inp_pos(src, node) || is_get_rows_input_idx(src, node)) {
                     m_node_dynamic_dims[src] = 0;
                     continue;
                 }
@@ -2723,8 +2723,16 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
             if (m_node_dynamic_dims[node->src[0]] != -1) {
                 auto dynamic_dim_idx = m_node_dynamic_dims[node->src[0]];
                 auto dynamic_dim_stride = node->src[0]->nb[dynamic_dim_idx];
+                // Size-1 dims repeat a stride (e.g. a single KV head in [head_size, 1, n_tokens]), so prefer
+                // the match that keeps the dynamic size and fall back to the first stride match.
                 for (int i = 0; i < GGML_MAX_DIMS; i++) {
-                    if (node->nb[i] == dynamic_dim_stride) {
+                    if (node->nb[i] != dynamic_dim_stride) {
+                        continue;
+                    }
+                    if (m_node_dynamic_dims[node] == -1) {
+                        m_node_dynamic_dims[node] = i;
+                    }
+                    if (node->ne[i] == node->src[0]->ne[dynamic_dim_idx]) {
                         m_node_dynamic_dims[node] = i;
                         break;
                     }
