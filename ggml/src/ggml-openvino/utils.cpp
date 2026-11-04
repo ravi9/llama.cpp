@@ -183,6 +183,16 @@ std::map<std::string, std::shared_ptr<ov::Node>> get_weight_names(ggml_cgraph * 
     return names;
 }
 
+// Appends the allocation identity (OV buffer ID and address) of a weight tensor. Returns false when the buffer has
+// no ID, so pointer reuse could select stale weights.
+static bool append_weight_identity(std::string & key, const ggml_tensor * tensor) {
+    const auto * base = tensor->view_src ? tensor->view_src : tensor;
+    const size_t buffer_id = ggml_backend_openvino_buffer_get_ctx_id(base->buffer);
+    key.append(reinterpret_cast<const char *>(&buffer_id), sizeof(buffer_id));
+    key.append(reinterpret_cast<const char *>(&tensor->data), sizeof(tensor->data));
+    return buffer_id != 0;
+}
+
 // A conservative, exact in-process key, evaluated only on a context-local cache
 // miss. Include topology, layouts, op parameters, constant extra inputs and weight
 // allocation identities. Never use a sampled weight hash or a graph name alone:
@@ -229,10 +239,7 @@ static std::string compiled_graph_key(const ggml_cgraph * graph,
         const bool weight = base->buffer && base->buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS;
         append(weight);
         if (weight && !disk_cache) {
-            const size_t buffer_id = ggml_backend_openvino_buffer_get_ctx_id(base->buffer);
-            has_weight_buffer_id |= buffer_id != 0;
-            append(buffer_id);
-            append(tensor->data);
+            has_weight_buffer_id |= append_weight_identity(key, tensor);
         }
         visit(tensor->view_src);
         for (const auto * src : tensor->src) {
@@ -315,6 +322,38 @@ static std::string dynamic_graph_signature(const ggml_cgraph * graph,
         append(input.shape_axis);
     }
     return key;
+}
+
+// In-process key that does not change with the token count: the dynamic signature plus the allocation identity of
+// every weight, so a graph that comes back with another token count reuses its compiled model. Empty when no weight
+// buffer has an ID. A hit must still pass compiled_model_matches_graph().
+static std::string dynamic_graph_key(const ggml_cgraph * graph,
+                                     const GgmlOvDecoder & decoder,
+                                     const ModelParams & params,
+                                     const std::string & device) {
+    std::string key = dynamic_graph_signature(graph, decoder, params);
+    const size_t device_len = device.size();
+    key.append(reinterpret_cast<const char *>(&device_len), sizeof(device_len));
+    key.append(device);
+    const bool is_static = decoder.is_static();
+    const bool is_stateful = decoder.is_stateful();
+    key.append(reinterpret_cast<const char *>(&is_static), sizeof(is_static));
+    key.append(reinterpret_cast<const char *>(&is_stateful), sizeof(is_stateful));
+    bool has_weight_buffer_id = false;
+    std::unordered_set<const ggml_tensor *> seen;
+    for (int i = 0; i < graph->n_nodes; ++i) {
+        for (const auto * src : graph->nodes[i]->src) {
+            if (src == nullptr || !seen.insert(src).second) {
+                continue;
+            }
+            const auto * base = src->view_src ? src->view_src : src;
+            if (base->buffer && base->buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS) {
+                has_weight_buffer_id |= append_weight_identity(key, src);
+            }
+        }
+    }
+    // Same rule as compiled_graph_key(): the token embedding stays in a CPU-mapped buffer without an ID
+    return has_weight_buffer_id ? key : std::string{};
 }
 
 static bool compiled_model_matches_graph(const ov::CompiledModel & model,
@@ -1260,21 +1299,28 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::share
                 blob_path = ggml_openvino_model_cache_blob_path(model_cache_dir, model_fp);
                 manifest_path = ggml_openvino_model_cache_manifest_path(model_cache_dir, model_fp);
             }
-            std::string shared_key =
-                cache_enabled ? (model_fp ? "dynamic:" + std::to_string(model_fp) : exact_key) : "";
+            std::string shared_key;
+            if (cache_enabled) {
+                const std::string dynamic_key =
+                    model_fp ? "" : dynamic_graph_key(cgraph, *ggml_decoder, m_params, device);
+                shared_key = model_fp           ? "dynamic:" + std::to_string(model_fp) :
+                             !dynamic_key.empty() ? "dynamic-mem:" + dynamic_key :
+                                                  exact_key;
+            }
             ov::CompiledModel shared_model;
             bool imported = false;
             auto shared_it = shared_cache->graphs.find(shared_key);
             if (!shared_key.empty() && shared_it != shared_cache->graphs.end() &&
-                (model_fp == 0 || compiled_model_matches_graph(shared_it->second.decode, shared_it->second.input_names,
-                                                               shared_it->second.output_names, *ggml_decoder))) {
+                (shared_key == exact_key ||
+                 compiled_model_matches_graph(shared_it->second.decode, shared_it->second.input_names,
+                                              shared_it->second.output_names, *ggml_decoder))) {
                 shared_model = shared_it->second.decode;
                 infer_request = std::make_shared<ov::InferRequest>(shared_model.create_infer_request());
                 ov_input_names = shared_it->second.input_names;
                 ov_output_names = shared_it->second.output_names;
                 imported = true;
                 GGML_LOG_DEBUG("ggml-openvino: shared compiled model HIT (dynamic)\n");
-            } else if (model_fp && shared_it != shared_cache->graphs.end()) {
+            } else if (shared_key != exact_key && shared_it != shared_cache->graphs.end()) {
                 shared_key = exact_key;
                 shared_it = shared_cache->graphs.find(shared_key);
                 if (shared_it != shared_cache->graphs.end()) {
@@ -1284,9 +1330,11 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::share
                     ov_output_names = shared_it->second.output_names;
                     imported = true;
                 }
-                model_fp = exact_fp;
-                blob_path = ggml_openvino_model_cache_blob_path(model_cache_dir, model_fp);
-                manifest_path = ggml_openvino_model_cache_manifest_path(model_cache_dir, model_fp);
+                if (model_fp) {
+                    model_fp = exact_fp;
+                    blob_path = ggml_openvino_model_cache_blob_path(model_cache_dir, model_fp);
+                    manifest_path = ggml_openvino_model_cache_manifest_path(model_cache_dir, model_fp);
+                }
             }
             if (cache_enabled) {
                 std::lock_guard<std::mutex> map_lock(r_ctx->ctx_mutex);
