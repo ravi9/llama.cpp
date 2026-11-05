@@ -1,10 +1,12 @@
 #include "ggml-decoder.h"
 #include "ggml-impl.h"
 #include "ggml-openvino-extra.h"
+#include "model-cache.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <openvino/runtime/core.hpp>
@@ -93,6 +95,13 @@ struct decoder_runtime_ctx {
 
     std::shared_ptr<std::mutex> mutex;
     std::shared_ptr<GgmlOvDecoder> ptr;
+    // Attention sizes the cached prefill model was built with; decode calls overwrite the decoder's.
+    int prefill_attention_size = -1;
+    int prefill_attention_size_swa = -1;
+    // KV window of the decode model in the compiled pair (GGML_OPENVINO_NPU_DECODE_PREBUILD).
+    int decode_attention_size = -1;
+    std::string shared_key;
+    std::map<int, std::shared_ptr<ov::InferRequest>> decode_window_requests;
 };
 
 struct ov_compiled_graph {
@@ -102,6 +111,20 @@ struct ov_compiled_graph {
     std::vector<std::string> output_names;
     std::vector<std::string> prefill_input_names;
     std::vector<std::string> prefill_output_names;
+    // Extra decode models for other KV windows, built on first use with the pair's settings.
+    int decode_attention_size = -1;
+    std::map<int, ov::CompiledModel> decode_windows;
+    ov::AnyMap decode_config;
+    uint64_t cache_base_extra = 0;
+    bool self_contained = false;
+    bool decode_unfold = false;
+    // GGML_OPENVINO_NPU_WEIGHTLESS_BANK: the pair's weights file, and its layout when the pair was compiled in
+    // this process (window models then resolve the shared weights through the same file).
+    bool weightless_bank = false;
+    std::string weights_path;
+    std::shared_ptr<ggml_openvino_weights_layout> weights_layout;
+    // Compute params the pair's decode model was built with; window models derive from them.
+    ComputeParams decode_c_params;
 };
 
 // Only compilation and cache publication use this mutex. Requests, decoders and

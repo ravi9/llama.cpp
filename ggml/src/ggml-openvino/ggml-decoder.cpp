@@ -1314,7 +1314,9 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
             // Both masks are named "attn_inp_kq_mask", so tell them apart by tensor identity.
             const bool swa_mask = is_swa_mask(input);
             int attention_size = swa_mask ? m_model_params.ctx_per_seq_swa * m_model_params.n_seq : m_model_params.ctx;
-            if (m_is_prefill && ggml_openvino_kv_slice_enabled()) {
+            const bool kv_window =
+                m_is_prefill ? ggml_openvino_kv_slice_enabled() : ggml_openvino_npu_decode_bucket() > 0;
+            if (kv_window) {
                 attention_size = swa_mask ? m_compute_params.attention_size_swa : m_compute_params.attention_size;
             }
             input_shape = ov::PartialShape{1, 1, m_is_prefill ? m_prefill_chunk_size : 1, attention_size};
@@ -1340,12 +1342,21 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
         if (!m_is_static && !is_flat_kv) {
             // do not fix ctx size to make llama-bench work across test params
             input_shape[2] = -1;
-        } else if (m_is_prefill && ggml_openvino_kv_slice_enabled()) {
+        } else if (m_is_prefill ? ggml_openvino_kv_slice_enabled() :
+                                  m_is_static && ggml_openvino_npu_decode_bucket() > 0) {
             const auto layer = extract_layer_from_name(name);
             if (layer.has_value() && !is_swa_layer(*layer) && m_compute_params.attention_size > 0 &&
                 m_compute_params.attention_size < input_shape[2].get_length()) {
                 const int attention_size = m_compute_params.attention_size;
                 input_shape[2] = attention_size;
+            }
+            if (layer.has_value() && !is_swa_layer(*layer) && ggml_openvino_npu_kv_head_major_enabled()) {
+                GGML_ASSERT(input_shape[1].get_length() == 1);
+                const int64_t heads = get_n_heads_kv_for_tensor(input);
+                const int64_t head_size = input_shape[3].get_length() / heads;
+                input_shape = name.rfind("cache_v_l", 0) == 0 ?
+                                  ov::PartialShape{1, heads, head_size, input_shape[2]} :
+                                  ov::PartialShape{1, heads, input_shape[2], head_size};
             }
         }
         if ((is_stateful() && !is_flat_kv) || is_kvcache_4d(input)) {
@@ -1474,7 +1485,10 @@ void GgmlOvDecoder::add_extra_inputs() {
         const auto chunk_size = static_cast<size_t>(m_prefill_chunk_size);
         const auto input_len = static_cast<size_t>(m_compute_params.input_len);
         const auto num_chunks = (input_len + chunk_size - 1) / chunk_size;
-        const auto past_capacity = std::max(chunk_size, (num_chunks - 1) * chunk_size);
+        // Head-major KV: the past is the whole cache storage [1, heads, attention_size, head_size].
+        const bool head_major = ggml_openvino_npu_kv_head_major_enabled();
+        const auto past_capacity = head_major ? static_cast<size_t>(m_compute_params.attention_size) :
+                                                std::max(chunk_size, (num_chunks - 1) * chunk_size);
         for (const auto & [kv_name, kv_tensor] : m_inputs) {
             if (kv_name.rfind("cache_k_l", 0) != 0 && kv_name.rfind("cache_v_l", 0) != 0) {
                 continue;
@@ -1483,8 +1497,15 @@ void GgmlOvDecoder::add_extra_inputs() {
             const auto combined_dim = static_cast<size_t>(kv_tensor->ne[0]);
             GGML_ASSERT(n_heads_kv > 0 && combined_dim % n_heads_kv == 0);
             const auto head_size = combined_dim / n_heads_kv;
-            m_model_extra_inputs["ggml_hfa_past_" + kv_name] = {
-                get_ov_type(kv_tensor), ov::Shape{1, n_heads_kv, past_capacity, head_size}, 0, true, {}, -1};
+            // flash_attn_ext looks the past input up by layer, so drop the graph-ordinal suffix ("#l12").
+            const std::string cache_name = kv_name.substr(0, kv_name.find('#'));
+            const bool v_transposed = head_major && kv_name.rfind("cache_v_l", 0) == 0;
+            m_model_extra_inputs["ggml_hfa_past_" + cache_name] = {
+                get_ov_type(kv_tensor),
+                v_transposed ? ov::Shape{1, n_heads_kv, head_size, past_capacity} :
+                head_major   ? ov::Shape{1, n_heads_kv, past_capacity, head_size} :
+                               ov::Shape{1, past_capacity, n_heads_kv, head_size},
+                0, true, {}, -1};
         }
         m_model_extra_inputs["ggml_hfa_mask"] = {
             ov::element::f16, ov::Shape{1, 1, chunk_size, past_capacity + chunk_size}, 0, true, {}, -1};
@@ -2018,7 +2039,10 @@ std::shared_ptr<ov::Node> GgmlOvDecoder::create_weight_node(ggml_tensor * tensor
     // pointer to avoid re-extracting on every recompile. Opt-in via
     // GGML_OPENVINO_REDUCE_COMPILE_MEM or GGML_OPENVINO_MEMORY_OPTIMIZE. Skip
     // for `naive` (test/naive path) since use_bias changes the produced node.
-    const bool cacheable_nonov = ggml_openvino_reduce_compile_mem_enabled() && !is_ov_buffer &&
+    // Self-contained decode-window models are built after the pair; reusing the node keeps e.g. the
+    // token_embd vocab on the pair's NPUW bank uid instead of embedding and importing a second copy.
+    const bool keep_for_windows = ggml_openvino_npu_raw_weight_cache_enabled() && ggml_openvino_npu_decode_bucket() > 0;
+    const bool cacheable_nonov = (ggml_openvino_reduce_compile_mem_enabled() || keep_for_windows) && !is_ov_buffer &&
                                  !naive && tensor->data != nullptr;
     if (cacheable_nonov) {
         std::lock_guard<std::mutex> lock(g_nonov_weight_cache_mutex);
@@ -2046,7 +2070,7 @@ std::shared_ptr<ov::Node> GgmlOvDecoder::create_weight_node(ggml_tensor * tensor
     if (ggml_is_quantized(tensor->type)) {
         auto use_bias = naive;
         if (is_ov_buffer) {
-            const bool preserve_raw = ggml_openvino_getenv_int("GGML_OPENVINO_SELF_CONTAINED_BLOB") != 0;
+            const bool preserve_raw = ggml_openvino_npu_raw_weight_cache_enabled();
             if (preserve_raw) {
                 // A later context must fingerprint the same raw GGUF bytes before importing its
                 // self-contained blob, so keep the model buffer immutable in this mode.
