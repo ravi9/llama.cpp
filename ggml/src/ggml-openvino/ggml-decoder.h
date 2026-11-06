@@ -686,7 +686,6 @@ private:
 
     std::map<std::string, ov::frontend::ggml::ModelInputInfo> m_model_inputs;
     std::map<std::string, ov::frontend::ggml::ModelExtraInputInfo> m_model_extra_inputs;
-    std::map<std::string, ov::Tensor> m_hfa_past_tensors;
     std::map<std::string, std::shared_ptr<ov::Node>> m_model_weights;
     std::map<std::string, ggml_tensor *> m_model_outputs;
     std::set<std::string> m_model_output_names;
