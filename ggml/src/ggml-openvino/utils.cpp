@@ -2240,11 +2240,16 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, const std::shared
                 // out_ids is bound at a fixed length, so the output count is part of the static shape
                 const std::string prefill_signature = "static-1 out=" + std::to_string(c_params.output_len);
                 const std::string decode_signature = "static-1 out=1";
+                uint64_t prefill_salt = static_model_salt(base_extra, true, prefill_chunk_size, c_params.attention_size,
+                                      c_params.attention_size_swa, false);
+                // the prefill compile params can differ from the env (NPU4000 FWLM default), so key on the final value
+                const auto prefill_mode_it = mc_config.find("NPU_COMPILATION_MODE_PARAMS");
+                if (prefill_mode_it != mc_config.end()) {
+                    prefill_salt = ggml_openvino_model_cache_mix_string(
+                        prefill_salt, prefill_mode_it->second.as<std::string>().c_str());
+                }
                 prefill_fp = ggml_openvino_model_fingerprint(
-                    cgraph, device, true, m_params.rope_params, 16,
-                    static_model_salt(base_extra, true, prefill_chunk_size, c_params.attention_size,
-                                      c_params.attention_size_swa, false),
-                    prefill_signature);
+                    cgraph, device, true, m_params.rope_params, 16, prefill_salt, prefill_signature);
                 decode_fp = ggml_openvino_model_fingerprint(
                     cgraph, device, true, m_params.rope_params, 16,
                     static_model_salt(base_extra, false, prefill_chunk_size, decode_c_params.attention_size,
