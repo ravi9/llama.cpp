@@ -102,11 +102,6 @@ std::optional<ov::Tensor> try_make_kv_sliced_tensor(const std::shared_ptr<GgmlOv
     if (compute_params.n_seq_active != 1 || compute_params.seq_active_start != 0) {
         return std::nullopt;
     }
-    // The consumer lookup scans the whole graph, so it runs after the cheap checks.
-    const auto * op = ggml_decoder->get_tensor_used_op(ggml_tensor);
-    if (!GgmlOvDecoder::is_kvcache(ggml_tensor, op) || !ggml_decoder->is_kvcache_token_rows(ggml_tensor)) {
-        return std::nullopt;
-    }
 
     const int ctx_per_seq = ggml_decoder->get_ctx_per_seq();
     const int n_kv = compute_params.attention_size;
