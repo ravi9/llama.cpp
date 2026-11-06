@@ -490,16 +490,6 @@ static uint64_t ggml_openvino_model_cache_mix_string(uint64_t hash, const char *
     return hash * 131 + 1;
 }
 
-static uint64_t ggml_openvino_model_cache_mix_string(uint64_t hash, const char * value) {
-    if (!value) {
-        return hash * 131;
-    }
-    while (*value) {
-        hash = hash * 131 + static_cast<unsigned char>(*value++);
-    }
-    return hash * 131 + 1;
-}
-
 ov::Tensor create_ov_output_tensor(const std::shared_ptr<GgmlOvDecoder> & ggml_decoder,
                                    const std::shared_ptr<ov::InferRequest> & infer_request,
                                    int output_index,
