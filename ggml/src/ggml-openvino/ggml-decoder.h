@@ -474,6 +474,21 @@ public:
         return tensor->op == GGML_OP_GET_ROWS && op->op == GGML_OP_RMS_NORM;
     }
 
+    // Raw float input [n_embd, n_tokens]: DFlash/DSpark/EAGLE3 features into fc, or raw embd batch / EAGLE3 g-embd into RMS_NORM
+    // MUL_MAT needs a weight leaf as src[0], so inp_mean (src[0] is computed) does not match
+    static bool is_inp_embd_leaf(const ggml_tensor * tensor, const ggml_tensor * op) {
+        if (tensor->op != GGML_OP_NONE || !(tensor->flags & GGML_TENSOR_FLAG_INPUT) || tensor->type != GGML_TYPE_F32) {
+            return false;
+        }
+        if (op->op == GGML_OP_MUL_MAT) {
+            return op->src[1] == tensor && op->src[0] != nullptr && op->src[0]->op == GGML_OP_NONE;
+        }
+        return op->op == GGML_OP_RMS_NORM && op->src[0] == tensor;
+    }
+
+    // true if any node of the current graph uses tensor as a raw embd input (see is_inp_embd_leaf)
+    bool has_inp_embd_leaf_use(const ggml_tensor * tensor) const;
+
     static bool is_activation_input(const ggml_tensor * tensor, const ggml_tensor * op) {
         if (tensor == nullptr || op == nullptr || tensor->type != GGML_TYPE_F32 || tensor->ne[2] != 1 ||
             tensor->ne[3] != 1 || (tensor->buffer != nullptr && tensor->buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS)) {

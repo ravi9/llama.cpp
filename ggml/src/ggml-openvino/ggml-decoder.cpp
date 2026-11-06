@@ -1281,6 +1281,15 @@ void GgmlOvDecoder::validate_cgraph() const {
     }
 }
 
+bool GgmlOvDecoder::has_inp_embd_leaf_use(const ggml_tensor * tensor) const {
+    for (int i = 0; i < m_cgraph->n_nodes; i++) {
+        if (is_inp_embd_leaf(tensor, m_cgraph->nodes[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
 ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
                                                       const ggml_tensor * input,
                                                       int dynamic_dim_index) const {
@@ -1395,7 +1404,7 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
         // index list has a static length; on CPU/GPU it may change across compiles (defrag).
         input_shape = m_is_static ? ov::PartialShape{get_shape(input)} : ov::PartialShape{1, 1, 1, -1};
 
-    } else if (input != nullptr && op != nullptr && is_inp_emb(input, op)) {
+    } else if (input != nullptr && op != nullptr && (is_inp_emb(input, op) || has_inp_embd_leaf_use(input))) {
         input_shape = ov::PartialShape{get_shape(input)};
         if (!m_is_static) {
             input_shape[2] = -1;
@@ -1790,7 +1799,11 @@ void GgmlOvDecoder::compute_model_outputs() {
                     }
                 }
             }
-            if (input_use_count == cur_node_use_count) {
+            // Keep tensors flagged as graph outputs (e.g. layer inputs read by a DFlash/DSpark drafter).
+            // Not result_norm: llama flags it in every graph but reads it only with embeddings on.
+            const bool keep_output =
+                (cur_node->flags & GGML_TENSOR_FLAG_OUTPUT) && strcmp(cur_node->name, "result_norm") != 0;
+            if (input_use_count == cur_node_use_count && !keep_output) {
                 cur_node = nullptr;
             }
         }
@@ -2634,7 +2647,7 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
                     m_node_dynamic_dims[src] = 0;
                     continue;
                 }
-                if (is_inp_scale_rows(src, node)) {
+                if (is_inp_scale_rows(src, node) || is_inp_embd_leaf(src, node)) {
                     m_node_dynamic_dims[src] = 1;
                     continue;
                 }
