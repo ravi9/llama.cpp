@@ -39,6 +39,8 @@ struct ModelParams {
     bool v_trans = false;
     // the graph has FLASH_ATTN_EXT with logit soft-capping (gemma-2)
     bool softcap_attn = false;
+    // the graph has GATED_DELTA_NET (qwen35)
+    bool has_gated_delta_net = false;
     std::vector<int> swa_layers;
     // The sliding-window mask tensor, identified in compute_llm_params() by grouping attention
     // layers on the mask they consume. Only used to tell the two masks apart when naming OV
