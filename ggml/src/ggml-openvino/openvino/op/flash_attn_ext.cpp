@@ -391,6 +391,14 @@ OutputVector translate_flash_attn_ext(const NodeContext & context) {
             mask, ov::op::v0::Constant::create(ov::element::f16, ov::Shape{}, std::vector<float>{-30000.0f}));
     }
 
+    // With n_seq_active read from the mask shape, the GPU plugin knows Q's head size and uses its fused SDPA kernel.
+    // That kernel works on blocks of keys: a block fully masked with -inf for a row gives exp(-inf - -inf) = NaN,
+    // which spreads to the row's result, so mask with a large finite value instead
+    if (has_mask && ggml_openvino_is_gpu() && !context.is_stateful() && ggml_openvino_shape_from_mask_enabled()) {
+        mask = std::make_shared<ov::op::v1::Maximum>(
+            mask, ov::op::v0::Constant::create(ov::element::f16, ov::Shape{}, std::vector<float>{-30000.0f}));
+    }
+
     constexpr auto causal = false;
     if (has_mask && has_sink) {
         auto sdpa = std::make_shared<ov::op::v13::ScaledDotProductAttention>(q, k, v, mask, scale_node, sink, causal);

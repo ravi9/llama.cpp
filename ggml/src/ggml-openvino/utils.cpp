@@ -8,6 +8,8 @@
 #include "ggml-openvino/ggml-decoder.h"
 #include "ggml.h"
 #include "model-cache.h"
+#include "npu/npu_config.h"
+#include "npu/npu_quant_policy.h"
 #include "openvino/frontend.h"
 #include "openvino/input_model.h"
 
@@ -98,8 +100,14 @@ std::optional<ov::Tensor> try_make_kv_sliced_tensor(const std::shared_ptr<GgmlOv
         return std::nullopt;
     }
 
-    const auto & compute_params = ggml_decoder->get_compute_params();
-    if (compute_params.n_seq_active != 1 || compute_params.seq_active_start != 0) {
+    ov::Shape full_shape = GgmlOvDecoder::get_shape(ggml_tensor);
+    if (full_shape.size() != 4 || full_shape[0] != 1 || full_shape[1] != 1 ||
+        static_cast<int>(full_shape[2]) != ctx_per_seq) {
+        return std::nullopt;
+    }
+    // The consumer lookup scans the whole graph, so it runs after the cheap checks.
+    const auto * op = ggml_decoder->get_tensor_used_op(ggml_tensor);
+    if (!GgmlOvDecoder::is_kvcache(ggml_tensor, op) || !ggml_decoder->is_kvcache_token_rows(ggml_tensor)) {
         return std::nullopt;
     }
 
@@ -478,6 +486,16 @@ static void dump_ov_profiling_info(const ov::InferRequest & infer_request) {
 
     GGML_LOG_INFO("ggml-openvino: profile %s: %zu executed nodes, %.3f ms device, %.3f ms CPU\n", path.c_str(),
                   executed_count, total_real_time / 1000.0, total_cpu_time / 1000.0);
+}
+
+static uint64_t ggml_openvino_model_cache_mix_string(uint64_t hash, const char * value) {
+    if (!value) {
+        return hash * 131;
+    }
+    while (*value) {
+        hash = hash * 131 + static_cast<unsigned char>(*value++);
+    }
+    return hash * 131 + 1;
 }
 
 static uint64_t ggml_openvino_model_cache_mix_string(uint64_t hash, const char * value) {

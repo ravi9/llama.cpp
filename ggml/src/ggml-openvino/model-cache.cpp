@@ -177,6 +177,7 @@ bool ggml_openvino_model_cache_only() {
 static const char * cache_settings[] = {
     "GGML_OPENVINO_REQUANT_KQUANT",
     "GGML_OPENVINO_NATIVE_SOFTPLUS",
+    "GGML_OPENVINO_GDN_NATIVE_STATE",
     // GGML_OPENVINO_KV_SLICE only changes dynamic runtime bindings. Dynamic
     // attention graphs accept either shape and share the same compiled blob.
     "GGML_OPENVINO_MANUAL_GQA_ATTN",
