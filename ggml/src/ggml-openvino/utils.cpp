@@ -1081,7 +1081,7 @@ enum ggml_status naive_compute(ggml_cgraph * cgraph,
 
 namespace {
 
-// Small host inputs and outputs go through backend-owned USM host tensors, so the GPU plugin has no per-call copies.
+// Small host inputs use USM staging to avoid per-call copies in the GPU plugin.
 constexpr size_t k_io_staging_max_bytes = 4u << 20;
 
 bool io_staging_enabled() {
@@ -1668,13 +1668,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::share
 
         auto & out_bindings = ggml_decoder->port_bindings(false, ov_output_names.size(), infer_request.get());
 
-        struct staged_output {
-            void * dst;
-            const void * src;
-            size_t bytes;
-        };
-
-        std::vector<staged_output> staged_outputs;  // copied back after infer()
+        // Keep caller output storage across batch sizes. Switching to USM staging for small outputs can leave a shared GPU request bound to the old buffer.
         for (size_t i = 0; i < ov_output_names.size(); i++) {
             // Debug-only outputs added via GGML_OPENVINO_DEBUG_NODE (see
             // translate_session.cpp) have no corresponding ggml tensor; leave
@@ -1710,14 +1704,6 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::share
             }
             uint64_t id = ggml_decoder->take_last_kv_tensor_id();
             auto & binding = out_bindings[i];
-            if (!inactive && id == 0 && io_staging_enabled() && !ggml_openvino_buffer_is_remote(ggml_tensor) &&
-                stageable_size(output_tensor)) {
-                void * dst = output_tensor.data();
-                const size_t bytes = output_tensor.get_byte_size();
-                output_tensor = staging_for(*ggml_decoder, binding, output_tensor);
-                staged_outputs.push_back({dst, binding.staging_ptr, bytes});
-                id = binding.staging_id;
-            }
             if (needs_bind(binding, output_tensor, id)) {
                 infer_request->set_output_tensor(i, output_tensor);
             }
@@ -1726,9 +1712,6 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::share
         ov_raw_infer_start = ggml_time_us();
         infer_request->infer();
         infer_end_time = ggml_time_us();
-        for (const auto & out : staged_outputs) {
-            std::memcpy(out.dst, out.src, out.bytes);
-        }
         if (stateful_recurrent) {
             const auto * inp_pos = get_inp_pos_tensor(cgraph);
             r_ctx->stateful_kv_size =
