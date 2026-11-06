@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <openvino/runtime/intel_gpu/ocl/ocl.hpp>
 #include <openvino/runtime/intel_npu/level_zero/level_zero.hpp>
@@ -125,6 +126,9 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_NPU_REQUANT_POLICY",
         // Integer values (use ggml_openvino_getenv_int)
         "GGML_OPENVINO_PREFILL_CHUNK_SIZE",
+        "GGML_OPENVINO_LAZY_HOST_THRESHOLD_MB",
+        "GGML_OPENVINO_NPU_DECODE_PREBUILD",
+        "GGML_OPENVINO_NPU_KV_ON_DEMAND",
         // Boolean toggles (treated as int flags via ggml_openvino_getenv_int)
         "GGML_OPENVINO_STATEFUL_EXECUTION",
         "GGML_OPENVINO_PROFILING",
@@ -144,6 +148,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_PRINT_CGRAPH_TENSOR_ADDRESS",
         "GGML_OPENVINO_ENABLE_CACHE",
         "GGML_OPENVINO_DISABLE_CACHE",
+        "GGML_OPENVINO_DISABLE_FUSED_RECURRENCE",
         "GGML_OPENVINO_ENABLE_KV_4D",
         "GGML_OPENVINO_ENABLE_FALLBACK",
         "GGML_OPENVINO_KV_SCATTER_ELEMENTS",
@@ -164,6 +169,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_NPU_FAST_MASK",
         "GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK",
         "GGML_OPENVINO_GDN_Q_SCALE",
+        "GGML_OPENVINO_GDN_NATIVE_STATE",
         "GGML_OPENVINO_NPU_L0_HOST_TENSORS",
         "GGML_OPENVINO_KV_SLICE",
         "GGML_OPENVINO_NPU_HFA_PREFILL",
@@ -172,6 +178,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_SELF_CONTAINED_BLOB",
         "GGML_OPENVINO_SELF_CONTAINED_MMAP",
         "GGML_OPENVINO_NPU_SHARED_BANK",
+        "GGML_OPENVINO_NPU_WEIGHTLESS_BANK",
         // Build the precise (but O(n_nodes)) graph cache key. Needed by op tests.
         "GGML_OPENVINO_FULL_GRAPH_KEY",
     };
@@ -312,6 +319,11 @@ bool ggml_openvino_gdn_prescale_enabled() {
     return ggml_openvino_getenv_int("GGML_OPENVINO_GDN_Q_SCALE") > 0;
 }
 
+bool ggml_openvino_gdn_native_state_enabled() {
+    // only verified on NPU so far
+    return ggml_openvino_is_npu() && ggml_openvino_getenv_int("GGML_OPENVINO_GDN_NATIVE_STATE") > 0;
+}
+
 float ggml_openvino_gdn_q_scale() {
     constexpr float default_scale = 64.0f;
     const char * v = ggml_openvino_getenv_str("GGML_OPENVINO_GDN_Q_SCALE", nullptr);
@@ -371,6 +383,253 @@ bool ggml_openvino_npu_decode_unfold_enabled() {
 
 bool ggml_openvino_npu_parallel_compile_enabled() {
     return ggml_openvino_getenv_int("GGML_OPENVINO_NPU_PARALLEL_COMPILE") != 0;
+}
+
+int ggml_openvino_npu_decode_bucket() {
+    if (!ggml_openvino_is_npu()) {
+        return 0;
+    }
+    return ggml_openvino_getenv_int("GGML_OPENVINO_NPU_DECODE_PREBUILD") != 0 ? 1024 : 0;
+}
+
+bool ggml_openvino_npu_kv_on_demand_enabled() {
+    return ggml_openvino_is_npu() && ggml_openvino_getenv_int("GGML_OPENVINO_NPU_KV_ON_DEMAND") != 0;
+}
+
+bool ggml_openvino_npu_kv_head_major_enabled() {
+    return ggml_openvino_npu_kv_on_demand_enabled() && ggml_openvino_npu_decode_bucket() > 0 &&
+           ggml_openvino_kv_slice_enabled();
+}
+
+bool ggml_openvino_npu_raw_weight_cache_enabled() {
+    return ggml_openvino_getenv_int("GGML_OPENVINO_SELF_CONTAINED_BLOB") != 0 ||
+           ggml_openvino_npu_weightless_bank_enabled();
+}
+
+bool ggml_openvino_npu_weightless_bank_enabled() {
+    return ggml_openvino_getenv_int("GGML_OPENVINO_NPU_WEIGHTLESS_BANK") != 0;
+}
+
+namespace {
+struct kv_storage_entry {
+    size_t row_bytes = 0;
+    size_t max_rows = 0;
+    size_t cap_rows = 0;
+    // 0: ggml row layout [rows][heads * head_size]; >0: head-major [heads][cap_rows][head_size].
+    size_t heads = 0;
+    ov::Tensor storage;
+};
+
+struct kv_storage_registry {
+    std::mutex mutex;
+    // Keyed by the ggml data address of each KV tensor.
+    std::map<uintptr_t, kv_storage_entry> entries;
+};
+
+kv_storage_registry & kv_registry() {
+    static kv_storage_registry reg;
+    return reg;
+}
+
+kv_storage_entry * kv_find_locked(kv_storage_registry & reg, uintptr_t addr, uintptr_t & base) {
+    auto it = reg.entries.upper_bound(addr);
+    if (it == reg.entries.begin()) {
+        return nullptr;
+    }
+    --it;
+    if (addr >= it->first + it->second.max_rows * it->second.row_bytes) {
+        return nullptr;
+    }
+    base = it->first;
+    return &it->second;
+}
+
+// Storage offset of byte `off` of the ggml tensor; its row must be below cap_rows.
+size_t kv_storage_offset(const kv_storage_entry & e, size_t off) {
+    if (e.heads == 0) {
+        return off;
+    }
+    const size_t head_bytes = e.row_bytes / e.heads;
+    const size_t row = off / e.row_bytes;
+    const size_t in_row = off % e.row_bytes;
+    return ((in_row / head_bytes) * e.cap_rows + row) * head_bytes + in_row % head_bytes;
+}
+
+bool kv_grow_locked(kv_storage_entry & e, size_t rows, size_t heads) {
+    if (heads > 0 && e.heads != heads) {
+        if (e.cap_rows > 0) {
+            throw std::runtime_error("ggml-openvino: on-demand KV storage layout changed");
+        }
+        GGML_ASSERT(e.row_bytes % heads == 0);
+        e.heads = heads;
+    }
+    rows = std::min(rows, e.max_rows);
+    if (rows <= e.cap_rows) {
+        return false;
+    }
+    const int bucket = ggml_openvino_npu_decode_bucket();
+    size_t cap = bucket > 0 ? static_cast<size_t>(bucket) : 1024;
+    while (cap < rows) {
+        cap *= 2;
+    }
+    cap = std::min(cap, e.max_rows);
+    const size_t bytes = cap * e.row_bytes;
+    ov::Tensor grown;
+    if (ggml_openvino_npu_l0_host_tensors_enabled()) {
+        grown = ov_singleton_core().get_default_context("NPU").create_host_tensor(ov::element::u8, ov::Shape{bytes});
+    } else {
+        grown = ov::Tensor(ov::element::u8, ov::Shape{bytes});
+    }
+    auto * dst = static_cast<uint8_t *>(grown.data());
+    // Rows past the history are masked out, but must stay finite (0 * NaN is NaN).
+    std::memset(dst, 0, bytes);
+    if (e.cap_rows > 0) {
+        const auto * src = static_cast<const uint8_t *>(e.storage.data());
+        if (e.heads == 0) {
+            std::memcpy(dst, src, e.cap_rows * e.row_bytes);
+        } else {
+            const size_t head_bytes = e.row_bytes / e.heads;
+            for (size_t h = 0; h < e.heads; ++h) {
+                std::memcpy(dst + h * cap * head_bytes, src + h * e.cap_rows * head_bytes, e.cap_rows * head_bytes);
+            }
+        }
+    }
+    // Requests still bound to the old storage keep it alive until they are rebound or released.
+    e.storage = grown;
+    e.cap_rows = cap;
+    return true;
+}
+}  // namespace
+
+void ggml_openvino_kv_storage_register(void * data, size_t row_bytes, size_t rows) {
+    auto & reg = kv_registry();
+    std::lock_guard<std::mutex> lock(reg.mutex);
+    auto & e = reg.entries[reinterpret_cast<uintptr_t>(data)];
+    e = kv_storage_entry{};
+    e.row_bytes = row_bytes;
+    e.max_rows = rows;
+}
+
+void ggml_openvino_kv_storage_unregister(const void * base, size_t size) {
+    auto & reg = kv_registry();
+    std::lock_guard<std::mutex> lock(reg.mutex);
+    const auto begin = reinterpret_cast<uintptr_t>(base);
+    reg.entries.erase(reg.entries.lower_bound(begin), reg.entries.lower_bound(begin + size));
+}
+
+void * ggml_openvino_kv_storage(const void * ptr, size_t bytes) {
+    auto & reg = kv_registry();
+    std::lock_guard<std::mutex> lock(reg.mutex);
+    if (reg.entries.empty()) {
+        return nullptr;
+    }
+    const auto addr = reinterpret_cast<uintptr_t>(ptr);
+    uintptr_t base = 0;
+    auto * e = kv_find_locked(reg, addr, base);
+    if (e == nullptr) {
+        return nullptr;
+    }
+    const size_t offset = addr - base;
+    if (e->heads > 0 && offset != 0) {
+        throw std::runtime_error("ggml-openvino: head-major KV storage is only bound from the tensor start");
+    }
+    if (kv_grow_locked(*e, (offset + bytes + e->row_bytes - 1) / e->row_bytes, 0)) {
+        GGML_LOG_WARN("%s: KV storage grown during binding to %zu rows\n", __func__, e->cap_rows);
+    }
+    if (offset + bytes > e->cap_rows * e->row_bytes) {
+        throw std::runtime_error("ggml-openvino: on-demand KV access beyond the KV cache");
+    }
+    return static_cast<uint8_t *>(e->storage.data()) + offset;
+}
+
+bool ggml_openvino_kv_storage_reserve(const void * data, size_t rows, size_t heads) {
+    auto & reg = kv_registry();
+    std::lock_guard<std::mutex> lock(reg.mutex);
+    auto it = reg.entries.find(reinterpret_cast<uintptr_t>(data));
+    if (it == reg.entries.end()) {
+        return false;
+    }
+    const bool had_storage = it->second.cap_rows > 0;
+    return kv_grow_locked(it->second, rows, heads) && had_storage;
+}
+
+size_t ggml_openvino_kv_storage_capacity(const void * data) {
+    auto & reg = kv_registry();
+    std::lock_guard<std::mutex> lock(reg.mutex);
+    auto it = reg.entries.find(reinterpret_cast<uintptr_t>(data));
+    return it == reg.entries.end() ? 0 : it->second.cap_rows;
+}
+
+bool ggml_openvino_kv_storage_copy(const void * ptr, void * host, size_t size, ggml_openvino_kv_copy_op op) {
+    auto & reg = kv_registry();
+    std::lock_guard<std::mutex> lock(reg.mutex);
+    if (reg.entries.empty()) {
+        return false;
+    }
+    uintptr_t base = 0;
+    auto * e = kv_find_locked(reg, reinterpret_cast<uintptr_t>(ptr), base);
+    if (e == nullptr) {
+        return false;
+    }
+    const size_t begin = reinterpret_cast<uintptr_t>(ptr) - base;
+    if (op != GGML_OPENVINO_KV_READ) {
+        kv_grow_locked(*e, (begin + size + e->row_bytes - 1) / e->row_bytes, 0);
+    }
+    auto * storage = static_cast<uint8_t *>(e->storage.data());
+    auto * h = static_cast<uint8_t *>(host);
+    const size_t head_bytes = e->heads > 0 ? e->row_bytes / e->heads : e->row_bytes;
+    for (size_t done = 0; done < size;) {
+        const size_t off = begin + done;
+        const size_t n = std::min(size - done, head_bytes - off % head_bytes);
+        const bool stored = off / e->row_bytes < e->cap_rows;
+        uint8_t * s = stored ? storage + kv_storage_offset(*e, off) : nullptr;
+        if (op == GGML_OPENVINO_KV_READ) {
+            if (s) {
+                std::memcpy(h + done, s, n);
+            } else {
+                std::memset(h + done, 0, n);
+            }
+        } else if (op == GGML_OPENVINO_KV_WRITE) {
+            std::memcpy(s, h + done, n);
+        } else {
+            std::memset(s, *h, n);
+        }
+        done += n;
+    }
+    return true;
+}
+
+bool ggml_openvino_kv_storage_write_rows(const void * data, const void * src, size_t src_stride, size_t src_col,
+                                         size_t dst_row, size_t n) {
+    auto & reg = kv_registry();
+    std::lock_guard<std::mutex> lock(reg.mutex);
+    auto it = reg.entries.find(reinterpret_cast<uintptr_t>(data));
+    if (it == reg.entries.end() || it->second.heads == 0) {
+        return false;
+    }
+    auto & e = it->second;
+    if (dst_row + n > e.cap_rows || src_col + n > src_stride) {
+        throw std::runtime_error("ggml-openvino: head-major KV row write out of range");
+    }
+    const size_t head_bytes = e.row_bytes / e.heads;
+    auto * dst = static_cast<uint8_t *>(e.storage.data());
+    const auto * s = static_cast<const uint8_t *>(src);
+    for (size_t h = 0; h < e.heads; ++h) {
+        std::memcpy(dst + (h * e.cap_rows + dst_row) * head_bytes, s + (h * src_stride + src_col) * head_bytes,
+                    n * head_bytes);
+    }
+    return true;
+}
+
+void ggml_openvino_kv_storage_clear(const void * base, size_t size, uint8_t value) {
+    auto & reg = kv_registry();
+    std::lock_guard<std::mutex> lock(reg.mutex);
+    const auto begin = reinterpret_cast<uintptr_t>(base);
+    for (auto it = reg.entries.lower_bound(begin); it != reg.entries.end() && it->first < begin + size; ++it) {
+        if (it->second.cap_rows > 0) {
+            std::memset(it->second.storage.data(), value, it->second.storage.get_byte_size());
+        }
+    }
 }
 
 bool ggml_openvino_shape_from_mask_enabled() {
@@ -433,12 +692,13 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
     //
     // GGML_OPENVINO_REQUANT_KQUANT selects a 4-bit target instead. Names are
     // q4_<sym|asym><group>[_all]: <sym|asym> says whether a per-group zero point is kept, <group>
-    // is the group size, and the _all suffix sends Q4_K down the same path (without it only
-    // Q6_K/Q5_K are touched):
+    // is the group size. The _all suffix includes Q4_K; q4_asym64_all also includes
+    // ordinary Q8_0/Q5_1 linear weights, matching the INT4_ASYM/group-64 primary precision
+    // used by NNCF with ratio=1.0. Embedding/output retain the channel-wise INT8 overrides above:
     //   q4_sym128      Q6_K/Q5_K -> Q4_0_128 (u4, group 128, symmetric)
     //   q4_sym128_all  and Q4_K too -- drops Q4_K's per-32 zero point, which costs some accuracy
     //   q4_asym64      Q6_K/Q5_K -> Q4_1_64 (u4, group 64, asymmetric)
-    //   q4_asym64_all  Q6_K/Q5_K and Q4_K -> Q4_1_64 (u4, group 64, asymmetric)
+    //   q4_asym64_all  Q6_K/Q5_K/Q4_K/Q8_0/Q5_1 -> Q4_1_64 (u4, group 64, asymmetric)
     //   native         no requantization at all (keep Q6_K/Q5_K as they are)
     //
     // q4_asym64 leaves Q4_K at its native group 32. Use q4_asym64_all to keep the group size uniform.
@@ -458,6 +718,13 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
         if (asym64_all) {
             return ExtraQuantType::Q4_1_64;
         }
+    }
+    // Include dense Q8_0/Q5_1 in the explicit all-asymmetric policy. Keep the default GPU
+    // workaround below restricted to MoE experts: ordinary grouped INT8 MatMul is supported.
+    if (asym64_all && (tensor->type == GGML_TYPE_Q5_1 || tensor->type == GGML_TYPE_Q8_0)) {
+        // A group must fit within each row. Use backup channel-wise INT8 for incompatible
+        // widths (Q8_0/Q5_1 allow rows of 32 weights); every affected Qwen3.6 row is divisible by 64.
+        return tensor->ne[0] % 64 == 0 ? ExtraQuantType::Q4_1_64 : ExtraQuantType::Q8_0_C;
     }
     if (tensor->type == GGML_TYPE_Q5_0) {
         //return ExtraQuantType::Q4_0_128;
@@ -510,7 +777,10 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
 }
 
 bool ggml_openvino_use_exact_zero_point(const ggml_tensor * tensor) {
-    return tensor->ne[2] > 1 || ggml_openvino_getenv_int("GGML_OPENVINO_EXACT_ZERO_POINT") > 0;
+    // Other 3D weights, such as MLA's per-head attn_k_b / attn_v_b, feed a batched MatMul, where the GPU plugin fails
+    // on u4 weights with an f16 zero point (CL_OUT_OF_RESOURCES), so the opt-in covers 2D weights only.
+    const bool is_moe_expert = tensor->ne[2] > 1 && strstr(tensor->name, "exps") != nullptr;
+    return is_moe_expert || (tensor->ne[2] == 1 && ggml_openvino_getenv_int("GGML_OPENVINO_EXACT_ZERO_POINT") > 0);
 }
 
 // =====================================================
@@ -728,7 +998,8 @@ ggml_openvino_tensor_extra * ggml_openvino_create_tensor_extra(const ggml_tensor
     if (is_remote) {
         GGML_ASSERT(ggml_openvino_is_gpu());
         auto gpu_context = remote_context->as<ov::intel_gpu::ocl::ClContext>();
-        auto usm_tensor = gpu_context.create_tensor(element_type, shape, tensor->data);
+        auto usm_tensor = gpu_context.create_tensor(element_type, shape,
+                                                    tensor->data);
         ov_tensor = std::make_shared<ov::intel_gpu::ocl::USMTensor>(std::move(usm_tensor));
     } else {
         ov_tensor = std::make_shared<ov::Tensor>(element_type, shape, tensor->data);
