@@ -98,9 +98,8 @@ std::optional<ov::Tensor> try_make_kv_sliced_tensor(const std::shared_ptr<GgmlOv
         return std::nullopt;
     }
 
-    ov::Shape full_shape = GgmlOvDecoder::get_shape(ggml_tensor);
-    if (full_shape.size() != 4 || full_shape[0] != 1 || full_shape[1] != 1 ||
-        static_cast<int>(full_shape[2]) != ctx_per_seq) {
+    const auto & compute_params = ggml_decoder->get_compute_params();
+    if (compute_params.n_seq_active != 1 || compute_params.seq_active_start != 0) {
         return std::nullopt;
     }
     // The consumer lookup scans the whole graph, so it runs after the cheap checks.
