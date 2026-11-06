@@ -1271,6 +1271,7 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
         }
         if (node->op == GGML_OP_GATED_DELTA_NET) {
             model_params.state_size = node->src[0]->ne[0];
+            model_params.has_gated_delta_net = true;
             model_params.has_rs_rollback |= node->op_params[0] > 1;
             compute_params.gdn_attention_rows[get_tensor_ov_name(cgraph, node)] = node->src[2]->ne[2] * node->src[2]->ne[3];
         }
