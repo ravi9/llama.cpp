@@ -18,6 +18,7 @@ ov::AnyMap ggml_openvino_npu_build_compile_config(const char * cache_dir);
 ov::AnyMap ggml_openvino_npu_without_npuw(const ov::AnyMap & config);
 
 // Static prefill graph. With GGML_OPENVINO_NPU_HFA_PREFILL, switches NPUW to the HFA attention pipeline.
+// For GATED_DELTA_NET models on NPU4000, adds workload-management-mode=FWLM_V1_PAGES unless already set.
 ov::AnyMap ggml_openvino_npu_prefill_config(const ov::AnyMap & base, const GgmlOvDecoder & decoder);
 
 // Static decode graph. With GGML_OPENVINO_NPU_DECODE_UNFOLD, unfolds NPUW function calls into separate infer

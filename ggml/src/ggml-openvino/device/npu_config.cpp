@@ -87,8 +87,46 @@ ov::AnyMap ggml_openvino_npu_without_npuw(const ov::AnyMap & config) {
     return out;
 }
 
+// True on Lunar Lake (NPU4000). Queried once.
+static bool ggml_openvino_npu_is_4000() {
+    static const bool is_4000 = [] {
+        try {
+            return ov_singleton_core().get_property("NPU", "DEVICE_ARCHITECTURE").as<std::string>() == "4000";
+        } catch (...) {
+            return false;
+        }
+    }();
+    return is_4000;
+}
+
+// Workaround for GATED_DELTA_NET (qwen35) prefill on NPU4000.
+// The GDN prefill kernel runs matmuls on the DPU from SHAVE. The NPU4000 default workload management mode (PWLM)
+// does not keep other DPU tasks away while this kernel runs, so the device hangs (DEVICE_LOST). FWLM handles it.
+// Decode is not affected: the GDN decode kernel does not use the DPU.
+static bool ggml_openvino_npu_prefill_needs_fwlm(const GgmlOvDecoder & decoder) {
+    return decoder.get_model_params().has_gated_delta_net && ggml_openvino_npu_is_4000();
+}
+
+// Appends "workload-management-mode=FWLM_V1_PAGES" to NPU_COMPILATION_MODE_PARAMS, unless the user already set
+// workload-management-mode (e.g. via GGML_OPENVINO_NPU_COMPILE_CONFIG).
+static void ggml_openvino_npu_use_fwlm(ov::AnyMap & config) {
+    const std::string key = "NPU_COMPILATION_MODE_PARAMS";
+    auto it = config.find(key);
+    std::string params = it != config.end() ? it->second.as<std::string>() : "";
+    if (params.find("workload-management-mode") != std::string::npos) {
+        return;
+    }
+    if (!params.empty()) {
+        params += " ";
+    }
+    config[key] = params + "workload-management-mode=FWLM_V1_PAGES";
+}
+
 ov::AnyMap ggml_openvino_npu_prefill_config(const ov::AnyMap & base, const GgmlOvDecoder & decoder) {
     ov::AnyMap prefill_config = base;
+    if (ggml_openvino_npu_prefill_needs_fwlm(decoder)) {
+        ggml_openvino_npu_use_fwlm(prefill_config);
+    }
     if (ggml_openvino_npu_hfa_prefill_enabled()) {
         prefill_config["NPUW_ATTN_HISTORY_SIZE_INPUT"] = decoder.get_hfa_history_input_name();
         prefill_config["NPUW_ONLINE_PIPELINE"] = "REP";
