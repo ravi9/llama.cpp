@@ -1892,8 +1892,8 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
             reason = "GATED_DELTA_NET with kda (per-key-dimension gating) is not supported";
         }
         else if (op->op_params[0] > 1) {
-            if (!ggml_openvino_is_gpu() || ggml_openvino_getenv_int("GGML_OPENVINO_FORCE_STATIC")) {
-                reason = "GATED_DELTA_NET snapshots require dynamic GPU execution";
+            if (ggml_openvino_is_npu() || ggml_openvino_getenv_int("GGML_OPENVINO_FORCE_STATIC")) {
+                reason = "GATED_DELTA_NET snapshots require dynamic execution";
             }
         }
         if (reason != nullptr) {
@@ -2022,6 +2022,19 @@ static ggml_openvino_op_support ggml_backend_openvino_device_supports_op_impl(gg
             }
         }
         return {false, "device is not the selected OpenVINO device"};
+    }
+
+    // The write-back of GATED_DELTA_NET rollback snapshots stores into the recurrent cache in this backend's buffer,
+    // so it always runs here. When the GDN that produces the snapshots falls back to ggml, the write-back reads the
+    // packed GDN output wrongly and silently corrupts the cache, so stop with the reason instead.
+    if (GgmlOvDecoder::is_gdn_snapshot_writeback(op)) {
+        const auto gdn_support = ggml_backend_openvino_device_supports_op_impl(dev, op->src[0]->src[0]);
+        if (!gdn_support.is_supported) {
+            GGML_ABORT(
+                "ggml-openvino: %s. Recurrent rollback (n_rs_seq > 0, used by MTP, EAGLE3, DFlash and DSpark "
+                "speculative decoding) is not supported for this model on this device",
+                gdn_support.reason.c_str());
+        }
     }
 
     static std::unordered_set<ggml_type> supported_types{
