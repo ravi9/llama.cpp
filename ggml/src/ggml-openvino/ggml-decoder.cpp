@@ -2520,6 +2520,9 @@ ov::Any GgmlOvDecoder::get_attribute(const std::string & name) const {
     }
     if (name == "view_input_strides" && node->src[0] != nullptr) return std::vector<int64_t>{(int64_t) node->src[0]->nb[0], (int64_t) node->src[0]->nb[1], (int64_t) node->src[0]->nb[2], (int64_t) node->src[0]->nb[3]};
     if (name == "view_output_strides") return std::vector<int64_t>{(int64_t) node->nb[0], (int64_t) node->nb[1], (int64_t) node->nb[2], (int64_t) node->nb[3]};
+    // Per-layer slices as shared Split outputs: a StridedSlice costs a shape inference per run on GPU, and NPUW
+    // folding must not parametrize per-layer slice indices.
+    if (name == "view_prefer_split") return m_is_static || ggml_openvino_is_gpu();
     if (name == "input_ggml_shape" && node->src[0] != nullptr) return get_shape(node->src[0]);
     if (name == "gdn_state_slots" && node->op == GGML_OP_GATED_DELTA_NET) return static_cast<int64_t>(node->op_params[0]);
     if (name == "force_ref") return false;
