@@ -154,6 +154,7 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_KV_SCATTER_ELEMENTS",
         "GGML_OPENVINO_MANUAL_GQA_ATTN",
         "GGML_OPENVINO_DISABLE_ELTWISE_RANK_ALIGN",
+        "GGML_OPENVINO_DISABLE_SCALE_REORDER",
         "GGML_OPENVINO_MOE_OP",
         "GGML_OPENVINO_EXACT_ZERO_POINT",
         "GGML_OPENVINO_MEMORY_OPTIMIZE",
@@ -169,7 +170,6 @@ void ggml_openvino_device_config::init() {
         "GGML_OPENVINO_NPU_FAST_MASK",
         "GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK",
         "GGML_OPENVINO_GDN_Q_SCALE",
-        "GGML_OPENVINO_GDN_NATIVE_STATE",
         "GGML_OPENVINO_NPU_L0_HOST_TENSORS",
         "GGML_OPENVINO_KV_SLICE",
         "GGML_OPENVINO_NPU_HFA_PREFILL",
@@ -319,11 +319,6 @@ bool ggml_openvino_gdn_prescale_enabled() {
     return ggml_openvino_getenv_int("GGML_OPENVINO_GDN_Q_SCALE") > 0;
 }
 
-bool ggml_openvino_gdn_native_state_enabled() {
-    // only verified on NPU so far
-    return ggml_openvino_is_npu() && ggml_openvino_getenv_int("GGML_OPENVINO_GDN_NATIVE_STATE") > 0;
-}
-
 float ggml_openvino_gdn_q_scale() {
     constexpr float default_scale = 64.0f;
     const char * v = ggml_openvino_getenv_str("GGML_OPENVINO_GDN_Q_SCALE", nullptr);
@@ -373,8 +368,10 @@ bool ggml_openvino_npu_l0_host_tensors_enabled() {
     return ggml_openvino_getenv_int("GGML_OPENVINO_NPU_L0_HOST_TENSORS", 1) != 0;
 }
 
+// The NPU HFA prefill inputs and the head-major KV layout were produced by the legacy translators; the GGUF
+// frontend builds neither, so both stay off.
 bool ggml_openvino_npu_hfa_prefill_enabled() {
-    return ggml_openvino_is_npu() && ggml_openvino_getenv_int("GGML_OPENVINO_NPU_HFA_PREFILL") != 0;
+    return false;
 }
 
 bool ggml_openvino_npu_decode_unfold_enabled() {
@@ -397,8 +394,7 @@ bool ggml_openvino_npu_kv_on_demand_enabled() {
 }
 
 bool ggml_openvino_npu_kv_head_major_enabled() {
-    return ggml_openvino_npu_kv_on_demand_enabled() && ggml_openvino_npu_decode_bucket() > 0 &&
-           ggml_openvino_kv_slice_enabled();
+    return false;
 }
 
 bool ggml_openvino_npu_raw_weight_cache_enabled() {
@@ -630,6 +626,18 @@ void ggml_openvino_kv_storage_clear(const void * base, size_t size, uint8_t valu
             std::memset(it->second.storage.data(), value, it->second.storage.get_byte_size());
         }
     }
+}
+
+bool ggml_openvino_manual_gqa_attn_enabled() {
+    if (ggml_openvino_getenv_str("GGML_OPENVINO_MANUAL_GQA_ATTN") != nullptr) {
+        return ggml_openvino_getenv_int("GGML_OPENVINO_MANUAL_GQA_ATTN") > 0;
+    }
+    return ggml_openvino_is_gpu();
+}
+
+bool ggml_openvino_scale_reorder_enabled() {
+    return (ggml_openvino_is_gpu() || ggml_openvino_is_npu()) &&
+           ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_SCALE_REORDER") == 0;
 }
 
 bool ggml_openvino_shape_from_mask_enabled() {

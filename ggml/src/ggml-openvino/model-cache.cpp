@@ -4,7 +4,6 @@
 #include "ggml-backend.h"
 #include "ggml-impl.h"
 #include "ggml-openvino-extra.h"
-#include "openvino/rt_info/weightless_caching_attributes.hpp"
 
 #include <cerrno>
 #include <algorithm>
@@ -179,7 +178,6 @@ static const char * cache_settings[] = {
     "GGML_OPENVINO_NATIVE_SOFTPLUS",
     // GGML_OPENVINO_KV_SLICE only changes dynamic runtime bindings. Dynamic
     // attention graphs accept either shape and share the same compiled blob.
-    "GGML_OPENVINO_GDN_NATIVE_STATE",
     "GGML_OPENVINO_MANUAL_GQA_ATTN",
     "GGML_OPENVINO_EXACT_ZERO_POINT",
     "GGML_OPENVINO_STATEFUL_EXECUTION",
@@ -189,6 +187,7 @@ static const char * cache_settings[] = {
     "GGML_OPENVINO_MEMORY_OPTIMIZE",
     "GGML_OPENVINO_PROFILING",
     "GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK",
+    "GGML_OPENVINO_DISABLE_SCALE_REORDER",
 };
 
 void ggml_openvino_model_cache_init() {
@@ -504,81 +503,96 @@ std::string ggml_openvino_model_cache_weights_path(const std::string & dir, uint
     return dir + "/" + hex64(fp_a) + "-" + hex64(fp_b) + ".weights.bin";
 }
 
-std::shared_ptr<ggml_openvino_weights_layout> ggml_openvino_model_cache_write_weights(
-    const std::string & path,
-    const std::vector<std::shared_ptr<ov::Model>> & models) {
-    struct region {
-        const void * data;
-        size_t size;
-        size_t offset;
-    };
-    constexpr size_t alignment = 64;
+std::shared_ptr<ggml_openvino_weights_layout> ggml_openvino_model_cache_begin_weights(const std::string & path) {
     auto layout = std::make_shared<ggml_openvino_weights_layout>();
     layout->path = path;
-    std::vector<region> regions;
-    std::unordered_map<const void *, size_t> region_of;
+    layout->file.open(path + ".tmp", std::ios::binary | std::ios::trunc);
+    return layout->file.is_open() ? layout : nullptr;
+}
+
+ggml_openvino_weights_resolver ggml_openvino_model_cache_weights_writer(
+    const std::shared_ptr<ggml_openvino_weights_layout> & layout) {
+    return [layout](const void * data, size_t size) -> std::optional<size_t> {
+        constexpr size_t alignment = 64;
+        std::lock_guard<std::mutex> lock(layout->mutex);
+        if (data == nullptr || size == 0 || !layout->file.is_open() || !layout->file.good()) {
+            return std::nullopt;
+        }
+        // Converted models stay alive until the file is finished, so a known pointer still holds the same data. A
+        // larger view of it would read past its region.
+        if (auto it = layout->regions.find(data); it != layout->regions.end()) {
+            return size <= it->second.second ? std::optional<size_t>(it->second.first) : std::nullopt;
+        }
+        static const char zeros[alignment] = {};
+        const size_t offset = layout->size;
+        const size_t end = (offset + size + alignment - 1) / alignment * alignment;
+        layout->file.write(static_cast<const char *>(data), static_cast<std::streamsize>(size));
+        layout->file.write(zeros, static_cast<std::streamsize>(end - offset - size));
+        if (!layout->file.good()) {
+            return std::nullopt;
+        }
+        layout->size = end;
+        layout->regions[data] = { offset, size };
+        return offset;
+    };
+}
+
+ggml_openvino_weights_resolver ggml_openvino_model_cache_weights_reader(
+    const std::shared_ptr<ggml_openvino_weights_layout> & layout) {
+    return [layout](const void * data, size_t size) -> std::optional<size_t> {
+        std::lock_guard<std::mutex> lock(layout->mutex);
+        auto it = layout->regions.find(data);
+        if (it == layout->regions.end() || size > it->second.second) {
+            return std::nullopt;
+        }
+        return it->second.first;
+    };
+}
+
+bool ggml_openvino_model_cache_finish_weights(ggml_openvino_weights_layout & layout,
+                                              const std::vector<std::shared_ptr<ov::Model>> & models) {
+    std::lock_guard<std::mutex> lock(layout.mutex);
+    const std::string & path = layout.path;
+    const std::string data_tmp = path + ".tmp";
+    const std::string meta_path = path + ".meta";
+    const std::string meta_tmp = meta_path + ".tmp";
+    layout.file.close();
+    if (!layout.file.good()) {
+        std::remove(data_tmp.c_str());
+        return false;
+    }
+
+    // Only pointers still owned by a live Constant are pinned; the others could be reused by unrelated data, so a
+    // later lookup must not resolve them.
+    std::unordered_map<const void *, std::pair<size_t, size_t>> live;
     for (const auto & model : models) {
         if (!model) {
             continue;
         }
         for (const auto & node : model->get_ordered_ops()) {
             auto cnst = ov::as_type_ptr<ov::op::v0::Constant>(node);
-            if (!cnst || cnst->get_rt_info().count(ov::WeightlessCacheAttribute::get_type_info_static()) == 0 ||
-                cnst->get_data_ptr() == nullptr || cnst->get_byte_size() == 0) {
+            if (!cnst) {
                 continue;
             }
-            layout->constants.push_back(cnst);
-            auto [it, inserted] = region_of.emplace(cnst->get_data_ptr(), regions.size());
-            if (inserted) {
-                regions.push_back({ cnst->get_data_ptr(), cnst->get_byte_size(), 0 });
-            } else {
-                regions[it->second].size = std::max(regions[it->second].size, cnst->get_byte_size());
+            auto it = layout.regions.find(cnst->get_data_ptr());
+            if (it != layout.regions.end() && cnst->get_byte_size() <= it->second.second) {
+                live.insert(*it);
+                layout.constants.push_back(cnst);
             }
         }
     }
-
-    size_t total = 0;
-    for (auto & r : regions) {
-        r.offset = total;
-        total = (total + r.size + alignment - 1) / alignment * alignment;
-        layout->regions[r.data] = { r.offset, r.size };
-    }
-    for (const auto & cnst : layout->constants) {
-        cnst->get_rt_info()[ov::WeightlessCacheAttribute::get_type_info_static()] = ov::WeightlessCacheAttribute(
-            cnst->get_byte_size(), layout->regions.at(cnst->get_data_ptr()).first, cnst->get_element_type());
-    }
+    const size_t written = layout.regions.size();
+    layout.regions = std::move(live);
 
     // Publish the data file first and its size record last, so a valid record always describes a complete file.
-    const std::string data_tmp = path + ".tmp";
-    const std::string meta_path = path + ".meta";
-    const std::string meta_tmp = meta_path + ".tmp";
-    {
-        std::ofstream f(data_tmp, std::ios::binary | std::ios::trunc);
-        if (!f.is_open()) {
-            return nullptr;
-        }
-        static const char zeros[alignment] = {};
-        size_t pos = 0;
-        for (const auto & r : regions) {
-            f.write(zeros, static_cast<std::streamsize>(r.offset - pos));
-            f.write(static_cast<const char *>(r.data), static_cast<std::streamsize>(r.size));
-            pos = r.offset + r.size;
-        }
-        f.write(zeros, static_cast<std::streamsize>(total - pos));
-        f.close();
-        if (!f.good()) {
-            std::remove(data_tmp.c_str());
-            return nullptr;
-        }
-    }
     {
         std::ofstream f(meta_tmp, std::ios::trunc);
-        f << "size " << total << "\nregions " << regions.size() << "\n";
+        f << "size " << layout.size << "\nregions " << written << "\n";
         f.close();
         if (!f.good()) {
             std::remove(data_tmp.c_str());
             std::remove(meta_tmp.c_str());
-            return nullptr;
+            return false;
         }
     }
     // std::rename does not replace an existing file on Windows.
@@ -586,35 +600,11 @@ std::shared_ptr<ggml_openvino_weights_layout> ggml_openvino_model_cache_write_we
     if (std::rename(data_tmp.c_str(), path.c_str()) != 0 || std::rename(meta_tmp.c_str(), meta_path.c_str()) != 0) {
         std::remove(data_tmp.c_str());
         std::remove(meta_tmp.c_str());
-        return nullptr;
+        return false;
     }
-    GGML_LOG_INFO("ggml-openvino: model cache WROTE %s (%zu regions, %.1f MiB)\n", path.c_str(), regions.size(),
-                  total / 1024.0 / 1024.0);
-    return layout;
-}
-
-size_t ggml_openvino_model_cache_retag_weights(const std::shared_ptr<ov::Model> & model,
-                                               const ggml_openvino_weights_layout & layout) {
-    size_t resolved = 0;
-    for (const auto & node : model->get_ordered_ops()) {
-        auto cnst = ov::as_type_ptr<ov::op::v0::Constant>(node);
-        if (!cnst) {
-            continue;
-        }
-        auto & rt_info = cnst->get_rt_info();
-        auto attr = rt_info.find(ov::WeightlessCacheAttribute::get_type_info_static());
-        if (attr == rt_info.end()) {
-            continue;
-        }
-        auto it = layout.regions.find(cnst->get_data_ptr());
-        if (it != layout.regions.end() && cnst->get_byte_size() <= it->second.second) {
-            attr->second = ov::WeightlessCacheAttribute(cnst->get_byte_size(), it->second.first, cnst->get_element_type());
-            ++resolved;
-        } else {
-            rt_info.erase(attr);
-        }
-    }
-    return resolved;
+    GGML_LOG_INFO("ggml-openvino: model cache WROTE %s (%zu regions, %.1f MiB)\n", path.c_str(), written,
+                  layout.size / 1024.0 / 1024.0);
+    return true;
 }
 
 bool ggml_openvino_model_cache_weights_valid(const std::string & path) {

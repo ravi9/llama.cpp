@@ -178,6 +178,16 @@ void ggml_openvino_kv_storage_clear(const void * base, size_t size, uint8_t valu
 // Check if running on a GPU (GPU, GPU.0, GPU.1, ...)
 bool ggml_openvino_is_gpu();
 
+// Explicit QK/softmax/V attention for grouped-query models instead of the fused SDPA op. Defaults to on for GPU;
+// GGML_OPENVINO_MANUAL_GQA_ATTN=1/0 forces it on/off. Only stateless graphs use it.
+bool ggml_openvino_manual_gqa_attn_enabled();
+
+// Apply a constant scale (Granite's residual and attention multipliers) before the MatMul it follows instead of
+// after it, so an f16 plugin does not overflow on blocks whose unscaled result is out of range. The rewrite is exact
+// but only useful when the device executes in f16 and is overhead on f32, so it defaults to on for GPU and NPU;
+// GGML_OPENVINO_DISABLE_SCALE_REORDER=1 turns it off.
+bool ggml_openvino_scale_reorder_enabled();
+
 // Read n_seq_active and attention_size(_swa) from the KQ mask shape (off with GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK=1)
 bool ggml_openvino_shape_from_mask_enabled();
 
@@ -189,10 +199,6 @@ bool ggml_openvino_gdn_prescale_enabled();
 // f16 subnormal range). Defaults to 64.0f and is clamped to a minimum of
 // 64.0f. Only consulted when ggml_openvino_gdn_prescale_enabled() is true.
 float ggml_openvino_gdn_q_scale();
-
-// Keep the GDN state in the OV op layout [B, H_v, key_dim, value_dim], skipping two transposes per layer.
-// Only the OpenVINO backend may then read the state. NPU only, enabled when GGML_OPENVINO_GDN_NATIVE_STATE is a positive integer.
-bool ggml_openvino_gdn_native_state_enabled();
 
 // Largest single memory object the device can allocate, SIZE_MAX when there is no known limit
 size_t ggml_openvino_max_alloc_size();
