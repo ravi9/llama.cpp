@@ -1341,6 +1341,11 @@ static ggml_backend_buffer_t ggml_backend_openvino_device_buffer_from_host_ptr(g
 // OV slices whole elements per axis, so each stride must be a multiple of the next smaller one
 // (e.g. a batch stride of m*nb[1] + pad bytes cannot be expressed and would be read wrongly).
 static bool has_strides_on_element_grid(const ggml_tensor * t) {
+    // nothing is read from an empty tensor (gemma-4's KV-shared layers in a batch without output rows), and its strides
+    // past the empty dim are 0
+    if (ggml_nelements(t) == 0) {
+        return true;
+    }
     std::vector<size_t> strides;
     for (int i = 0; i < GGML_MAX_DIMS; i++) {
         if (t->ne[i] > 1) {
@@ -1366,7 +1371,7 @@ static ggml_openvino_op_support get_op_support_status(const ggml_tensor * op) {
     static const std::unordered_set<std::string> supported = {
         // clang-format off
         "GGML_OP_NONE",
-        "GGML_OP_ADD", "GGML_OP_ADD1", "GGML_OP_ADD_ID", "GGML_OP_ARGSORT", "GGML_OP_CLAMP", "GGML_OP_CONCAT",
+        "GGML_OP_ADD", "GGML_OP_ADD1", "GGML_OP_ADD_ID", "GGML_OP_ARANGE", "GGML_OP_ARGSORT", "GGML_OP_CLAMP", "GGML_OP_CONCAT",
         "GGML_OP_CONT", "GGML_OP_CONV_2D", "GGML_OP_CONV_2D_DW", "GGML_OP_CONV_3D", "GGML_OP_CONV_TRANSPOSE_1D",
         "GGML_OP_CONV_TRANSPOSE_2D", "GGML_OP_COS", "GGML_OP_CPY", "GGML_OP_CUMSUM", "GGML_OP_DIAG",
         "GGML_OP_DIV", "GGML_OP_DUP", "GGML_OP_FILL", "GGML_OP_FLASH_ATTN_EXT", "GGML_OP_GATED_DELTA_NET", "GGML_OP_GET_REL_POS",
@@ -1394,6 +1399,12 @@ static ggml_openvino_op_support get_op_support_status(const ggml_tensor * op) {
     case GGML_OP_TOP_K:
         if (ggml_openvino_is_npu()) {
             return {false, "TOP_K is not supported on NPU"};
+        }
+        break;
+    case GGML_OP_SET_ROWS:
+        if (GgmlOvDecoder::is_conv_state_snapshot_writeback(op) &&
+            (ggml_openvino_is_npu() || ggml_openvino_getenv_int("GGML_OPENVINO_FORCE_STATIC"))) {
+            return {false, "convolution snapshots require dynamic execution"};
         }
         break;
     case GGML_OP_CPY:
@@ -1464,7 +1475,8 @@ static ggml_openvino_op_support ggml_backend_openvino_device_supports_op_impl(gg
         if (supported_types.find(src->type) == supported_types.end()) {
             return {false, "src[" + std::to_string(i) + "] type " + std::string(ggml_type_name(src->type)) + " is not supported"};
         }
-        if (!has_strides_on_element_grid(src) && !(i == 1 && GgmlOvDecoder::is_gdn_snapshot_writeback(op))) {
+        if (!has_strides_on_element_grid(src) && !(i == 1 && GgmlOvDecoder::is_gdn_snapshot_writeback(op)) &&
+            !(i == 2 && GgmlOvDecoder::is_conv_state_snapshot_writeback(op))) {
             return {false, "src[" + std::to_string(i) + "] strides are not multiples of each other"};
         }
         const bool is_supported_3d_moe_expert =
