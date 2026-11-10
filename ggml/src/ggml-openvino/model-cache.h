@@ -15,7 +15,11 @@
 #include "ggml.h"
 
 #include <cstdint>
+#include <fstream>
+#include <functional>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -86,21 +90,35 @@ struct ggml_openvino_weights_layout {
     std::unordered_map<const void *, std::pair<size_t, size_t>> regions;
     // Keeps the laid-out Constants alive so no other Constant can reuse one of their data pointers.
     std::vector<std::shared_ptr<ov::op::v0::Constant>> constants;
+    // Open while the file is being written.
+    std::ofstream file;
+    size_t size = 0;
+    std::mutex mutex;
 };
+
+// The GGUF frontend's weights-file resolver (data, byte size) -> file offset, std::nullopt leaving the Constant
+// embedded in the blob.
+using ggml_openvino_weights_resolver = std::function<std::optional<size_t>(const void *, size_t)>;
 
 // <dir>/<a>-<b>.weights.bin (NPUW's weightless import needs the .bin extension).
 std::string ggml_openvino_model_cache_weights_path(const std::string & dir, uint64_t fp_a, uint64_t fp_b);
 
-// Lay out all weightless-tagged Constants of |models| in one file, retag their WeightlessCacheAttribute with the
-// real offsets and write the file. Call before compiling. Returns nullptr on I/O error.
-std::shared_ptr<ggml_openvino_weights_layout> ggml_openvino_model_cache_write_weights(
-    const std::string & path,
-    const std::vector<std::shared_ptr<ov::Model>> & models);
+// Start writing a weights file. Returns nullptr on I/O error.
+std::shared_ptr<ggml_openvino_weights_layout> ggml_openvino_model_cache_begin_weights(const std::string & path);
 
-// Point the tagged Constants of |model| that live in |layout| at their regions and untag the rest, which NPUW
-// then embeds in the blob. Returns the number of Constants resolved through the file.
-size_t ggml_openvino_model_cache_retag_weights(const std::shared_ptr<ov::Model> & model,
-                                               const ggml_openvino_weights_layout & layout);
+// A resolver that appends each new weight to the file being written by |layout| (the data is only guaranteed alive
+// during conversion, so it is copied right away).
+ggml_openvino_weights_resolver ggml_openvino_model_cache_weights_writer(
+    const std::shared_ptr<ggml_openvino_weights_layout> & layout);
+
+// A resolver that only places weights already in the finished |layout|.
+ggml_openvino_weights_resolver ggml_openvino_model_cache_weights_reader(
+    const std::shared_ptr<ggml_openvino_weights_layout> & layout);
+
+// Publish the file written for |models|: keep and pin the regions their Constants still use. Call before
+// compiling. Returns false on I/O error.
+bool ggml_openvino_model_cache_finish_weights(ggml_openvino_weights_layout & layout,
+                                              const std::vector<std::shared_ptr<ov::Model>> & models);
 
 // True if the weights file is complete (its size matches the record written after it).
 bool ggml_openvino_model_cache_weights_valid(const std::string & path);

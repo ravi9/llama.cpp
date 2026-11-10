@@ -11,10 +11,10 @@
 #include "keep-sum-square-fp32.h"
 #include "kv-state-seq-axis.h"
 #include "model-cache.h"
+#include "push-scale-before-matmul.h"
 #include <openvino/frontend/extension/decoder_transformation.hpp>
 #include <openvino/frontend/gguf/frontend.hpp>
 #include <openvino/frontend/gguf/make_stateful.hpp>
-#include <openvino/frontend/gguf/push_scale_before_matmul.hpp>
 
 #include <algorithm>
 #include <cassert>
@@ -251,7 +251,7 @@ static std::shared_ptr<ov::Model> convert_to_ov_model(const std::shared_ptr<Ggml
         frontend.add_extension(std::make_shared<ov::frontend::DecoderTransformationExtension>(
             [](std::shared_ptr<ov::Model> model) {
                 ov::pass::Manager manager;
-                manager.register_pass<ov::frontend::gguf::pass::PushScaleBeforeMatMul>();
+                manager.register_pass<ggml_openvino::PushScaleBeforeMatMul>();
                 return manager.run_passes(model);
             }));
     }
@@ -2375,21 +2375,28 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, const std::shared
             // wrong output on some NPU models (Bonsai-8B). Compiling both in parallel raises the host memory peak,
             // so it is opt-in.
             const bool parallel_compile = !self_contained && !no_kv_cache && ggml_openvino_npu_parallel_compile_enabled();
+            std::shared_ptr<ggml_openvino_weights_layout> weights_layout;
+            if (weightless_bank && !skip_weights) {
+                // Lay both models' weights out in one file while converting, so both blobs reference the same file.
+                weights_layout = ggml_openvino_model_cache_begin_weights(weights_path);
+                if (!weights_layout) {
+                    throw std::runtime_error("ggml-openvino: failed to write NPU weights file " + weights_path);
+                }
+                ggml_decoder_prefill->set_weights_file_resolver(ggml_openvino_model_cache_weights_writer(weights_layout));
+                ggml_decoder_decode->set_weights_file_resolver(ggml_openvino_model_cache_weights_writer(weights_layout));
+            }
             auto model_prefill = convert_static_model(ggml_decoder_prefill, "prefill", prefill_conversion_end_time);
             std::shared_ptr<ov::Model> model_decode;
             if (!no_kv_cache) {
                 model_decode = convert_static_model(ggml_decoder_decode, "decode", decode_conversion_end_time);
             }
-            std::shared_ptr<ggml_openvino_weights_layout> weights_layout;
-            if (weightless_bank && !skip_weights) {
-                // Lay both models' weights out in one file before compiling, so both blobs reference the same file.
+            if (weights_layout) {
                 // Old blobs reference the old layout, so drop them first in case the export does not complete.
                 for (const uint64_t fp : { prefill_fp, decode_fp }) {
                     std::remove(ggml_openvino_model_cache_blob_path(model_cache_dir, fp).c_str());
                     std::remove(ggml_openvino_model_cache_manifest_path(model_cache_dir, fp).c_str());
                 }
-                weights_layout = ggml_openvino_model_cache_write_weights(weights_path, { model_prefill, model_decode });
-                if (!weights_layout) {
+                if (!ggml_openvino_model_cache_finish_weights(*weights_layout, { model_prefill, model_decode })) {
                     throw std::runtime_error("ggml-openvino: failed to write NPU weights file " + weights_path);
                 }
             }
@@ -2534,17 +2541,28 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, const std::shared
         std::vector<std::string> names_in, names_out;
         int64_t t_conv = 0, t_compile = 0;
         const int64_t t0 = ggml_time_us();
+        std::shared_ptr<ggml_openvino_weights_layout> own_layout;
+        if (graph.weightless_bank && !skip_weights) {
+            if (graph.weights_layout) {
+                window_decoder->set_weights_file_resolver(ggml_openvino_model_cache_weights_reader(graph.weights_layout));
+            } else {
+                own_layout = ggml_openvino_model_cache_begin_weights(own_weights_path);
+                if (!own_layout) {
+                    throw std::runtime_error("ggml-openvino: failed to write NPU weights file " + own_weights_path);
+                }
+                window_decoder->set_weights_file_resolver(ggml_openvino_model_cache_weights_writer(own_layout));
+            }
+        }
         auto model = convert_static_model(args, window_decoder, "decode", t_conv);
         if (graph.weightless_bank) {
             args.weights_path = own_weights_valid ? own_weights_path : graph.weights_path;
             if (model && graph.weights_layout) {
-                const size_t resolved = ggml_openvino_model_cache_retag_weights(model, *graph.weights_layout);
-                GGML_LOG_INFO("ggml-openvino: decode KV window %d resolves %zu weights through %s\n", window,
-                              resolved, graph.weights_path.c_str());
+                GGML_LOG_INFO("ggml-openvino: decode KV window %d resolves weights through %s\n", window,
+                              graph.weights_path.c_str());
                 ggml_openvino_model_cache_remove_weights(own_weights_path);
                 args.weights_path = graph.weights_path;
-            } else if (model) {
-                if (!ggml_openvino_model_cache_write_weights(own_weights_path, { model })) {
+            } else if (model && own_layout) {
+                if (!ggml_openvino_model_cache_finish_weights(*own_layout, { model })) {
                     throw std::runtime_error("ggml-openvino: failed to write NPU weights file " + own_weights_path);
                 }
                 args.weights_path = own_weights_path;

@@ -257,6 +257,10 @@ public:
         return {m_model_output_names.begin(), m_model_output_names.end()};
     }
 
+    WeightsFileResolver get_weights_file_resolver() const override { return m_weights_file_resolver; }
+
+    void set_weights_file_resolver(WeightsFileResolver resolver) { m_weights_file_resolver = std::move(resolver); }
+
     const std::map<std::string, ggml_tensor *> & get_model_outputs() const { return m_model_outputs; }
 
     virtual int get_ctx_size() const { return m_model_params.ctx; }
@@ -667,6 +671,7 @@ private:
     std::map<std::string, BackendInputInfo> m_model_inputs;
     std::map<std::string, std::shared_ptr<ov::Node>> m_model_input_nodes;
     std::map<std::string, std::shared_ptr<ov::Node>> m_model_weights;
+    WeightsFileResolver m_weights_file_resolver;
     std::map<std::string, ggml_tensor *> m_model_outputs;
     std::set<std::string> m_model_output_names;
     std::vector<NodeInfo> m_node_info_list;
