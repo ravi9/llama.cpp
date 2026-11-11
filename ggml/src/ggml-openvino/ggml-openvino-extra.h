@@ -144,6 +144,10 @@ bool ggml_openvino_npu_parallel_compile_enabled();
 // Returns the window base (1024), 0 = off (GGML_OPENVINO_NPU_BLOB_PREBUILD=0).
 int ggml_openvino_npu_decode_bucket();
 
+// Rows a static prefill attends with GGML_OPENVINO_KV_SLICE: the attended length rounded up to a power of two,
+// clamped to ctx.
+int ggml_openvino_static_kv_window(int rows, int ctx);
+
 // On-demand NPU KV cache (GGML_OPENVINO_NPU_KV_ON_DEMAND): the ggml KV buffer stays non-resident and the
 // NPU binds per-tensor L0 storage that grows (base*2^k rows, base = decode bucket or 1024) with the rows in use.
 bool ggml_openvino_npu_kv_on_demand_enabled();
@@ -183,8 +187,8 @@ bool ggml_openvino_is_gpu();
 // Read n_seq_active and attention_size(_swa) from the KQ mask shape (off with GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK=1)
 bool ggml_openvino_shape_from_mask_enabled();
 
-// GDN q pre-scale for eligible graphs on the NPU static path. Enabled when
-// GGML_OPENVINO_GDN_Q_SCALE is a positive integer.
+// GDN q pre-scale for eligible graphs on the NPU static path. On by default;
+// GGML_OPENVINO_GDN_Q_SCALE=0 (or a negative or non-numeric value) turns it off.
 bool ggml_openvino_gdn_prescale_enabled();
 
 // GDN q pre-scale factor (NPU static path, keeps the tiny GDN output above the

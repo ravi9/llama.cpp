@@ -726,8 +726,9 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
             if (is_same_shape(node->src[0]->src[0], node->src[0])) {
                 op_case = 1;
             } else if (is_direct_gdn_view(node->src[0])) {
-                // GDN attention is routed directly to this VIEW by get_output_names().
-                op_case = 3;
+                // GDN attention is routed directly to this VIEW by get_output_names(). 3: the GDN q input may be
+                // pre-scaled, and the norm then scales its eps to match; 4: it is not.
+                op_case = is_gdn_out_prescaled(node->src[0]->src[0]) ? 3 : 4;
             } else if (node->src[0]->src[0]->op == GGML_OP_GATED_DELTA_NET) {
                 op_case = is_gdn_out_prescaled(node->src[0]->src[0]) ? 3 : 2;
             }
@@ -1390,6 +1391,14 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
     // for NPU, output_len is always 1 except for llama-perplexity
     if (is_static && compute_params.output_len == 0) {
         compute_params.output_len = 1;
+    }
+    // A sliced static prefill attends a power-of-two number of KV rows: every attended size needs its own compiled
+    // prefill model, so a growing sequence compiles one when the attended length doubles, not for each ubatch.
+    // Rounding up adds masked rows, which cost prefill time, so it stops at the next power of two.
+    if (is_static && ggml_openvino_kv_slice_enabled() && compute_params.input_len > 1 &&
+        !model_params.is_cacheless_attn && compute_params.attention_size > 0 && model_params.ctx_per_seq > 0) {
+        compute_params.attention_size =
+            ggml_openvino_static_kv_window(compute_params.attention_size, model_params.ctx_per_seq);
     }
     model_params.ctx = model_params.ctx_per_seq * model_params.n_seq;
     return {model_params, compute_params};
