@@ -83,6 +83,13 @@ RecurrentCacheFusion::RecurrentCacheFusion(const std::shared_ptr<GgmlDecoder> & 
                         write->src[0]->src[0] == node && write->src[0]->ne[0] == node->src[0]->ne[0] &&
                         write->src[0]->ne[1] == node->src[0]->ne[1]) {
                         group.snapshots.push_back(k);
+                    } else if (GgmlOvDecoder::is_conv_snapshot_set_rows(write) && write->view_src == root &&
+                               write->src[0]->src[0] == node && write->src[0]->ne[0] == node->src[0]->ne[0] &&
+                               write->src[0]->ne[2] == node->src[0]->ne[1] &&
+                               write->src[2]->ne[0] * write->src[2]->ne[2] == root->ne[0]) {
+                        // all rollback windows in one SET_ROWS (build_conv_state_store)
+                        group.snapshots.push_back(k);
+                        group.snapshot_set_rows = true;
                     }
                 }
                 break;
@@ -146,6 +153,10 @@ RecurrentCacheFusion::RecurrentCacheFusion(const std::shared_ptr<GgmlDecoder> & 
             const auto & name = decoder->get_op_name(snapshot);
             complete &= tensors->count("rs_slot_begin_" + name) && tensors->count("rs_src_begin_" + name);
         }
+        if (group.snapshot_set_rows) {
+            // the window list of a SET_ROWS snapshot changes with Kw, only rs_windows_ carries it
+            complete &= tensors->count("rs_windows_" + decoder->get_op_name(group.concat)) != 0;
+        }
         for (int j = 0; j < graph->n_nodes && complete; ++j) {
             const auto node = graph->nodes[j];
             // Other cache readers or writers require functional translation.
@@ -156,12 +167,14 @@ RecurrentCacheFusion::RecurrentCacheFusion(const std::shared_ptr<GgmlDecoder> & 
                 }
                 const bool alias = node->op == GGML_OP_VIEW || node->op == GGML_OP_RESHAPE;
                 const bool matched_read = j == group.gather || j == group.reset;
-                const bool destination = node->op == GGML_OP_CPY && source == 1;
+                const bool destination =
+                    (node->op == GGML_OP_CPY && source == 1) || (node->op == GGML_OP_SET_ROWS && source == 2);
                 if (!alias && !matched_read && !destination) {
                     complete = false;
                 }
             }
-            if (node->view_src == root && (node->op == GGML_OP_SCALE || node->op == GGML_OP_CPY) &&
+            if (node->view_src == root &&
+                (node->op == GGML_OP_SCALE || node->op == GGML_OP_CPY || node->op == GGML_OP_SET_ROWS) &&
                 j != group.reset && j != group.remainder && j != group.writeback &&
                 std::find(group.snapshots.begin(), group.snapshots.end(), j) == group.snapshots.end()) {
                 complete = false;

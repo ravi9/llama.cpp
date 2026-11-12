@@ -73,7 +73,13 @@ std::shared_ptr<ov::op::v0::Parameter> create_parameter(const std::string & name
 
 std::shared_ptr<ov::Node> create_extra_input(const std::string & name, const ModelExtraInputInfo & input_info) {
     if (input_info.is_parameter) {
-        auto param_node = std::make_shared<ov::op::v0::Parameter>(input_info.type, input_info.shape);
+        ov::PartialShape param_shape = input_info.shape;
+        if (name.compare(0, 11, "rs_windows_") == 0 && param_shape.rank().get_length() == 4) {
+            // one {src_begin, slot_begin} pair per conv snapshot: a rollback SET_ROWS writes Kw = min(n, K)
+            // of them, so the same graph serves every Kw
+            param_shape[2] = ov::Dimension::dynamic();
+        }
+        auto param_node = std::make_shared<ov::op::v0::Parameter>(input_info.type, param_shape);
         param_node->set_friendly_name(name);
         param_node->output(0).get_tensor().set_names({name});
         return param_node;

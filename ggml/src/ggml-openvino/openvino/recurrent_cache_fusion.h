@@ -16,6 +16,7 @@ private:
         std::vector<int> snapshots;
         std::string root_name;
         bool enabled = false;
+        bool snapshot_set_rows = false;  // snapshots are one conv rollback SET_ROWS, not a CPY per slot
         Output<Node> old_cache, conv;
     };
 

@@ -245,6 +245,10 @@ std::map<std::string, std::shared_ptr<ov::Node>> get_weight_names(ggml_cgraph * 
 // miss. Include topology, layouts, op parameters, constant extra inputs and weight
 // allocation identities. Never use a sampled weight hash or a graph name alone:
 // different models can have identical topology. OV buffer IDs survive address reuse.
+static bool is_rs_windows_input(const std::string & name) {
+    return name.compare(0, 11, "rs_windows_") == 0;
+}
+
 static std::string compiled_graph_key(const ggml_cgraph * graph,
                                       const GgmlOvDecoder & decoder,
                                       const std::string & device,
@@ -309,8 +313,9 @@ static std::string compiled_graph_key(const ggml_cgraph * graph,
         append_string(input.first);
         append_string(input.second.type.get_type_name());
         append(input.second.shape.size());
-        for (auto dim : input.second.shape) {
-            append(dim);
+        for (size_t i = 0; i < input.second.shape.size(); ++i) {
+            // the rs_windows_ Parameter is dynamic on axis 2 (Kw, see create_extra_input)
+            append(is_rs_windows_input(input.first) && i == 2 ? size_t(0) : input.second.shape[i]);
         }
         append(input.second.is_parameter);
         if (!input.second.is_parameter) {
@@ -366,8 +371,8 @@ static std::string dynamic_graph_signature(const ggml_cgraph * graph,
         append_string(name);
         append_string(input.type.get_type_name());
         append(input.shape.size());
-        for (auto dim : input.shape) {
-            append(dim);
+        for (size_t i = 0; i < input.shape.size(); ++i) {
+            append(is_rs_windows_input(name) && i == 2 ? size_t(0) : input.shape[i]);
         }
         append(input.is_parameter);
         if (!input.is_parameter) {

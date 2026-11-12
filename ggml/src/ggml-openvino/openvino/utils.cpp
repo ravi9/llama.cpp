@@ -645,7 +645,17 @@ ov::Output<ov::Node> process_view_input_new(const NodeContext & context, int inp
                         exact_chunk = i == static_cast<size_t>(split_dim) || view_ggml_shape[i] == 1 ||
                                       view_stride_v[i] == view_src_stride_v[i];
                     }
-                    if (split_index >= 0 && split_index < num_splits && dynamic_split && exact_chunk) {
+                    // num_splits is the captured source size: on a dynamic axis (e.g. the token axis of DSpark's
+                    // result_norm, read one block position at a time) the graph is reused with other sizes, and
+                    // each Split output would then hold several rows or the wrong one
+                    const auto input_shape = input.get_partial_shape();
+                    const int64_t split_axis = input_shape.rank().is_static() ?
+                                                   split_dim - (int64_t) ndims + input_shape.rank().get_length() :
+                                                   -1;
+                    const bool split_axis_static = split_axis >= 0 && input_shape[split_axis].is_static() &&
+                                                   input_shape[split_axis].get_length() == num_splits;
+                    if (split_index >= 0 && split_index < num_splits && dynamic_split && exact_chunk &&
+                        split_axis_static) {
                         // the Split keeps its input alive, so only keep a weak reference to it on the input
                         auto src_node = input.get_node_shared_ptr();
                         std::string rt_key =

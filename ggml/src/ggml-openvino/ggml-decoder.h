@@ -604,8 +604,44 @@ public:
                node->src[1]->op == GGML_OP_VIEW && node->src[1]->view_src == node->view_src;
     }
 
+    // build_conv_state_store with rollback slots: SET_ROWS(slots, windows, slot_order). windows is an
+    // overlapping [n_cols, Kw, channels, n_seqs] view of the conv input (windows start 1 column apart), slots
+    // a [n_cols, K, channels, n_seqs] view of the recurrent cache whose slot axis steps over the whole cache
+    inline static bool is_conv_snapshot_set_rows(const ggml_tensor * node) {
+        if (node == nullptr || node->op != GGML_OP_SET_ROWS || node->view_src == nullptr ||
+            !is_recurrent_cache(node->view_src) || node->src[0] == nullptr || node->src[1] == nullptr ||
+            node->src[2] == nullptr) {
+            return false;
+        }
+        const ggml_tensor * windows = node->src[0];
+        const ggml_tensor * slots = node->src[2];
+        if (windows->op != GGML_OP_VIEW || windows->src[0] == nullptr || windows->src[0]->op != GGML_OP_CONCAT ||
+            slots->op != GGML_OP_VIEW || slots->view_src != node->view_src) {
+            return false;
+        }
+        const size_t elem_size = ggml_element_size(windows);
+        return elem_size > 0 && windows->nb[0] == elem_size && windows->nb[1] == elem_size &&
+               slots->ne[0] == windows->ne[0] && slots->ne[2] == windows->ne[2] && slots->ne[3] == windows->ne[3] &&
+               slots->nb[2] == ggml_row_size(slots->type, slots->ne[0]);
+    }
+
+    // SET_ROWS into a column range of each row of a plain 2-D buffer, e.g. build_layer_inp_dev(): every enabled layer
+    // input goes to view_2d(layer_inp_dev, n_embd, n_batch, nb1, col * n_embd * elem) at the batch rows of the ubatch
+    inline static bool is_column_set_rows(const ggml_tensor * node) {
+        if (node == nullptr || node->op != GGML_OP_SET_ROWS || node->src[2] == nullptr ||
+            node->src[2]->op != GGML_OP_VIEW) {
+            return false;
+        }
+        const ggml_tensor * dst = node->src[2];
+        const ggml_tensor * buf = dst->view_src;
+        return buf != nullptr && buf->op == GGML_OP_NONE && !is_recurrent_cache(buf) && buf->ne[2] == 1 &&
+               buf->ne[3] == 1 && dst->ne[2] == 1 && dst->ne[3] == 1 && dst->ne[0] < buf->ne[0] &&
+               dst->nb[0] == buf->nb[0] && dst->nb[1] == buf->nb[1] && dst->ne[1] == buf->ne[1];
+    }
+
+    // slot_order of a conv snapshot SET_ROWS is computed in the graph, it is not a KV index input
     static bool is_kv_idx(const ggml_tensor * tensor, const ggml_tensor * op) {
-        return op->op == GGML_OP_SET_ROWS && op->src[1] == tensor;
+        return op->op == GGML_OP_SET_ROWS && op->src[1] == tensor && !is_conv_snapshot_set_rows(op);
     }
 
     bool is_swa_mask(const ggml_tensor * tensor) const {

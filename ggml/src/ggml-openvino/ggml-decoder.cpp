@@ -509,6 +509,11 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         if (node->src[2] != nullptr && node->src[2]->op == GGML_OP_RESHAPE && node->src[2]->ne[0] == 1 &&
             is_kvcache(node->src[2]->src[0], nullptr)) {
             op_case = 1;
+        } else if (is_conv_snapshot_set_rows(node)) {
+            // conv state rollback snapshots of build_conv_state_store, one window per slot
+            op_case = 2;
+        } else if (is_column_set_rows(node)) {
+            op_case = 3;
         }
         break;
     }
@@ -1181,6 +1186,24 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
             writeback.snapshot_stride = destination->nb[2] / destination->nb[1];
             compute_params.rs_writebacks[get_tensor_ov_name(cgraph, node)] = writeback;
         }
+        if (is_conv_snapshot_set_rows(node)) {
+            // One SET_ROWS writes the Kw = min(n, K) newest conv windows of every sequence: slot p of
+            // sequence q is cache row p * mem_size + kv_head + q. The windows are found from the conv
+            // input shape, so the node and its runtime inputs stay the same for every Kw.
+            const ggml_tensor * windows = node->src[0];
+            const ggml_tensor * slots = node->src[2];
+            const size_t row_bytes = node->view_src->nb[1];
+            model_params.has_rs_rollback = true;
+            if (row_bytes > 0) {
+                ComputeParams::RsWriteback writeback;
+                writeback.slot_begin = (int64_t) (slots->view_offs / row_bytes);
+                writeback.src_begin = (int64_t) (windows->view_offs / windows->src[0]->nb[0]);
+                writeback.seq_count = slots->ne[3];
+                writeback.snapshot_stride = (int64_t) (slots->nb[1] / row_bytes);
+                compute_params.rs_writebacks[get_tensor_ov_name(cgraph, node)] = writeback;
+            }
+            compute_params.s_copy_active_slot_len = (int) slots->ne[3];
+        }
         if (node->op == GGML_OP_SCALE && node->view_src != nullptr && is_recurrent_cache(node->view_src)) {
             if (model_params.n_rs_slots == -1) {
                 model_params.n_rs_slots = node->view_src->ne[1];
@@ -1624,6 +1647,19 @@ void GgmlOvDecoder::add_extra_inputs() {
                     }
                     values.push_back(it->second.src_begin);
                     values.push_back(it->second.slot_begin);
+                } else if (is_conv_snapshot_set_rows(write) && write->src[0]->src[0] == concat) {
+                    const auto it = m_compute_params.rs_writebacks.find(get_tensor_ov_name(m_cgraph, write));
+                    if (it == m_compute_params.rs_writebacks.end()) {
+                        values.clear();
+                        break;
+                    }
+                    // window w < Kw starts at column src_begin + w and is rollback slot Kw - 1 - w.
+                    // One {src_begin, slot_begin} pair per slot, newest first like the old CPY per slot.
+                    const int64_t kw = write->src[0]->ne[1];
+                    for (int64_t slot = 0; slot < kw; ++slot) {
+                        values.push_back(it->second.src_begin + kw - 1 - slot);
+                        values.push_back(it->second.slot_begin + slot * it->second.snapshot_stride);
+                    }
                 }
             }
             if (!values.empty()) {
@@ -1771,7 +1807,11 @@ void GgmlOvDecoder::compute_model_outputs() {
             continue;
         }
         const bool inactive_top_k = is_sampling_top_k(cur_node) && !(cur_node->flags & GGML_TENSOR_FLAG_COMPUTE);
-        if ((cur_node->flags & GGML_TENSOR_FLAG_OUTPUT) || inactive_top_k) {
+        auto cur_node_use_count = m_cgraph->use_counts[ggml_hash_find(&m_cgraph->visited_hash_set, cur_node)];
+        // llama flags result_norm in every graph but reads it only with embeddings on, when it has no consumer
+        // and is kept by the rule below.
+        const bool unread_embd = strcmp(cur_node->name, "result_norm") == 0 && cur_node_use_count > 0;
+        if (((cur_node->flags & GGML_TENSOR_FLAG_OUTPUT) && !unread_embd) || inactive_top_k) {
             const auto name = get_tensor_ov_name(m_cgraph, cur_node);
             m_model_outputs[name] = cur_node;
             m_model_output_names.insert(name);
@@ -1782,7 +1822,6 @@ void GgmlOvDecoder::compute_model_outputs() {
             m_model_outputs[name] = cache;
             m_model_output_names.insert(name);
         }
-        auto cur_node_use_count = m_cgraph->use_counts[ggml_hash_find(&m_cgraph->visited_hash_set, cur_node)];
         if (cur_node_use_count == 0) {
             // The output of in-place ops is the view_src tensor, which is updated in place. We should use the view_src name as the output name to make sure it can be correctly matched with the later ops that use the view_src.
             if (cur_node != nullptr && ::is_inplace_op(cur_node) &&
@@ -1799,11 +1838,7 @@ void GgmlOvDecoder::compute_model_outputs() {
                     }
                 }
             }
-            // Keep tensors flagged as graph outputs (e.g. layer inputs read by a DFlash/DSpark drafter).
-            // Not result_norm: llama flags it in every graph but reads it only with embeddings on.
-            const bool keep_output =
-                (cur_node->flags & GGML_TENSOR_FLAG_OUTPUT) && strcmp(cur_node->name, "result_norm") != 0;
-            if (input_use_count == cur_node_use_count && !keep_output) {
+            if (input_use_count == cur_node_use_count) {
                 cur_node = nullptr;
             }
         }
@@ -2936,6 +2971,7 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
         case GGML_OP_SET_ROWS:
         case GGML_OP_SUM:
         case GGML_OP_MEAN:
+        case GGML_OP_ARANGE:
             m_node_dynamic_dims[node] = -1;
             break;
         case GGML_OP_IM2COL: {

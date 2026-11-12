@@ -1591,7 +1591,8 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
     }
     case GGML_OP_GET_ROWS:
     case GGML_OP_SET_ROWS: {
-        if (op->ne[3] != 1) {
+        // a conv rollback SET_ROWS has one sequence per ne[3]
+        if (op->ne[3] != 1 && !GgmlOvDecoder::is_conv_snapshot_set_rows(op)) {
             return {false, "GET_ROWS/SET_ROWS with ne[3] != 1 (ne[3]=" + std::to_string(op->ne[3]) + ") is not supported"};
         }
         if (op->op == GGML_OP_GET_ROWS && ggml_openvino_is_gpu() &&
