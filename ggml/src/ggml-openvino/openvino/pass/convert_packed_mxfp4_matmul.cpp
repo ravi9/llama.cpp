@@ -46,7 +46,6 @@ ConvertPackedMxfp4MatMul::ConvertPackedMxfp4MatMul() {
     const auto callback = [this](Matcher & matcher) {
         const auto matmul = ov::as_type_ptr<v0::MatMul>(matcher.get_match_root());
         if (!matmul || transformation_callback(matmul)) {
-            std::cout << "false 1 " << std::endl;
             return false;
         }
 
@@ -58,7 +57,6 @@ ConvertPackedMxfp4MatMul::ConvertPackedMxfp4MatMul() {
         if (!expanded_activations || !expanded_weights || !weight_scale_product ||
             matmul->get_input_partial_shape(0).rank() != 4 || matmul->get_input_partial_shape(1).rank() != 4 ||
             expanded_activations->input_value(0).get_partial_shape().rank() != 3) {
-            std::cout << "false 2 " << std::endl;
             return false;
         }
 
@@ -70,7 +68,6 @@ ConvertPackedMxfp4MatMul::ConvertPackedMxfp4MatMul() {
             quant_gather->input_value(1) != scale_gather->input_value(1) ||
             quant_gather->input_value(1).get_element_type() != ov::element::i32 ||
             quant_gather->input_value(1).get_partial_shape().rank() != 2) {
-            std::cout << "false 3 " << std::endl;
             return false;
         }
 
@@ -78,14 +75,12 @@ ConvertPackedMxfp4MatMul::ConvertPackedMxfp4MatMul() {
         auto scale_plane = ov::as_type_ptr<v0::Constant>(scale_gather->input_value(0).get_node_shared_ptr());
         if (!weight_plane || !scale_plane || weight_plane->get_element_type() != ov::element::f4e2m1 ||
             scale_plane->get_element_type() != ov::element::f32) {
-            std::cout << "false 4 " << std::endl;
             return false;
         }
         const auto & weight_shape = weight_plane->get_shape();
         const auto & scale_shape = scale_plane->get_shape();
         if (weight_shape.size() != 4 || weight_shape[3] != 32 ||
             scale_shape != ov::Shape{weight_shape[0], weight_shape[1], weight_shape[2], 1}) {
-            std::cout << "false 5 " << std::endl;
             return false;
         }
 
@@ -126,7 +121,6 @@ ConvertPackedMxfp4MatMul::ConvertPackedMxfp4MatMul() {
                                restored_rank_axis,
                                restored_rank});
         const bool replaced = ov::replace_output_update_name(matmul->output(0), restored_rank->output(0));
-        std::cout << " Replaced: " << replaced << std::endl;
         return replaced;
     };
 
