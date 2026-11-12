@@ -75,17 +75,25 @@ void pack_32_mxfp4_for_openvino(const uint8_t * data, uint8_t * dst) {
 void extract_mxfp4_data(const ggml_tensor * tensor, ov::Tensor & weights_arr, ov::Tensor & scales_arr) {
     GGML_ASSERT(tensor->type == GGML_TYPE_MXFP4);
     GGML_ASSERT(weights_arr.get_element_type() == ov::element::f4e2m1);
-    GGML_ASSERT(scales_arr.get_element_type() == ov::element::f8e8m0);
+    GGML_ASSERT(scales_arr.get_element_type() == ov::element::f8e8m0 ||
+                scales_arr.get_element_type() == ov::element::f32);
 
     const auto * data = static_cast<const uint8_t *>(tensor->data);
     auto * weights = static_cast<uint8_t *>(weights_arr.data());
-    auto * scales = scales_arr.data<ov::element_type_traits<ov::element::f8e8m0>::value_type>();
     const size_t n_blocks = scales_arr.get_size();
+    const bool f32_scales = scales_arr.get_element_type() == ov::element::f32;
+    auto * scales_f32 = f32_scales ? scales_arr.data<float>() : nullptr;
+    auto * scales_e8m0 = f32_scales ? nullptr : scales_arr.data<ov::float8_e8m0>();
 
     ov::parallel_for(n_blocks, [&](size_t i) {
         const uint8_t * block = data + i * MXFP4_BLOCK_BYTES;
         pack_32_mxfp4_for_openvino(block + sizeof(uint8_t), weights + i * MXFP4_BLOCK_QS_SIZE);
-        scales[i] = ov::float8_e8m0::from_bits(block[0]);
+        const auto scale = ov::float8_e8m0::from_bits(block[0]);
+        if (f32_scales) {
+            scales_f32[i] = static_cast<float>(scale);
+        } else {
+            scales_e8m0[i] = scale;
+        }
     });
 }
 
@@ -780,22 +788,26 @@ ov::Output<ov::Node> make_mxfp4_weights(ov::Tensor & weight, ov::Tensor & scales
     weights_node->get_rt_info()["__gguf_tensor_holder"] = weight;
     auto weights_f32 = std::make_shared<ov::op::v0::Convert>(weights_node, ov::element::f32);
 
-    auto scales_node = std::make_shared<ov::op::v0::Constant>(scales);
-    auto scales_f32 = std::make_shared<ov::op::v0::Convert>(scales_node, ov::element::f32);
+    auto scales_node = std::make_shared<ov::op::v0::Constant>(scales.get_element_type(), scale_shape,
+                                                             scales.data(), nullptr);
+    scales_node->get_rt_info()["__gguf_tensor_holder"] = scales;
+    ov::Output<ov::Node> scales_f32 = scales_node;
+    if (scales.get_element_type() != ov::element::f32) {
+        scales_f32 = std::make_shared<ov::op::v0::Convert>(scales_node, ov::element::f32);
+    }
     ov::Output<ov::Node> result =
         std::make_shared<ov::op::v1::Multiply>(weights_f32, scales_f32, ov::op::AutoBroadcastType::NUMPY);
 
     auto final_shape_node =
         std::make_shared<ov::op::v0::Constant>(ov::element::i64, ov::Shape{final_shape.size()}, final_shape);
-    return std::make_shared<ov::op::v1::Reshape>(result, final_shape_node, false);
-}
-
-ov::Output<ov::Node> make_mxfp4_moe_packed_weights(ov::Tensor & weight) {
-    auto weights_node = std::make_shared<ov::op::v0::Constant>(ov::element::u8, weight.get_shape(),
-                                                               static_cast<uint8_t *>(weight.data()), nullptr);
-    weights_node->get_rt_info()["__gguf_tensor_holder"] = weight;
-    weights_node->get_rt_info()["__ggml_openvino_mxfp4_moe_packed"] = true;
-    return weights_node;
+    auto reshaped = std::make_shared<ov::op::v1::Reshape>(result, final_shape_node, false);
+    if (final_shape.size() == 3) {
+        ov::pass::disable_constant_folding(weights_f32);
+        ov::pass::disable_constant_folding(result.get_node_shared_ptr());
+        ov::pass::disable_constant_folding(reshaped);
+        reshaped->get_rt_info()["__ggml_openvino_mxfp4_moe_planes"] = true;
+    }
+    return reshaped;
 }
 
 void quantize_q4_0(const float * x,
@@ -1303,27 +1315,6 @@ OvWeight process_weight_tensor(const ggml_tensor * tensor, const void * data, vo
     // tensors are handled by requantize_to_buffers and keep an integer zero point.
     const bool zp_is_f16 = !layout.is_requant && (use_bias || ggml_openvino_use_exact_zero_point(tensor));
 
-    const bool is_3d_mxfp4_moe = tensor->type == GGML_TYPE_MXFP4 && (tensor->ne[2] > 1 || tensor->ne[3] > 1);
-    if (is_3d_mxfp4_moe) {
-        ov::Shape packed_shape = {static_cast<size_t>(tensor->ne[3]),
-                                  static_cast<size_t>(tensor->ne[2]),
-                                  static_cast<size_t>(tensor->ne[1]),
-                                  static_cast<size_t>(tensor->ne[0] / MXFP4_BLOCK_SIZE),
-                                  MXFP4_BLOCK_BYTES};
-        const size_t tensor_bytes = ggml_nbytes(tensor);
-        if (output_base_ptr) {
-            auto * buf_base = static_cast<uint8_t *>(output_base_ptr);
-            memcpy(buf_base + layout.weights_offset, data, tensor_bytes);
-            result.weights = ov::Tensor(ov::element::u8, packed_shape, buf_base + layout.weights_offset);
-        } else {
-            result.weights = ov::Tensor(ov::element::u8, packed_shape);
-            memcpy(result.weights.data(), data, tensor_bytes);
-        }
-        result.weight_node = make_mxfp4_moe_packed_weights(result.weights).get_node_shared_ptr();
-        result.weight_node->set_friendly_name(tensor->name);
-        return result;
-    }
-
     if (use_bias) {
         OPENVINO_ASSERT(!layout.is_requant,
                         "use_bias is only used for test-backend-ops, which should not have requantization");
@@ -1361,21 +1352,9 @@ OvWeight process_weight_tensor(const ggml_tensor * tensor, const void * data, vo
     ov::Shape scale_shape = node_shape;
     scale_shape.back() /= layout.weights_per_block;
 
-    if (tensor->type == GGML_TYPE_MXFP4) {
-        if (tensor->ne[2] == 1 && tensor->ne[3] == 1) {
-            node_shape = {static_cast<size_t>(tensor->ne[1]), static_cast<size_t>(tensor->ne[0])};
-        } else {
-            node_shape.clear();
-            for (int i = GGML_MAX_DIMS - 1; i >= 0; --i) {
-                node_shape.push_back(static_cast<size_t>(tensor->ne[i]));
-            }
-        }
-
-        scale_shape = node_shape;
-        scale_shape.back() /= layout.weights_per_block;
-    }
-
-    const ov::element::Type scale_type = tensor->type == GGML_TYPE_MXFP4 ? ov::element::f8e8m0 : ov::element::f16;
+    const ov::element::Type scale_type = tensor->type == GGML_TYPE_MXFP4 ?
+                                            (tensor->ne[2] > 1 ? ov::element::f32 : ov::element::f8e8m0) :
+                                            ov::element::f16;
     ov::element::Type zp_type = layout.is_u4 ? ov::element::u4 : ov::element::u8;
     if (zp_is_f16) {
         zp_type = ov::element::f16;

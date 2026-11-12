@@ -1079,7 +1079,7 @@ ggml_openvino_extracted_layout ggml_openvino_get_extracted_layout(const ggml_ten
     }
 
     // Most quantized weights use the existing 2D extraction path. 3D expert weights for
-    // MUL_MAT_ID (MoE) are also supported, either as MXFP4 (packed, dedicated branch below) or via the
+    // MUL_MAT_ID (MoE) are also supported, either as MXFP4 (dedicated branch below) or via the
     // generic sizing math below, which is shape-agnostic (based on total element count). Only reject 4D.
     if (tensor->ne[3] != 1) {
         return layout;
@@ -1094,10 +1094,13 @@ ggml_openvino_extracted_layout ggml_openvino_get_extracted_layout(const ggml_ten
 
     if (tensor->type == GGML_TYPE_MXFP4 && (tensor->ne[2] > 1 || tensor->ne[3] > 1)) {
         layout.weights_per_block = 32;
+        layout.is_u4 = true;
         layout.is_symmetric = true;
-        layout.weights_size = ggml_nbytes(tensor);
+        layout.weights_size = n_elements / 2;
+        layout.scales_size = (n_elements / layout.weights_per_block) * sizeof(float);
         layout.weights_offset = 0;
-        layout.total_size = layout.weights_size;
+        layout.scales_offset = GGML_PAD(layout.weights_size, alignment);
+        layout.total_size = layout.scales_offset + layout.scales_size;
         return layout;
     }
 
