@@ -33,6 +33,10 @@ The recommended Qwen3.6-35B-A3B Q4_K_M setup uses GPU with `GGML_OPENVINO_REQUAN
 
 See the [implementation guide](dev_doc/OPENVINO-RECURRENT-CACHE.md) for buffer ownership and rollback.
 
+# Packed MXFP4 MoE transformation
+
+The GPU MoE pipeline runs `ConvertPackedMoeMatMulToGatherMatmul` before MoE fusion when `GGML_OPENVINO_MOE_OP` is enabled (the default). It replaces the packed MXFP4 lookup-table/MatMul pattern with `GatherMatmulCompressed`, unpacking the 17-byte blocks into new F4 weights and F32 scales during the pass. This is not the load-time, zero-copy conversion: it allocates 20 bytes per 32 weights, and the original backend buffer remains allocated. The runtime must provide the matching internal `GatherMatmulCompressed` op. CPU/NPU pipelines and the existing GPU large-temporary eligibility guard are unchanged. Set `GGML_OPENVINO_MOE_OP=0` to keep the existing unfused path.
+
 # Compiled model cache
 
 `GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR` exports compiled CPU/GPU graphs with their weights. It bypasses the plugin-level `GGML_OPENVINO_CACHE_DIR` and uses `OPTIMIZE_SPEED`, so weightless caching is disabled.
