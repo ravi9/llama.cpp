@@ -1995,10 +1995,6 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         }
         // Only MXFP4 still needs the large-temporary guard; every other quantized type goes
         // through GatherMatmul, which never materializes the selected expert weights.
-        if (ggml_openvino_is_gpu() && op->src[0] != nullptr && op->src[0]->type == GGML_TYPE_MXFP4 &&
-            mul_mat_id_requires_large_tmp(op)) {
-            return {false, "MUL_MAT_ID with MXFP4 weights requires large temporary on GPU"};
-        }
         break;
     }
     case GGML_OP_ROPE: {

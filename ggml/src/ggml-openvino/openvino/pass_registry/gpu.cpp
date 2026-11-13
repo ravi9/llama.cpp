@@ -2,6 +2,7 @@
 
 #include "ggml-openvino/ggml-openvino-extra.h"
 #include "ggml-openvino/openvino/pass/align_eltwise_ranks.h"
+#include "ggml-openvino/openvino/pass/convert_packed_moe_matmul.h"
 #include "ggml-openvino/openvino/pass/fuse_moe_compressed.h"
 #include "ggml-openvino/openvino/pass/fuse_moe_router.h"
 #include "ggml-openvino/openvino/pass/keep_sum_square_fp32.h"
@@ -21,6 +22,7 @@ void register_gpu_passes(ov::pass::Manager & manager, const GraphTraits & traits
     // pass. GGML_OPENVINO_MOE_OP=0 keeps the unfused GatherMatmul path for fallback/debugging.
     if (ggml_openvino_getenv_int("GGML_OPENVINO_MOE_OP", 1) != 0) {
         manager.register_pass<pass::FuseMoeRouter>();
+        manager.register_pass<pass::ConvertPackedMoeMatMulToGatherMatmul>();
         manager.register_pass<pass::FuseMoeCompressed>();
         // Same fusion for models whose gate and up projections share one fused expert
         // weight (gemma-4). It only matches that shape and only when the experts carry an
