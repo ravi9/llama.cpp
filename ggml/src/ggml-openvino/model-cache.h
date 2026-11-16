@@ -8,8 +8,9 @@
 // GGUF mmap instead of allocating the private OpenVINO model buffer. This mode is
 // import-only and fails clearly if either required blob is missing or invalid.
 // GGML_OPENVINO_NPU_WEIGHTLESS_BANK=1 is the same raw-weight flow, but exports weightless
-// prefill/decode blobs plus ONE shared <prefill>-<decode>.weights.bin. Warm import reads the
-// weights from that file (ov::weights_path) and NPUW deduplicates the two models into one bank
+// prefill/decode blobs plus ONE <weights_fp>-<weights_fp>.weights.bin shared by every prefill/decode pair
+// of the model (pairs differ only in KV window). Warm import reads the weights from that file
+// (ov::weights_path) and NPUW deduplicates all models into one bank
 // (no OpenVINO patch needed), so the weights are stored once on disk and resident once.
 
 #include "ggml.h"
@@ -42,8 +43,13 @@ struct ggml_openvino_source_mapping {
     uintptr_t end;
     uint64_t offset;
     uint64_t identity;
+    // The mapping cannot be written, so its pages always hold the file's bytes.
+    bool read_only;
 };
 
+// Find the file mapping that holds [data, data + size), or nullptr. Cache mappings for one buffer lifetime.
+const ggml_openvino_source_mapping * ggml_openvino_find_source_mapping(const void * data, size_t size,
+                                                                     std::vector<ggml_openvino_source_mapping> & mappings);
 // Identify mmap weights without reading their pages. Cache mappings for one buffer lifetime.
 uint64_t ggml_openvino_source_fingerprint(const void * data, size_t size, std::vector<ggml_openvino_source_mapping> & mappings);
 uint64_t ggml_backend_openvino_weight_fingerprint(const ggml_tensor * tensor);

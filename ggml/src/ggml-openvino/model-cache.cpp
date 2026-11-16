@@ -1,5 +1,6 @@
 #include "model-cache.h"
 
+#include "device/npu_config.h"
 #include "ggml-backend-impl.h"
 #include "ggml-backend.h"
 #include "ggml-impl.h"
@@ -20,6 +21,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #if defined(_WIN32)
@@ -86,25 +88,14 @@ uint64_t weight_fingerprint(const ggml_tensor * t) {
 // fingerprinted once, deterministically.
 template <typename F>
 void for_each_weight(const ggml_cgraph * cgraph, F && fn) {
-    std::vector<const ggml_tensor *> seen;
+    std::unordered_set<const ggml_tensor *> seen;
     for (int i = 0; i < cgraph->n_nodes; ++i) {
         const ggml_tensor * node = cgraph->nodes[i];
         for (int s = 0; s < GGML_MAX_SRC; ++s) {
             const ggml_tensor * src = node->src[s];
-            if (!is_weight_src(src)) {
+            if (!is_weight_src(src) || !seen.insert(src).second) {
                 continue;
             }
-            bool dup = false;
-            for (const auto * p : seen) {
-                if (p == src) {
-                    dup = true;
-                    break;
-                }
-            }
-            if (dup) {
-                continue;
-            }
-            seen.push_back(src);
             fn(src);
         }
     }
@@ -174,6 +165,8 @@ bool ggml_openvino_model_cache_only() {
 }
 
 static const char * cache_settings[] = {
+    "GGML_OPENVINO_GPU_CONFIG",
+    "GGML_OPENVINO_CPU_CONFIG",
     "GGML_OPENVINO_REQUANT_KQUANT",
     "GGML_OPENVINO_NATIVE_SOFTPLUS",
     // GGML_OPENVINO_KV_SLICE only changes dynamic runtime bindings. Dynamic
@@ -188,6 +181,8 @@ static const char * cache_settings[] = {
     "GGML_OPENVINO_PROFILING",
     "GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK",
     "GGML_OPENVINO_DISABLE_SCALE_REORDER",
+    "GGML_OPENVINO_KV_SCATTER_ELEMENTS",
+    "GGML_OPENVINO_DISABLE_ELTWISE_RANK_ALIGN",
 };
 
 void ggml_openvino_model_cache_init() {
@@ -216,17 +211,15 @@ void ggml_openvino_model_cache_init() {
     }
 }
 
-uint64_t ggml_openvino_source_fingerprint(const void * data, size_t size, std::vector<ggml_openvino_source_mapping> & mappings) {
+const ggml_openvino_source_mapping * ggml_openvino_find_source_mapping(const void * data, size_t size,
+                                                                     std::vector<ggml_openvino_source_mapping> & mappings) {
     const uintptr_t address = reinterpret_cast<uintptr_t>(data);
     auto contains = [&](const ggml_openvino_source_mapping & m) {
         return address >= m.begin && address < m.end && size <= m.end - address;
     };
-    auto fingerprint = [&](const ggml_openvino_source_mapping & m) {
-        return fnv1a_u64(m.identity, m.offset + address - m.begin);
-    };
     for (const auto & m : mappings) {
         if (contains(m)) {
-            return fingerprint(m);
+            return &m;
         }
     }
 #ifdef __linux__
@@ -241,7 +234,7 @@ uint64_t ggml_openvino_source_fingerprint(const void * data, size_t size, std::v
                    &offset, &dev_major, &dev_minor, &inode, &path_start) != 7 || inode == 0) {
             continue;
         }
-        ggml_openvino_source_mapping m{uintptr_t(begin), uintptr_t(end), offset, FNV_OFFSET};
+        ggml_openvino_source_mapping m{uintptr_t(begin), uintptr_t(end), offset, FNV_OFFSET, permissions[1] != 'w'};
         if (!contains(m)) {
             continue;
         }
@@ -259,7 +252,7 @@ uint64_t ggml_openvino_source_fingerprint(const void * data, size_t size, std::v
         m.identity = fnv1a_u64(m.identity, st.st_ctim.tv_sec);
         m.identity = fnv1a_u64(m.identity, st.st_ctim.tv_nsec);
         mappings.push_back(m);
-        return fingerprint(m);
+        return &mappings.back();
     }
 #elif defined(_WIN32)
     MEMORY_BASIC_INFORMATION memory;
@@ -289,8 +282,10 @@ uint64_t ggml_openvino_source_fingerprint(const void * data, size_t size, std::v
                     const uint64_t file_size = (uint64_t(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
                     const uintptr_t begin = reinterpret_cast<uintptr_t>(memory.AllocationBase);
                     if (file_size <= std::numeric_limits<uintptr_t>::max() - begin) {
+                        // A view created read-only can never be made writable.
+                        const bool read_only = (memory.AllocationProtect & (PAGE_READONLY | PAGE_EXECUTE_READ)) != 0;
                         ggml_openvino_source_mapping m{begin, begin + static_cast<uintptr_t>(file_size), 0,
-                                                       fnv1a(FNV_OFFSET, "win32", 5)};
+                                                       fnv1a(FNV_OFFSET, "win32", 5), read_only};
                         if (contains(m)) {
                             m.identity = fnv1a_u64(m.identity, info.dwVolumeSerialNumber);
                             m.identity = fnv1a_u64(m.identity, (uint64_t(info.nFileIndexHigh) << 32) | info.nFileIndexLow);
@@ -299,7 +294,7 @@ uint64_t ggml_openvino_source_fingerprint(const void * data, size_t size, std::v
                                                                  info.ftLastWriteTime.dwLowDateTime);
                             m.identity = fnv1a_u64(m.identity, static_cast<uint64_t>(basic.ChangeTime.QuadPart));
                             mappings.push_back(m);
-                            return fingerprint(m);
+                            return &mappings.back();
                         }
                     }
                 }
@@ -307,6 +302,13 @@ uint64_t ggml_openvino_source_fingerprint(const void * data, size_t size, std::v
         }
     }
 #endif
+    return nullptr;
+}
+
+uint64_t ggml_openvino_source_fingerprint(const void * data, size_t size, std::vector<ggml_openvino_source_mapping> & mappings) {
+    if (const auto * m = ggml_openvino_find_source_mapping(data, size, mappings)) {
+        return fnv1a_u64(m->identity, m->offset + reinterpret_cast<uintptr_t>(data) - m->begin);
+    }
     if (ggml_openvino_model_cache_only()) {
         GGML_ABORT("ggml-openvino: could not identify mapped GGUF weight; use --load-mode mmap");
     }
@@ -360,12 +362,17 @@ uint64_t ggml_openvino_model_fingerprint(const ggml_cgraph * cgraph,
     // Version 3 includes dense Q8_0/Q5_1 requantization in q4_asym64_all.
     // Version 4 uses GatedDeltaNet output 1 for snapshots in snapshot mode; older
     // graphs use the incompatible three-output contract.
-    h = fnv1a_u64(h, 4);
+    // Version 5 requantizes K-quant MoE experts to Q4_1_64 on GPU by default.
+    // Version 6 clears recurrent-cache slots with Select, so a NaN in a cleared slot does not survive.
+    // Version 7 reads ROPE frequency factors named other than rope_freqs.weight as a Constant, not a Parameter.
+    // Version 8 converts the graph with the OpenVINO GGUF frontend.
+    h = fnv1a_u64(h, 8);
     h = fnv1a(h, graph_signature.data(), graph_signature.size());
     for (const char * name : cache_settings) {
         const char * value = ggml_openvino_getenv_str(name, "");
         h = fnv1a(h, value, strlen(value) + 1);
     }
+    h = fnv1a_u64(h, ggml_openvino_gdn_decompose_enabled() ? ggml_openvino_gdn_decompose_chunk() : 0);
     if (const char * debug_nodes = ggml_openvino_getenv_str("GGML_OPENVINO_DEBUG_NODE")) {
         h = fnv1a(h, "GGML_OPENVINO_DEBUG_NODE", sizeof("GGML_OPENVINO_DEBUG_NODE"));
         h = fnv1a(h, debug_nodes, strlen(debug_nodes) + 1);
@@ -377,10 +384,16 @@ uint64_t ggml_openvino_model_fingerprint(const ggml_cgraph * cgraph,
     // Topology: node count + each node's op and name (cheap, and distinguishes
     // graphs that share weights but differ structurally).
     h = fnv1a_u64(h, static_cast<uint64_t>(cgraph->n_nodes));
+    bool has_gdn = false;
     for (int i = 0; i < cgraph->n_nodes; ++i) {
         const ggml_tensor * node = cgraph->nodes[i];
         h = fnv1a_u64(h, static_cast<uint64_t>(node->op));
         h = fnv1a(h, node->name, strlen(node->name));
+        has_gdn = has_gdn || node->op == GGML_OP_GATED_DELTA_NET;
+    }
+    if (has_gdn && ggml_openvino_is_npu()) {
+        // GDN graphs switch to the PLUGIN compiler unless the environment sets the compiler type.
+        h = fnv1a_u64(h, ggml_openvino_npu_gdn_uses_plugin_compiler() ? 1u : 0u);
     }
 
     // Weights: the model identity.

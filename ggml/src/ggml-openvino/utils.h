@@ -98,7 +98,7 @@ struct decoder_runtime_ctx {
     // Attention sizes the cached prefill model was built with; decode calls overwrite the decoder's.
     int prefill_attention_size = -1;
     int prefill_attention_size_swa = -1;
-    // KV window of the decode model in the compiled pair (GGML_OPENVINO_NPU_DECODE_PREBUILD).
+    // KV window of the decode model in the compiled pair (GGML_OPENVINO_NPU_BLOB_PREBUILD).
     int decode_attention_size = -1;
     std::string shared_key;
     std::map<int, std::shared_ptr<ov::InferRequest>> decode_window_requests;
@@ -181,6 +181,9 @@ struct ov_runtime_context {
 };
 
 enum ggml_status ov_graph_compute(struct ggml_cgraph * cgraph, ggml_backend_t backend);
+
+// Releases the cached blobs this process imported (GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR).
+void ov_clear_imported_blobs();
 
 size_t checksum(const void * data, size_t size);
 

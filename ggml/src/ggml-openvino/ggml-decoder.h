@@ -431,6 +431,9 @@ public:
     std::map<std::string, ov::Tensor> runtime_input_tensors;
     std::map<std::string, ov::Tensor> runtime_output_scratch;
 
+    // OpenVINO device that runs the graph, e.g. GPU.1
+    std::string device;
+
     bool m_is_static = false;
     bool m_is_stateful = false;
     bool m_is_prefill = false;
@@ -496,10 +499,15 @@ public:
         return op->op == GGML_OP_ROPE && tensor == op->src[2];
     }
 
-    inline static bool is_recurrent_cache(const ggml_tensor * tensor) {
+    static bool is_recurrent_cache(const ggml_tensor * tensor) {
         return tensor != nullptr && (strncmp(tensor->name, "cache_r_l", strlen("cache_r_l")) == 0 ||
                                      strncmp(tensor->name, "cache_s_l", strlen("cache_s_l")) == 0 ||
                                      strncmp(tensor->name, "cache_ple_r_l", strlen("cache_ple_r_l")) == 0);
+    }
+
+    static bool is_recurrent_cache_reset(const ggml_tensor * node) {
+        const bool is_scale_or_fill = node->op == GGML_OP_SCALE || node->op == GGML_OP_FILL;
+        return is_scale_or_fill && node->view_src != nullptr && is_recurrent_cache(node->view_src);
     }
 
     static bool is_gdn_snapshot_writeback(const ggml_tensor * node) {
@@ -680,6 +688,7 @@ private:
 
     // Infer and propagate dynamic-dimension indices for all tensors in the GGML graph.
     void compute_node_dynamic_dims();
+    std::string get_pad_extent_input(const ggml_tensor * node) const;
     // "view_slice" ({ov_axis, start, length}) / "view_reshape" (OV-order target, -1 on the token axis) for
     // VIEWs the frontend cannot recover from strides alone; empty when the generic stride path applies.
     std::vector<int64_t> describe_view(const ggml_tensor * node, bool reshape) const;

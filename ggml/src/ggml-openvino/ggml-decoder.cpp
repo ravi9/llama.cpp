@@ -146,6 +146,7 @@ ov::frontend::gguf::RopeConfig rope_config_from_params(const int32_t * params, b
     memcpy(config.sections.data(), params + 11, sizeof(int32_t) * config.sections.size());
     config.per_op = per_op;
     config.is_imrope = params[2] == GGML_ROPE_TYPE_IMROPE;
+    config.yarn_truncate = params[3] == 0;
     return config;
 }
 
@@ -161,7 +162,8 @@ std::vector<int64_t> permute_order_from_params(const int32_t * params) {
 }
 
 bool is_inplace_op(const ggml_tensor * node) {
-    return node->op == GGML_OP_SET_ROWS || node->op == GGML_OP_CPY || (node->op == GGML_OP_SCALE && node->view_src);
+    const bool is_scale_or_fill = node->op == GGML_OP_SCALE || node->op == GGML_OP_FILL;
+    return node->op == GGML_OP_SET_ROWS || node->op == GGML_OP_CPY || (is_scale_or_fill && node->view_src);
 }
 
 bool is_same_shape(const ggml_tensor * a, const ggml_tensor * b) {
@@ -415,6 +417,10 @@ void GgmlOvDecoder::set_input_output() {
             if (src->flags & GGML_TENSOR_FLAG_INPUT) {
                 src_name = get_tensor_graph_input_ov_name(this, m_cgraph, src, node);
             }
+            // Same name as in create_weight_nodes(), so ROPE reads the weight Constant.
+            if (is_rope_freqs_weight(src->view_src ? src->view_src : src, node)) {
+                src_name = "rope_freqs.weight";
+            }
             current_node_info.node_inputs[src_name] = src;
             current_node_info.node_inputs_names.push_back(src_name);
         }
@@ -470,9 +476,14 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
                 return 1;
             } else if (consumer->op == GGML_OP_SSM_CONV) {
                 const auto * concat = consumer->src[0];
-                if (concat->op == GGML_OP_CONCAT) {
-                    const auto * transposed = concat->src[1];
-                    recurrent_sequence = transposed->op == GGML_OP_TRANSPOSE && transposed->src[0] == node;
+                if (concat->op == GGML_OP_CONCAT && concat->src[1]->op == GGML_OP_TRANSPOSE) {
+                    const auto * seq = concat->src[1]->src[0];
+                    // LFM2 short convolutions gate the input first: transpose(mul(view(node), view(node))).
+                    if (seq->op == GGML_OP_MUL && seq->src[0]->op == GGML_OP_VIEW && seq->src[0]->src[0] == node &&
+                        seq->src[1]->op == GGML_OP_VIEW && seq->src[1]->src[0] == node) {
+                        seq = node;
+                    }
+                    recurrent_sequence = seq == node;
                 }
             } else if (consumer->op == GGML_OP_UNARY && ggml_get_unary_op(consumer) == GGML_UNARY_OP_SOFTPLUS) {
                 const auto * biased = consumer->src[0];
@@ -643,7 +654,8 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         }
         break;
     }
-    case GGML_OP_SCALE: {
+    case GGML_OP_SCALE:
+    case GGML_OP_FILL: {
         if (node->view_src && node->buffer->usage == GGML_BACKEND_BUFFER_USAGE_ANY) {
             op_case = node->view_src->ne[1] == 1 ? 2 : 1;
         }
@@ -1061,7 +1073,7 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
             compute_params.sampling_rows[get_tensor_ov_name(cgraph, node)] =
                 (node->flags & GGML_TENSOR_FLAG_COMPUTE) ? node->view_offs / node->src[0]->nb[1] : 0;
         }
-        if (node->op == GGML_OP_SCALE && node->view_src != nullptr && is_recurrent_cache(node->view_src)) {
+        if (is_recurrent_cache_reset(node)) {
             if (model_params.n_rs_slots == -1) {
                 model_params.n_rs_slots = node->view_src->ne[1];
             } else {
@@ -1162,6 +1174,13 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
     // for NPU, output_len is always 1 except for llama-perplexity
     if (is_static && compute_params.output_len == 0) {
         compute_params.output_len = 1;
+    }
+    // A sliced static prefill attends a power-of-two number of KV rows: every attended size needs its own compiled
+    // prefill model, so a growing sequence compiles one when the attended length doubles, not for each ubatch.
+    if (is_static && ggml_openvino_kv_slice_enabled() && compute_params.input_len > 1 &&
+        !model_params.is_cacheless_attn && compute_params.attention_size > 0 && model_params.ctx_per_seq > 0) {
+        compute_params.attention_size =
+            ggml_openvino_static_kv_window(compute_params.attention_size, model_params.ctx_per_seq);
     }
     model_params.ctx = model_params.ctx_per_seq * model_params.n_seq;
     return {model_params, compute_params};
@@ -1459,6 +1478,12 @@ void GgmlOvDecoder::compute_model_inputs() {
             if (src->flags & GGML_TENSOR_FLAG_INPUT) {
                 src_name = get_tensor_graph_input_ov_name(this, m_cgraph, src, node);
             }
+            // ROPE frequency factors (rope_factors_short/long in Phi-3, Phi-4 and MiniCPM) are registered as
+            // "rope_freqs.weight" in create_weight_nodes(); without the same name here they become a Parameter
+            // fed from the host weight buffer, which is empty in cache-only mode.
+            if (is_rope_freqs_weight(src->view_src ? src->view_src : src, node)) {
+                src_name = "rope_freqs.weight";
+            }
             if (m_model_weights.find(src_name) != m_model_weights.end()) {
                 continue;
             }
@@ -1578,7 +1603,7 @@ void GgmlOvDecoder::compute_model_outputs() {
         }
         const bool runtime_recurrent_write = !m_naive && is_recurrent_cache(cur_node->view_src) &&
                                               ::is_inplace_op(cur_node) &&
-                                              (cur_node->op == GGML_OP_SCALE || !m_is_static);
+                                              (is_recurrent_cache_reset(cur_node) || !m_is_static);
         if (::is_inplace_op(cur_node) && ggml_nbytes(cur_node) == 0 && !runtime_recurrent_write) {
             continue;
         }
@@ -2123,7 +2148,7 @@ std::vector<std::string> GgmlOvDecoder::get_input_names(int node_idx) const {
     const auto & info = m_node_info_list[node_idx];
     const auto * node = info.node;
     auto inputs = info.node_inputs_names;
-    if (node->op == GGML_OP_SCALE && info.node_op_case == 1 && m_model_inputs.count("cache_rs_reset_idx")) {
+    if (is_recurrent_cache_reset(node) && info.node_op_case == 1 && m_model_inputs.count("cache_rs_reset_idx")) {
         inputs[0] = get_tensor_ov_name(m_cgraph, node->view_src);
         inputs.push_back("cache_rs_reset_idx");
         inputs.push_back("cache_rs_reset_len");
@@ -2153,8 +2178,41 @@ std::vector<std::string> GgmlOvDecoder::get_input_names(int node_idx) const {
             inputs.push_back("rs_slot_begin_" + info.node_name);
         }
     }
+    if (node->op == GGML_OP_PAD) {
+        const auto extent = get_pad_extent_input(node);
+        if (!extent.empty()) {
+            inputs.push_back(extent);
+        }
+    }
     inputs.insert(inputs.end(), info.kv_view_inputs.begin(), info.kv_view_inputs.end());
     return inputs;
+}
+
+// [TAG_NO_CACHE_PAD] Attention without a KV cache pads K and V on the token axis up to the KQ mask width,
+// which depends on the token count. Name the mask so the frontend computes the end padding at run time.
+std::string GgmlOvDecoder::get_pad_extent_input(const ggml_tensor * node) const {
+    if (node->op != GGML_OP_PAD || node->op_params[8] != 0) {
+        return {};
+    }
+    const auto it = m_node_dynamic_dims.find(node->src[0]);
+    if (it == m_node_dynamic_dims.end() || it->second < 0) {
+        return {};
+    }
+    const int axis = it->second;
+    if (node->op_params[2 * axis] != 0 || node->op_params[2 * axis + 1] == 0) {
+        return {};
+    }
+    for (int i = 0; i < m_cgraph->n_nodes; ++i) {
+        const ggml_tensor * op = m_cgraph->nodes[i];
+        for (int j = 0; j < GGML_MAX_SRC; ++j) {
+            const ggml_tensor * src = op->src[j];
+            if (src != nullptr && src->op == GGML_OP_NONE && (src->flags & GGML_TENSOR_FLAG_INPUT) &&
+                is_inp_mask(src, op) && src->ne[0] == node->ne[axis] && src->ne[1] == node->src[0]->ne[axis]) {
+                return get_tensor_graph_input_ov_name(this, m_cgraph, src, op);
+            }
+        }
+    }
+    return {};
 }
 
 ov::PartialShape GgmlOvDecoder::get_output_shape(int node_idx) const {
@@ -2173,7 +2231,7 @@ std::string GgmlOvDecoder::get_inplace_op_src(int node_idx) const {
     // Reset lengths (also in static mode) and dynamic remainder views can become nonempty
     // after compilation. Keep their alias updates in the translated cache chain.
     const bool runtime_recurrent_write = !m_naive && is_recurrent_cache(node->view_src) &&
-                                          (node->op == GGML_OP_SCALE || !m_is_static);
+                                          (is_recurrent_cache_reset(node) || !m_is_static);
     if (!::is_inplace_op(node) || node->view_src == nullptr ||
         (ggml_nbytes(node) == 0 && !runtime_recurrent_write)) {
         return "";
@@ -2433,6 +2491,9 @@ ov::Any GgmlOvDecoder::get_attribute(const std::string & name) const {
             break;
 
         case GGML_OP_FILL:
+            if (name == "cache_reset")
+                return op_case == 1 && m_model_inputs.count("cache_rs_reset_idx");
+            if (name == "axis" && op_case == 1 && m_model_inputs.count("cache_rs_reset_idx")) return int64_t{2};
             if (name == "fill_value") return op_param_float(node, 0);
             break;
 
@@ -2521,10 +2582,24 @@ ov::Any GgmlOvDecoder::get_attribute(const std::string & name) const {
         case GGML_OP_PAD:
             if (name == "pad_params") return std::vector<int32_t>(node->op_params, node->op_params + 8);
             if (name == "pad_circular") return node->op_params[8] != 0;
+            if (name == "pad_to_input_axis" && !get_pad_extent_input(node).empty()) {
+                return static_cast<int64_t>(m_node_dynamic_dims.at(node->src[0]));
+            }
             break;
 
         case GGML_OP_TRI:
             if (name == "tri_type") return node->op_params[0];
+            break;
+
+        case GGML_OP_POOL_1D:
+            // {op, k0, s0, p0}
+            if (name == "pool_params") return std::vector<int32_t>(node->op_params, node->op_params + 4);
+            if (name == "pool_mode") {
+                const auto mode = static_cast<ggml_op_pool>(node->op_params[0]);
+                if (mode == GGML_OP_POOL_MAX) return std::string("max");
+                if (mode == GGML_OP_POOL_AVG) return std::string("average");
+                throw std::runtime_error("Unsupported GGML pool mode: " + std::to_string(node->op_params[0]));
+            }
             break;
 
         case GGML_OP_POOL_2D:
@@ -3153,7 +3228,6 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
         case GGML_OP_CLAMP:
         case GGML_OP_PAD:
         // Element-wise math (e.g. the squared-ReLU FFN uses SQR), ROLL and UPSCALE keep the dynamic extent.
-        case GGML_OP_ADD1:
         case GGML_OP_SQR:
         case GGML_OP_SQRT:
         case GGML_OP_LOG:
@@ -3185,8 +3259,9 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
             }
             break;
         case GGML_OP_SUM_ROWS:
-            // SUM_ROWS reduces ggml axis 0 to size 1 and preserves all other axes, so the
-            // dynamic dim is preserved unless it was axis 0 (then it is summed away).
+        case GGML_OP_POOL_1D:
+            // SUM_ROWS/POOL_1D change only ggml axis 0 and preserve all other axes, so the
+            // dynamic dim is preserved unless it was axis 0.
             m_node_dynamic_dims[node] =
                 (m_node_dynamic_dims[node->src[0]] == 0) ? -1 : m_node_dynamic_dims[node->src[0]];
             break;
