@@ -1,3 +1,16 @@
+# Per-operation graph boundaries
+
+The supplied GGUF decoder includes VIEW, RESHAPE, PERMUTE and TRANSPOSE inputs
+omitted by per-operation graph views. Quantized VIEW strides and offsets describe
+the decoded F32 weight layout. CPY returns its logical destination in this path;
+writeback honors destination strides and preserves storage outside the view.
+Full model graphs continue to expose updated in-place storage as their output.
+
+Quantized CPY destinations and conversions to BF16 from other types are not
+offloaded: the former require quantized writeback and the latter require
+round-to-nearest-even conversion. Quantized inputs with a non-unit fourth
+dimension are also unsupported by the weight extraction path.
+
 # Qwen MTP
 
 The default Qwen3.5/Qwen3.6 GPU path is dynamic stateless execution with in-place fused recurrent ops and stable MTP sampling. Build against the matching OpenVINO runtime/GPU plugin with independent `RecurrentConvCacheUpdate` and `RecurrentGatedDeltaNetUpdate` ops. The native Update ops return computation results and update writable cache inputs in place, including rollback snapshots where required. No recurrent/sampling opt-in flag is needed on supported graphs. See the [development documentation index](dev_doc/README.md) for the implementation and the MTP sampling graph.

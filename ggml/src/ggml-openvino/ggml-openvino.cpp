@@ -1408,6 +1408,12 @@ static ggml_openvino_op_support get_op_support_status(const ggml_tensor * op) {
         }
         break;
     case GGML_OP_CPY:
+        if (ggml_is_quantized(op->type)) {
+            return {false, "CPY to a quantized destination is not supported"};
+        }
+        if (op->type == GGML_TYPE_BF16 && op->src[0]->type != GGML_TYPE_BF16) {
+            return {false, "CPY to BF16 requires round-to-nearest-even conversion"};
+        }
         if (ggml_openvino_is_npu() && (op->src[0]->type == GGML_TYPE_BF16 || op->src[1]->type == GGML_TYPE_BF16)) {
             return {false, "CPY with BF16 is not supported on NPU"};
         }
@@ -1484,9 +1490,10 @@ static ggml_openvino_op_support ggml_backend_openvino_device_supports_op_impl(gg
         // one weight matrix per activation batch, e.g. MLA's per-head attn_k_b / attn_v_b (a batched MatMul)
         const bool is_supported_3d_batched_weight = op->op == GGML_OP_MUL_MAT && i == 0 && src->ne[3] == 1 &&
                                                     op->src[1]->ne[2] == src->ne[2] && op->src[1]->ne[3] == 1;
-        if (ggml_is_quantized(src->type) && src->ne[2] != 1 && !is_supported_3d_moe_expert &&
-            !is_supported_3d_batched_weight) {
-            return {false, "3D quantized tensor for src[" + std::to_string(i) + "] is not supported"};
+        if (ggml_is_quantized(src->type) &&
+            (src->ne[3] != 1 ||
+             (src->ne[2] != 1 && !is_supported_3d_moe_expert && !is_supported_3d_batched_weight))) {
+            return {false, "quantized tensor shape for src[" + std::to_string(i) + "] is not supported"};
         }
     }
 

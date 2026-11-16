@@ -1072,7 +1072,30 @@ enum ggml_status naive_compute(ggml_cgraph * cgraph,
             continue;
         }
         auto * ggml_tensor = model_output_it->second;
-        std::memcpy(ggml_tensor->data, output_tensor.data(), output_tensor.get_byte_size());
+        OPENVINO_ASSERT(output_tensor.get_byte_size() <= ggml_nbytes(ggml_tensor),
+                        "OpenVINO output exceeds destination storage");
+        if (ggml_is_contiguous(ggml_tensor)) {
+            std::memcpy(ggml_tensor->data, output_tensor.data(), output_tensor.get_byte_size());
+        } else {
+            GGML_ASSERT(!ggml_is_quantized(ggml_tensor->type));
+            GGML_ASSERT(output_tensor.get_size() == size_t(ggml_nelements(ggml_tensor)));
+            const auto element_size = ggml_type_size(ggml_tensor->type);
+            GGML_ASSERT(output_tensor.get_element_type().size() == element_size);
+            const auto * source = static_cast<const char *>(output_tensor.data());
+            auto * destination = static_cast<char *>(ggml_tensor->data);
+            for (int64_t i3 = 0; i3 < ggml_tensor->ne[3]; ++i3) {
+                for (int64_t i2 = 0; i2 < ggml_tensor->ne[2]; ++i2) {
+                    for (int64_t i1 = 0; i1 < ggml_tensor->ne[1]; ++i1) {
+                        for (int64_t i0 = 0; i0 < ggml_tensor->ne[0]; ++i0) {
+                            const auto offset = i3 * ggml_tensor->nb[3] + i2 * ggml_tensor->nb[2] +
+                                                i1 * ggml_tensor->nb[1] + i0 * ggml_tensor->nb[0];
+                            std::memcpy(destination + offset, source, element_size);
+                            source += element_size;
+                        }
+                    }
+                }
+            }
+        }
     }
     return GGML_STATUS_SUCCESS;
 }

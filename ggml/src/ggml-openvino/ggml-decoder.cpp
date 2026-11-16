@@ -72,9 +72,9 @@ GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph,
     compute_model_inputs();
     compute_model_outputs();
 
-    for (int node_n = 0; node_n < cgraph->n_nodes; node_n++) {
-        m_node_info_list[node_n].node_op_case = compute_op_case(m_node_info_list[node_n].node);
-        m_node_info_list[node_n].node_op_type = compute_op_type(m_node_info_list[node_n].node);
+    for (auto & info : m_node_info_list) {
+        info.node_op_case = compute_op_case(info.node);
+        info.node_op_type = compute_op_type(info.node);
     }
 }
 
@@ -110,9 +110,9 @@ GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph, std::map<std::string, std::sh
     set_input_output();
     compute_model_inputs();
     compute_model_outputs();
-    for (int node_n = 0; node_n < cgraph->n_nodes; node_n++) {
-        m_node_info_list[node_n].node_op_case = compute_op_case(m_node_info_list[node_n].node);
-        m_node_info_list[node_n].node_op_type = compute_op_type(m_node_info_list[node_n].node);
+    for (auto & info : m_node_info_list) {
+        info.node_op_case = compute_op_case(info.node);
+        info.node_op_type = compute_op_type(info.node);
     }
 }
 
@@ -368,9 +368,29 @@ static std::string get_tensor_graph_input_ov_name(const GgmlOvDecoder * decoder,
 }
 
 void GgmlOvDecoder::set_input_output() {
-    for (int node_n = 0; node_n < m_cgraph->n_nodes; node_n++) {
-        auto * node = m_cgraph->nodes[node_n];
-
+    std::vector<ggml_tensor *> nodes;
+    std::set<ggml_tensor *> visited;
+    const auto append_node = [&](auto && self, ggml_tensor * node) -> void {
+        if (!visited.insert(node).second) {
+            return;
+        }
+        // Per-operation graph views omit their input layout nodes, but the frontend still needs
+        // those nodes to interpret strides, offsets and quantized weight views.
+        if (m_naive) {
+            for (auto * src : node->src) {
+                if (src != nullptr && src != node &&
+                    (src->op == GGML_OP_VIEW || src->op == GGML_OP_RESHAPE || src->op == GGML_OP_PERMUTE ||
+                     src->op == GGML_OP_TRANSPOSE)) {
+                    self(self, src);
+                }
+            }
+        }
+        nodes.push_back(node);
+    };
+    for (int i = 0; i < m_cgraph->n_nodes; ++i) {
+        append_node(append_node, m_cgraph->nodes[i]);
+    }
+    for (auto * node : nodes) {
         NodeInfo current_node_info;
         auto node_name = get_tensor_ov_name(m_cgraph, node);
 
@@ -546,6 +566,9 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         break;
     }
     case GGML_OP_CPY: {
+        if (m_naive) {
+            break;
+        }
         if (node->src[0]->op == GGML_OP_VIEW) {
             if (node->src[0]->src[0]->op == GGML_OP_GATED_DELTA_NET) {
                 if (!m_model_params.has_rs_rollback) {
@@ -1390,10 +1413,9 @@ std::optional<int64_t> GgmlOvDecoder::get_runtime_input_value(const std::string 
     return std::nullopt;
 }
 
-bool GgmlOvDecoder::node_is_used_as_src(const int node_idx) {
-    ggml_tensor * node = m_cgraph->nodes[node_idx];
-    for (int i = node_idx; i < m_cgraph->n_nodes; i++) {
-        ggml_tensor * other_node = m_cgraph->nodes[i];
+bool GgmlOvDecoder::node_is_used_as_src(const ggml_tensor * node) {
+    for (const auto & info : m_node_info_list) {
+        ggml_tensor * other_node = info.node;
         for (int j = 0; j < GGML_MAX_SRC; j++) {
             if (other_node->src[j] == node) {
                 return true;
@@ -1415,10 +1437,10 @@ void GgmlOvDecoder::compute_model_inputs() {
             m_kvcache_4d.insert(input);
         }
     };
-    for (int i = 0; i < m_cgraph->n_nodes; i++) {
-        ggml_tensor * node = m_cgraph->nodes[i];
+    for (const auto & info : m_node_info_list) {
+        ggml_tensor * node = info.node;
         // the node op is NONE means this node maybe as input of later nodes, we should add it to model inputs for this node.
-        if (node->op == GGML_OP_NONE && node_is_used_as_src(i)) {
+        if (node->op == GGML_OP_NONE && node_is_used_as_src(node)) {
             std::string node_name = get_tensor_ov_name(m_cgraph, node);
             if (m_model_weights.find(node_name) == m_model_weights.end()) {
                 m_inputs[node_name] = node;
@@ -1575,7 +1597,7 @@ void GgmlOvDecoder::compute_model_outputs() {
         auto cur_node_use_count = m_cgraph->use_counts[ggml_hash_find(&m_cgraph->visited_hash_set, cur_node)];
         if (cur_node_use_count == 0) {
             // The output of in-place ops is the view_src tensor, which is updated in place. We should use the view_src name as the output name to make sure it can be correctly matched with the later ops that use the view_src.
-            if (cur_node != nullptr && ::is_inplace_op(cur_node) &&
+            if (cur_node != nullptr && ::is_inplace_op(cur_node) && !(m_naive && cur_node->op == GGML_OP_CPY) &&
                 (ggml_nbytes(cur_node) > 0 || runtime_recurrent_write)) {
                 cur_node = cur_node->view_src;
             }
@@ -2194,7 +2216,7 @@ void GgmlOvDecoder::visit_subgraph(std::function<void(std::shared_ptr<ov::fronte
     // retains it past the call, so a single reused instance is safe -- and it keeps the whole
     // model walk O(n_nodes) instead of deep-copying every map per node.
     auto decoder = std::make_shared<GgmlOvDecoder>(*this);
-    for (int node_idx = 0; node_idx < m_cgraph->n_nodes; node_idx++) {
+    for (size_t node_idx = 0; node_idx < m_node_info_list.size(); node_idx++) {
         decoder->m_node_idx = node_idx;
         node_visitor(decoder);
     }
@@ -2251,12 +2273,24 @@ ov::Any GgmlOvDecoder::get_attribute(const std::string & name) const {
         }
 
         case GGML_OP_SCALE:
+            if (name == "cache_reset")
+                return op_case == 1 && m_model_inputs.count("cache_rs_reset_idx");
             if (name == "axis" && op_case == 1 && m_model_inputs.count("cache_rs_reset_idx")) return int64_t{2};
             if (name == "scale") return op_param_float(node, 0);
             if (name == "bias") return op_param_float(node, 1);
             break;
 
         case GGML_OP_CPY:
+            if (name == "copy_mode") {
+                if (op_case == 1) return std::string("gdn_state");
+                if (op_case == 2) return std::string("conv_state");
+                if (op_case == 3) {
+                    return ggml_nbytes(node->src[0]) == 0 ? std::string("empty_source") : std::string("recurrent_rows");
+                }
+                if (op_case == 4) return std::string("direct_scatter");
+                if (op_case == 5) return std::string("empty_compaction");
+                return std::string("generic");
+            }
             // A full single-slot recurrent-state writeback (op_case 7: GDN state, 8: conv state) replaces the
             // whole flat cache; it is expressed as an update at offset 0 so the cache storage is rebound.
             if (name == "axis") {
@@ -2287,6 +2321,18 @@ ov::Any GgmlOvDecoder::get_attribute(const std::string & name) const {
             break;
 
         case GGML_OP_RESHAPE:
+            if (name == "reshape_mode") {
+                switch (op_case) {
+                case 1: return std::string("split_heads");
+                case 2: return std::string("merge_heads");
+                case 3: return std::string("flatten_set_rows");
+                case 4: return std::string("identity_input");
+                case 5: return std::string("flat_tokens");
+                case 7: return std::string("static_output");
+                case 8: return std::string("identity");
+                default: return std::string("target");
+                }
+            }
             if (name == "reshape_target") {
                 if (op_case == 11) return std::vector<int64_t>{1, 1, 1, -1};
                 const auto shape = get_shape(node);
@@ -2484,6 +2530,12 @@ ov::Any GgmlOvDecoder::get_attribute(const std::string & name) const {
         case GGML_OP_POOL_2D:
             // {op, k0, k1, s0, s1, p0, p1}
             if (name == "pool_params") return std::vector<int32_t>(node->op_params, node->op_params + 7);
+            if (name == "pool_mode") {
+                const auto mode = static_cast<ggml_op_pool>(node->op_params[0]);
+                if (mode == GGML_OP_POOL_MAX) return std::string("max");
+                if (mode == GGML_OP_POOL_AVG) return std::string("average");
+                throw std::runtime_error("Unsupported GGML pool mode: " + std::to_string(node->op_params[0]));
+            }
             break;
 
         case GGML_OP_ROLL:
@@ -2498,7 +2550,8 @@ ov::Any GgmlOvDecoder::get_attribute(const std::string & name) const {
             break;
 
         case GGML_OP_GET_ROWS:
-            if (name == "batched_rows") return op_case == 5;
+            if (name == "gather_rows") return op_case == 5;
+            if (name == "indices_view") return node->src[1] != nullptr && node->src[1]->op == GGML_OP_VIEW;
             break;
 
         default:
@@ -2516,16 +2569,44 @@ ov::Any GgmlOvDecoder::get_attribute(const std::string & name) const {
             // view_offs is relative to the storage root; op_params retains the src[0]-relative offset.
             memcpy(&offset, node->op_params, sizeof(offset));
         }
+        if (ggml_is_quantized(node->type)) {
+            const size_t block_bytes = ggml_type_size(node->type);
+            OPENVINO_ASSERT(offset % block_bytes == 0, "Quantized VIEW offset must be block-aligned");
+            offset = offset / block_bytes * ggml_blck_size(node->type) * sizeof(float);
+        }
         return static_cast<int64_t>(offset);
     }
-    if (name == "view_input_strides" && node->src[0] != nullptr) return std::vector<int64_t>{(int64_t) node->src[0]->nb[0], (int64_t) node->src[0]->nb[1], (int64_t) node->src[0]->nb[2], (int64_t) node->src[0]->nb[3]};
-    if (name == "view_output_strides") return std::vector<int64_t>{(int64_t) node->nb[0], (int64_t) node->nb[1], (int64_t) node->nb[2], (int64_t) node->nb[3]};
+    if (name == "view_input_strides" || name == "view_output_strides") {
+        const auto * tensor = name == "view_input_strides" ? node->src[0] : node;
+        if (tensor == nullptr) {
+            return ov::Any{};
+        }
+        std::vector<int64_t> strides(tensor->nb, tensor->nb + GGML_MAX_DIMS);
+        if (ggml_is_quantized(tensor->type)) {
+            // Constants are already dequantized: describe the decoded layout, not packed blocks.
+            strides[0] = sizeof(float);
+            const size_t block_bytes = ggml_type_size(tensor->type);
+            for (size_t i = 1; i < strides.size(); ++i) {
+                OPENVINO_ASSERT(tensor->nb[i] % block_bytes == 0, "Quantized VIEW stride must be block-aligned");
+                strides[i] = tensor->nb[i] / block_bytes * ggml_blck_size(tensor->type) * sizeof(float);
+            }
+        }
+        return strides;
+    }
     // Per-layer slices as shared Split outputs: a StridedSlice costs a shape inference per run on GPU, and NPUW
     // folding must not parametrize per-layer slice indices.
-    if (name == "view_prefer_split") return m_is_static || ggml_openvino_is_gpu();
-    if (name == "input_ggml_shape" && node->src[0] != nullptr) return get_shape(node->src[0]);
-    if (name == "gdn_state_slots" && node->op == GGML_OP_GATED_DELTA_NET) return static_cast<int64_t>(node->op_params[0]);
-    if (name == "force_ref") return false;
+    if (name == "view_prefer_split") {
+        return m_is_static || ggml_openvino_is_gpu();
+    }
+    if (name == "input_ggml_shape" && node->src[0] != nullptr) {
+        return get_shape(node->src[0]);
+    }
+    if (name == "gdn_state_slots" && node->op == GGML_OP_GATED_DELTA_NET) {
+        return static_cast<int64_t>(node->op_params[0]);
+    }
+    if (name == "force_ref") {
+        return false;
+    }
     return ov::Any{};
 }
 
@@ -2534,9 +2615,13 @@ ov::PartialShape GgmlOvDecoder::get_input_shape(const std::string & name) const 
 }
 
 int64_t GgmlOvDecoder::get_input_view_element_offset(const std::string & name) const {
-    if (m_node_idx < 0) return 0;
+    if (m_node_idx < 0) {
+        return 0;
+    }
     const auto * view = m_node_info_list[m_node_idx].node_inputs.at(name);
-    if (view->op != GGML_OP_VIEW) return 0;
+    if (view->op != GGML_OP_VIEW) {
+        return 0;
+    }
     return static_cast<int64_t>(view->view_offs / ggml_type_size(view->type));
 }
 
