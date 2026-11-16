@@ -48,3 +48,21 @@ unset(CMAKE_REQUIRED_INCLUDES)
 if(GGML_OPENVINO_HAS_CACHE_UPDATE)
     target_compile_definitions(ggml-openvino PRIVATE GGML_OPENVINO_HAS_CACHE_UPDATE=1)
 endif()
+
+# Core features that not every ggml tree has (PQ2_0 is PrismML-only)
+unset(GGML_OPENVINO_HAS_PQ2_0 CACHE)
+unset(GGML_OPENVINO_HAS_BUFFER_TENSOR_N CACHE)
+set(CMAKE_REQUIRED_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${CMAKE_CURRENT_SOURCE_DIR}/..")
+check_cxx_source_compiles("#include <ggml.h>
+int main() { return GGML_TYPE_PQ2_0 == GGML_TYPE_F32; }"
+    GGML_OPENVINO_HAS_PQ2_0)
+check_cxx_source_compiles("#include <ggml-backend-impl.h>
+int main() { ggml_backend_buffer_i i{}; return i.set_tensor_n != nullptr; }"
+    GGML_OPENVINO_HAS_BUFFER_TENSOR_N)
+unset(CMAKE_REQUIRED_INCLUDES)
+if(GGML_OPENVINO_HAS_PQ2_0)
+    target_compile_definitions(ggml-openvino PRIVATE GGML_OPENVINO_HAS_PQ2_0=1)
+endif()
+if(GGML_OPENVINO_HAS_BUFFER_TENSOR_N)
+    target_compile_definitions(ggml-openvino PRIVATE GGML_OPENVINO_HAS_BUFFER_TENSOR_N=1)
+endif()

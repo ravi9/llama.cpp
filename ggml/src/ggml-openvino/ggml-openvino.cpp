@@ -904,9 +904,11 @@ static const ggml_backend_buffer_i ggml_backend_openvino_buffer_interface = {
     /* .cpy_tensor      = */ ggml_backend_openvino_buffer_cpy_tensor,
     /* .clear           = */ ggml_backend_openvino_buffer_clear,
     /* .reset           = */ NULL,
+#ifdef GGML_OPENVINO_HAS_BUFFER_TENSOR_N
     /* .set_tensor_n    = */ NULL,
     /* .get_tensor_n    = */ NULL,
     /* .cpy_tensor_n    = */ NULL,
+#endif
 };
 
 // Buffer type interface functions
@@ -2033,6 +2035,13 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
             // kda (per-key-dimension gating) not supported by fused GatedDeltaNet op
             reason = "GATED_DELTA_NET with kda (per-key-dimension gating) is not supported";
         }
+        // the translator reads src[5] as the gathered state and expects activated gates
+        else if (op->src[6] != nullptr) {
+            reason = "GATED_DELTA_NET with state rows is not supported";
+        }
+        else if (op->op_params[1] != 0) {
+            reason = "GATED_DELTA_NET with raw gates is not supported";
+        }
         else if (op->op_params[0] > 1) {
             if (ggml_openvino_is_npu() || ggml_openvino_getenv_int("GGML_OPENVINO_FORCE_STATIC")) {
                 reason = "GATED_DELTA_NET snapshots require dynamic execution";
@@ -2182,7 +2191,11 @@ static ggml_openvino_op_support ggml_backend_openvino_device_supports_op_impl(gg
     static std::unordered_set<ggml_type> supported_types{
         GGML_TYPE_F32,  GGML_TYPE_F16,  GGML_TYPE_BF16, GGML_TYPE_I64,  GGML_TYPE_I32,  GGML_TYPE_Q4_0,
         GGML_TYPE_Q4_1, GGML_TYPE_Q4_K, GGML_TYPE_Q5_0, GGML_TYPE_Q5_1, GGML_TYPE_Q5_K, GGML_TYPE_Q8_0, GGML_TYPE_Q6_K,
-        GGML_TYPE_MXFP4};
+        GGML_TYPE_MXFP4,
+#ifdef GGML_OPENVINO_HAS_PQ2_0
+        GGML_TYPE_PQ2_0,
+#endif
+    };
 
     // derive supported op sets from the op_table map, keys in
     // the map use the full macro name (e.g. "GGML_OP_ADD"), while

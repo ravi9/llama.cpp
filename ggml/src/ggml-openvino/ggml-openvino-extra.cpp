@@ -953,6 +953,14 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
     if (no_requant) {
         return std::nullopt;
     }
+    // Ternary weights are already at 2 bits and OpenVINO carries them natively as u2. Every
+    // requant target here is 4 bit or wider, so it would inflate them and also lose the ternary
+    // FullyConnected path, which is the only one that applies a fused Hadamard input transform.
+#ifdef GGML_OPENVINO_HAS_PQ2_0
+    if (tensor->type == GGML_TYPE_PQ2_0) {
+        return std::nullopt;
+    }
+#endif
     if (strncmp(tensor->name, "token_embd.weight", 17) == 0) {
         if (ggml_openvino_is_npu()) {
             if (auto npu_type = ggml_openvino_npu_token_embd_requant_type(tensor)) {
@@ -1222,14 +1230,25 @@ ggml_openvino_extracted_layout ggml_openvino_get_extracted_layout(const ggml_ten
     case GGML_TYPE_Q5_K:
         break;
 
+#ifdef GGML_OPENVINO_HAS_PQ2_0
+    case GGML_TYPE_PQ2_0:
+        // Ternary: codes {0,1,2} dequantized as (code - 1) * scale. The zero point is the
+        // same for every block, so make_int2_weights emits it as a scalar and no zp array
+        // is stored here (is_symmetric only means "no per-block zp" in this layout).
+        layout.is_u2 = true;
+        layout.weights_per_block = 128;
+        layout.is_symmetric = true;
+        break;
+#endif
+
     default:
         // Unsupported quantization type
         return layout;
     }
 
     // Calculate sizes
-    // Weights: U4 = n_elements/2 bytes, U8 = n_elements bytes
-    layout.weights_size = layout.is_u4 ? (n_elements / 2) : n_elements;
+    // Weights: U2 = n_elements/4 bytes, U4 = n_elements/2 bytes, U8 = n_elements bytes
+    layout.weights_size = layout.is_u2 ? (n_elements / 4) : (layout.is_u4 ? (n_elements / 2) : n_elements);
 
     // Scales: F16 per block, except MXFP4 which stores one E8M0 byte per block.
     int64_t n_blocks = n_elements / layout.weights_per_block;

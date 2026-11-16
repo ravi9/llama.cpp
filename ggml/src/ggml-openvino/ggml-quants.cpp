@@ -57,6 +57,12 @@ void unpack_32_4(const uint8_t * data, uint8_t * dst) {
     }
 }
 
+#ifdef GGML_OPENVINO_HAS_PQ2_0
+constexpr size_t PQ2_0_BLOCK_SIZE = 128;  // QK_PQ2_0
+constexpr size_t PQ2_0_BLOCK_QS_SIZE = PQ2_0_BLOCK_SIZE / 4;
+constexpr size_t PQ2_0_BLOCK_BYTES = sizeof(uint16_t) + PQ2_0_BLOCK_QS_SIZE;
+#endif
+
 constexpr size_t MXFP4_BLOCK_SIZE = 32;
 constexpr size_t MXFP4_BLOCK_QS_SIZE = MXFP4_BLOCK_SIZE / 2;
 constexpr size_t MXFP4_BLOCK_BYTES = sizeof(uint8_t) + MXFP4_BLOCK_QS_SIZE;
@@ -88,6 +94,27 @@ void extract_mxfp4_data(const ggml_tensor * tensor, ov::Tensor & weights_arr, ov
         scales[i] = ov::float8_e8m0::from_bits(block[0]);
     });
 }
+
+#ifdef GGML_OPENVINO_HAS_PQ2_0
+// Extracts (weight, scales) from PQ2_0 tensors.
+// Data layout is: |16 bit scale|128 x 2bit codes|, code j at bits [2*(j%4), +1] of byte j/4.
+// OpenVINO packs u2 the same way, so the codes are copied as they are; they stay in the
+// {0,1,2} encoding and make_int2_weights subtracts the scalar zero point of 1.
+void extract_pq2_0_data(const ggml_tensor * tensor, ov::Tensor & weights_arr, ov::Tensor & scales_arr) {
+    GGML_ASSERT(tensor->type == GGML_TYPE_PQ2_0);
+    GGML_ASSERT(weights_arr.get_element_type() == ov::element::u2);
+
+    const auto * data = static_cast<const uint8_t *>(tensor->data);
+    auto * weights = static_cast<uint8_t *>(weights_arr.data());
+    auto * scales = scales_arr.data<ov::element_type_traits<ov::element::f16>::value_type>();
+
+    ov::parallel_for(scales_arr.get_size(), [&](size_t i) {
+        const uint8_t * block = data + i * PQ2_0_BLOCK_BYTES;
+        scales[i] = ov::float16::from_bits(*((const uint16_t *) block));
+        memcpy(weights + i * PQ2_0_BLOCK_QS_SIZE, block + sizeof(uint16_t), PQ2_0_BLOCK_QS_SIZE);
+    });
+}
+#endif
 
 // Extracts (weight, scales, zp) from Q4_0 tensors.
 // Data layout is: |16 bit scale|32 x 4bit weights|.
@@ -762,6 +789,41 @@ ov::Output<ov::Node> make_int4_weights(ov::Tensor & weight,
     return std::make_shared<ov::op::v0::Convert>(result, ov::element::f32);
 }
 
+// Builds the decompression chain for ternary u2 weights: (code - 1) * scale, grouped along
+// the last axis. The zero point is one scalar for the whole tensor, and it is emitted as an
+// f16 Constant rather than a Convert of an integer one, so it stays a constant for the
+// consumers that read it directly (the GPU plugin's ternary FullyConnected kernel).
+ov::Output<ov::Node> make_int2_weights(ov::Tensor & weight, ov::Tensor & scales, size_t group_size) {
+    const ov::Shape orig_weight_shape = weight.get_shape();
+    GGML_ASSERT(!orig_weight_shape.empty());
+    GGML_ASSERT(orig_weight_shape.back() % group_size == 0);
+
+    ov::Shape packed_shape = orig_weight_shape;
+    packed_shape.back() /= group_size;
+    packed_shape.push_back(group_size);
+
+    ov::Shape scale_shape = scales.get_shape();
+    scale_shape.push_back(1);
+    scales.set_shape(scale_shape);
+
+    auto weights_node =
+        std::make_shared<ov::op::v0::Constant>(ov::element::u2, packed_shape, weight.data(), nullptr);
+    weights_node->get_rt_info()["__gguf_tensor_holder"] = weight;
+    auto weights_f16 = std::make_shared<ov::op::v0::Convert>(weights_node, ov::element::f16);
+
+    auto zero_point = ov::op::v0::Constant::create(ov::element::f16, ov::Shape{}, {1.0f});
+    auto w_zp = std::make_shared<ov::op::v1::Subtract>(weights_f16, zero_point, ov::op::AutoBroadcastType::NUMPY);
+
+    auto scales_f16 = std::make_shared<ov::op::v0::Constant>(scales);
+    ov::Output<ov::Node> result =
+        std::make_shared<ov::op::v1::Multiply>(w_zp, scales_f16, ov::op::AutoBroadcastType::NUMPY);
+
+    auto final_shape = std::make_shared<ov::op::v0::Constant>(ov::element::i64, ov::Shape{orig_weight_shape.size()},
+                                                              orig_weight_shape);
+    result = std::make_shared<ov::op::v1::Reshape>(result, final_shape, false);
+    return std::make_shared<ov::op::v0::Convert>(result, ov::element::f32);
+}
+
 ov::Output<ov::Node> make_mxfp4_weights(ov::Tensor & weight, ov::Tensor & scales) {
     const ov::Shape final_shape = weight.get_shape();
     GGML_ASSERT(!final_shape.empty());
@@ -1070,6 +1132,15 @@ std::shared_ptr<ov::Node> extract_quantized_weights(const ggml_tensor * tensor,
         return result;
     }
 
+#ifdef GGML_OPENVINO_HAS_PQ2_0
+    if (tensor->type == GGML_TYPE_PQ2_0) {
+        extract_pq2_0_data(&temp_tensor, weights, scales);
+        auto result = make_int2_weights(weights, scales, PQ2_0_BLOCK_SIZE).get_node_shared_ptr();
+        result->set_friendly_name(tensor->name);
+        return result;
+    }
+#endif
+
     // Determine block size based on tensor type
     int64_t weights_per_block;
     bool is_u4;
@@ -1353,6 +1424,8 @@ OvWeight process_weight_tensor(const ggml_tensor * tensor, const void * data, vo
     ov::element::Type weight_type;
     if (tensor->type == GGML_TYPE_MXFP4) {
         weight_type = ov::element::f4e2m1;
+    } else if (layout.is_u2) {
+        weight_type = ov::element::u2;
     } else if (layout.is_symmetric) {
         weight_type = layout.is_u4 ? ov::element::i4 : ov::element::i8;
     } else {

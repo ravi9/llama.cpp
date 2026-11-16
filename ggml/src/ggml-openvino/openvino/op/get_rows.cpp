@@ -182,6 +182,7 @@ OutputVector translate_get_rows(const NodeContext & context) {
         // For a tied embedding the same weight also feeds the lm_head matmul. Gathering the
         // dequantized table would give that dequantization chain a second consumer, forcing the
         // full table to be materialized; gather the packed rows instead and dequantize those.
+        // The same holds for a u2 (ternary) table, which the plugins cannot gather compressed.
         if (auto compressed = gather_compressed_rows(data, indices)) {
             res = compressed;
         } else {
