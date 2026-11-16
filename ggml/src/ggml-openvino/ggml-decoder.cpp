@@ -1737,9 +1737,10 @@ void GgmlOvDecoder::add_extra_inputs() {
         }
         for (int i = 0; i < m_cgraph->n_nodes; ++i) {
             const auto concat = m_cgraph->nodes[i];
-            if (concat->op != GGML_OP_CONCAT || !concat->src[0] || concat->src[0]->op != GGML_OP_RESHAPE ||
-                !concat->src[0]->src[0] || concat->src[0]->src[0]->op != GGML_OP_VIEW ||
-                concat->src[0]->src[0]->src[0]->op != GGML_OP_GET_ROWS) {
+            // the gathered rows reach the concat through a VIEW of the active rows, or directly without extra rows
+            const auto rows = concat->src[0] ? concat->src[0]->src[0] : nullptr;
+            if (concat->op != GGML_OP_CONCAT || !concat->src[0] || concat->src[0]->op != GGML_OP_RESHAPE || !rows ||
+                !(rows->op == GGML_OP_GET_ROWS || (rows->op == GGML_OP_VIEW && rows->src[0]->op == GGML_OP_GET_ROWS))) {
                 continue;
             }
             std::vector<int64_t> values;
@@ -2219,7 +2220,11 @@ std::shared_ptr<ov::Node> GgmlOvDecoder::create_weight_node(ggml_tensor * tensor
     // GGML_LOG_DEBUG("%s: creating new weight node for %s\n", __func__, tensor->name);
     static const std::set<ggml_type> weight_types = {GGML_TYPE_F32,  GGML_TYPE_F16,  GGML_TYPE_BF16, GGML_TYPE_Q8_0,
                                                      GGML_TYPE_Q4_0, GGML_TYPE_Q4_1, GGML_TYPE_Q5_0, GGML_TYPE_Q5_1, GGML_TYPE_Q4_K,
-                                                     GGML_TYPE_Q5_K, GGML_TYPE_Q6_K, GGML_TYPE_MXFP4};
+                                                     GGML_TYPE_Q5_K, GGML_TYPE_Q6_K, GGML_TYPE_MXFP4,
+#ifdef GGML_OPENVINO_HAS_PQ2_0
+                                                     GGML_TYPE_PQ2_0,
+#endif
+    };
     if (weight_types.find(tensor->type) == weight_types.end()) {
         throw std::runtime_error("Unexpected weight tensor type: " + std::string(tensor->name) + " with type " +
                                  ggml_type_name(tensor->type));
@@ -2937,6 +2942,35 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
                     if (node->ne[i] == dynamic_dim_value) {
                         m_node_dynamic_dims[node] = i;
                         break;
+                    }
+                }
+                if (m_node_dynamic_dims[node] == -1) {
+                    // The reshape can also split or merge the dynamic axis, so its extent scales
+                    // and the stride match above finds nothing (the blockwise Hadamard rotation
+                    // reshapes [T, K] <-> [T * K / block, block]). Take the output axis that spans
+                    // the same elements: everything above it is static, and everything up to and
+                    // including it holds as many elements as in the source.
+                    int64_t src_below = 1;
+                    for (int i = 0; i < dynamic_dim_idx; i++) {
+                        src_below *= node->src[0]->ne[i];
+                    }
+                    int64_t src_above = 1;
+                    for (int i = dynamic_dim_idx + 1; i < GGML_MAX_DIMS; i++) {
+                        src_above *= node->src[0]->ne[i];
+                    }
+                    const int64_t src_upto = src_below * node->src[0]->ne[dynamic_dim_idx];
+
+                    int64_t dst_below = 1;
+                    for (int i = 0; i < GGML_MAX_DIMS; i++) {
+                        int64_t dst_above = 1;
+                        for (int j = i + 1; j < GGML_MAX_DIMS; j++) {
+                            dst_above *= node->ne[j];
+                        }
+                        if (dst_above == src_above && dst_below * node->ne[i] == src_upto) {
+                            m_node_dynamic_dims[node] = i;
+                            break;
+                        }
+                        dst_below *= node->ne[i];
                     }
                 }
                 if (m_node_dynamic_dims[node] == -1) {

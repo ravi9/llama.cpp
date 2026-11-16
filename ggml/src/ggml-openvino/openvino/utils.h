@@ -62,12 +62,13 @@ std::pair<ov::Output<Node>, ov::Output<Node>> make_sin_cos(int32_t * rope_params
                                                            bool stateful = false,
                                                            int64_t head_dim = 0);
 
-// If `weights` is a dequantization chain emitted by make_int4_weights/make_int8_weights, rebuild
+// If `weights` is a dequantization chain emitted by make_int{2,4,8}_weights, rebuild
 // it with `indices` gathered out of the leaf Constants, so a row lookup reads the packed rows and
 // dequantizes only those. Returns nullptr if the subgraph is not such a chain, or is too small to
 // be worth the rewrite. Used for tied embeddings, where the same weight also feeds the lm_head
 // matmul: gathering the dequantized table would give that chain a second consumer and force it to
-// be materialized in full.
+// be materialized in full. Also used for ternary u2 tables, which no plugin gathers compressed,
+// so a plain Gather would fold the whole table to f16 at compile time.
 std::shared_ptr<ov::Node> gather_compressed_rows(const ov::Output<ov::Node> & weights,
                                                  const ov::Output<ov::Node> & indices);
 

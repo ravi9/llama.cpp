@@ -319,6 +319,7 @@ struct ggml_openvino_extracted_layout {
     size_t zp_offset = 0;       // Offset to zero points in buffer
     size_t zp_size = 0;         // Size of zero points in bytes (U4 or U8)
     bool is_u4;                 // true for U4 weights, false for U8
+    bool is_u2 = false;         // true for ternary U2 weights (PQ2_0); is_u4 is then false
     int64_t weights_per_block;  // weights per scale/zp block
     bool is_symmetric;          // true for symmetric quantization
 

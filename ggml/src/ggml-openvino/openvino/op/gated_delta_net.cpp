@@ -36,8 +36,8 @@
 #include <openvino/op/shape_of.hpp>
 #include <openvino/op/slice.hpp>
 #include <openvino/op/split.hpp>
-#include <openvino/op/sqrt.hpp>
 #include <openvino/op/squeeze.hpp>
+#include <openvino/op/sqrt.hpp>
 #include <openvino/op/subtract.hpp>
 #include <openvino/op/tile.hpp>
 #include <openvino/op/transpose.hpp>
@@ -51,6 +51,37 @@ namespace ggml {
 namespace op {
 
 static OutputVector translate_gated_delta_net_ref(const NodeContext & context);
+
+// A VIEW input is a pass-through on this path, so consumers must re-slice it. Dense qwen35
+// l2-normalizes q and k as one joint [2 * H_k] tensor and passes both as views into the
+// result, so they arrive at the joint width and need a slice on the head axis. Models that
+// normalize q and k apart (qwen35moe, qwen3next) already arrive at the declared width.
+static Output<Node> slice_joint_head_view(const NodeContext & context, int index, const Output<Node> & x) {
+    const auto declared = context.get_input_shape(index);
+    const auto & actual = x.get_partial_shape();
+    if (declared.rank() != 4 || actual.rank() != 4 || declared[2].is_dynamic() || actual[2].is_dynamic()) {
+        return x;
+    }
+    const int64_t n_head = declared[2].get_length();
+    if (n_head == actual[2].get_length()) {
+        return x;
+    }
+
+    const auto stride = context.get_input_stride(index);  // reversed ggml nb, so [2] is nb[1]
+    const auto * op_params = (const size_t *) context.get_input_op_params(index);
+    const size_t head_stride = stride[2];
+    FRONT_END_OP_CONVERSION_CHECK(head_stride > 0 && op_params[0] % head_stride == 0,
+                                  "GATED_DELTA_NET: joint q/k view offset is not head aligned");
+    const int64_t begin = static_cast<int64_t>(op_params[0] / head_stride);
+    FRONT_END_OP_CONVERSION_CHECK(begin + n_head <= actual[2].get_length(),
+                                  "GATED_DELTA_NET: joint q/k view runs past the head axis");
+
+    return std::make_shared<ov::op::v8::Slice>(
+        x, ov::op::v0::Constant::create(ov::element::i64, {1}, {begin}),
+        ov::op::v0::Constant::create(ov::element::i64, {1}, {begin + n_head}),
+        ov::op::v0::Constant::create(ov::element::i64, {1}, {1}),
+        ov::op::v0::Constant::create(ov::element::i64, {1}, {2}));
+}
 
 static bool match_gdn_l2_norm(const Output<Node> & normalized, Output<Node> & input, float & eps) {
     // Match the RMSNorm decomposition emitted by translate_rms_norm, followed by GGML SCALE.
@@ -393,8 +424,8 @@ static OutputVector translate_gdn(const NodeContext & context, const OutputVecto
     const int64_t snapshot_count = context.get_output_op_params()[0];
     // const int64_t S_k = q_shape[3];
 
-    auto q = context.get_input(0);
-    auto k = context.get_input(1);
+    auto q = slice_joint_head_view(context, 0, context.get_input(0));
+    auto k = slice_joint_head_view(context, 1, context.get_input(1));
     auto v = process_view_input(context, 2, H_v * S_v, 3);
     auto g = context.get_input(3);
     auto beta = context.get_input(4);
