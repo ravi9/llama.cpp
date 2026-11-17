@@ -2514,6 +2514,11 @@ struct test_get_rows : public test_case {
     test_get_rows(ggml_type type = GGML_TYPE_F32, int n = 10, int m = 5, int r = 3, int be1 = 1, int be2 = 1, bool v = false, bool vs0 = false, int offset_cols = 0)
         : type(type), n(n), m(m), r(r), be1(be1), be2(be2), v(v), vs0(vs0), offset_cols(offset_cols) {}
 
+    double max_nmse_err() override {
+        // Quantized rows are compared after separate ggml and OpenVINO dequantization paths.
+        return ggml_is_quantized(type) ? 1e-6 : 1e-7;
+    }
+
     ggml_tensor * build_graph(ggml_context * ctx) override {
         ggml_tensor * in;
         if (vs0) {
@@ -3792,6 +3797,11 @@ struct test_scale : public test_case {
             bool inplace = false,
             int v = 0)
         : type(type), ne(ne), scale(scale), bias(bias), inplace(inplace), v(v) {}
+
+    double max_nmse_err() override {
+        // BF16 multiply/add rounding can differ slightly across backend implementations.
+        return type == GGML_TYPE_BF16 ? 1e-6 : 1e-7;
+    }
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         auto ne_a = ne;

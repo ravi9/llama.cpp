@@ -1622,8 +1622,13 @@ void GgmlOvDecoder::compute_model_outputs() {
         auto cur_node_use_count = m_cgraph->use_counts[ggml_hash_find(&m_cgraph->visited_hash_set, cur_node)];
         if (cur_node_use_count == 0) {
             // The output of in-place ops is the view_src tensor, which is updated in place. We should use the view_src name as the output name to make sure it can be correctly matched with the later ops that use the view_src.
-            if (cur_node != nullptr && ::is_inplace_op(cur_node) && !(m_naive && cur_node->op == GGML_OP_CPY) &&
-                (ggml_nbytes(cur_node) > 0 || runtime_recurrent_write)) {
+            // A terminal in-place SCALE on a leaf VIEW must expose its translated view result.
+            const bool external_scale_view = cur_node != nullptr && cur_node->op == GGML_OP_SCALE &&
+                                             cur_node->src[0] != nullptr && cur_node->src[0]->op == GGML_OP_VIEW &&
+                                             std::find(m_cgraph->nodes, m_cgraph->nodes + m_cgraph->n_nodes,
+                                                       cur_node->src[0]) == m_cgraph->nodes + m_cgraph->n_nodes;
+            if (cur_node != nullptr && ::is_inplace_op(cur_node) && !external_scale_view &&
+                !(m_naive && cur_node->op == GGML_OP_CPY) && (ggml_nbytes(cur_node) > 0 || runtime_recurrent_write)) {
                 cur_node = cur_node->view_src;
             }
         } else {
@@ -2331,8 +2336,12 @@ ov::Any GgmlOvDecoder::get_attribute(const std::string & name) const {
         }
 
         case GGML_OP_SCALE:
-            if (name == "cache_reset")
+            if (name == "inplace") {
+                return node->view_src != nullptr;
+            }
+            if (name == "cache_reset") {
                 return op_case == 1 && m_model_inputs.count("cache_rs_reset_idx");
+            }
             if (name == "axis" && op_case == 1 && m_model_inputs.count("cache_rs_reset_idx")) return int64_t{2};
             if (name == "scale") return op_param_float(node, 0);
             if (name == "bias") return op_param_float(node, 1);
