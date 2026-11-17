@@ -45,8 +45,13 @@
 #    include <windows.h>
 #    include <psapi.h>
 #else
+#    include <fcntl.h>
 #    include <sys/mman.h>
 #    include <unistd.h>
+#    ifdef __linux__
+#        include <linux/magic.h>
+#        include <sys/vfs.h>
+#    endif
 #endif
 
 // =====================================================
@@ -67,6 +72,29 @@
 // =====================================================
 
 namespace {
+#ifndef _WIN32
+// Directory for a file-backed host buffer, or nullptr for anonymous memory. GGML_OPENVINO_SPILL_DIR if set, else on
+// GPU under Linux $TMPDIR or /var/tmp if it is writable, not tmpfs or ramfs, and has free space for size + 1 GiB.
+const char * ggml_openvino_spill_dir(size_t size) {
+    if (ggml_openvino_model_cache_only()) {
+        return nullptr;
+    }
+    const char * dir = ggml_openvino_getenv_str("GGML_OPENVINO_SPILL_DIR");
+#    ifdef __linux__
+    const char * candidates[] = { getenv("TMPDIR"), "/var/tmp" };
+    for (const char * d : candidates) {
+        struct statfs fs;
+        if (dir == nullptr && ggml_openvino_is_gpu() && d != nullptr && d[0] != '\0' && access(d, W_OK) == 0 &&
+            statfs(d, &fs) == 0 && fs.f_type != TMPFS_MAGIC && fs.f_type != RAMFS_MAGIC &&
+            (uint64_t) fs.f_bavail * fs.f_bsize >= size + (1ull << 30)) {
+            dir = d;
+        }
+    }
+#    endif
+    return dir;
+}
+#endif
+
 // Buffer context that manages per-tensor allocations (no contiguous buffer for weights)
 struct ggml_backend_openvino_buffer_context {
     int device;
@@ -174,8 +202,7 @@ struct ggml_backend_openvino_buffer_context {
                 // backed by the Level Zero host tensor above
             } else
 #ifndef _WIN32
-            if (const char * spill_dir =
-                    ggml_openvino_model_cache_only() ? nullptr : ggml_openvino_getenv_str("GGML_OPENVINO_SPILL_DIR")) {
+            if (const char * spill_dir = ggml_openvino_spill_dir(size)) {
                 // Disk-backed weight buffer: back the repacked weights with a temp file via MAP_SHARED
                 // instead of anonymous memory. Anonymous pages can only be evicted to swap, so the
                 // repacked buffer stays pinned alongside the mmap'd source and both are resident at once
@@ -194,8 +221,9 @@ struct ggml_backend_openvino_buffer_context {
                     return;
                 }
                 unlink(path);  // anonymous-but-file-backed: freed on process exit
-                if (ftruncate(fd, (off_t) size) != 0) {
-                    GGML_LOG_ERROR("%s: ftruncate(%zu) failed: %s\n", __func__, size, strerror(errno));
+                // Reserve the disk space, so that a full disk fails here and not with SIGBUS on a later page write.
+                if (int err = posix_fallocate(fd, 0, (off_t) size)) {
+                    GGML_LOG_ERROR("%s: posix_fallocate(%zu) failed: %s\n", __func__, size, strerror(err));
                     close(fd);
                     return;
                 }
