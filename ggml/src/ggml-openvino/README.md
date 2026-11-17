@@ -1,3 +1,16 @@
+# Per-operation graph boundaries
+
+The supplied GGUF decoder includes VIEW, RESHAPE, PERMUTE and TRANSPOSE inputs
+omitted by per-operation graph views. Quantized VIEW strides and offsets describe
+the decoded F32 weight layout. CPY returns its logical destination in this path;
+writeback honors destination strides and preserves storage outside the view.
+Full model graphs continue to expose updated in-place storage as their output.
+
+Quantized CPY destinations and conversions to BF16 from other types are not
+offloaded: the former require quantized writeback and the latter require
+round-to-nearest-even conversion. Quantized inputs with a non-unit fourth
+dimension are also unsupported by the weight extraction path.
+
 # Qwen MTP
 
 The default Qwen3.5/Qwen3.6 GPU path is dynamic stateless execution with in-place fused recurrent ops and stable MTP sampling. Build against the matching OpenVINO runtime/GPU plugin with independent `RecurrentConvCacheUpdate` and `RecurrentGatedDeltaNetUpdate` ops. The native Update ops return computation results and update writable cache inputs in place, including rollback snapshots where required. No recurrent/sampling opt-in flag is needed on supported graphs. See the [development documentation index](dev_doc/README.md) for the implementation and the MTP sampling graph.
@@ -19,8 +32,8 @@ Build both repos against the matching single-output op spec. Translation revisio
 
 Cache-only MTP serving still requires the separate OpenVINO dynamic output-binding fix (PR #39354). Removing recurrent cache Results does not eliminate that independent trigger in imported MTP graphs.
 
-Set `GGML_OPENVINO_ENABLE_KV_4D=1` to enable the upstream stateless in-place
-attention KV update pattern where eligible. It binds full-capacity cache tensors
+The upstream stateless in-place attention KV update pattern is on by default where
+eligible (`GGML_OPENVINO_ENABLE_KV_4D=0` disables it). It binds full-capacity cache tensors
 and lets the GPU fusion expose the live prefix to attention. The current upstream
 eligibility check supports one physical stream (including unified KV); explicit
 split multi-slot KV retains the ordinary full-cache path. This option does not
@@ -62,7 +75,7 @@ GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY=1 \
 
 Cache-only mode allocates backend address space without filling weight pages. On Windows, this also uses system commit capacity. The model-buffer size in the loader log is this virtual size. Weight uploads only record source identity; they do not read or requantize the weights. Graph conversion and compilation are skipped. Runtime buffers are still allocated and populated normally.
 
-Cache-only mode uses the settings provided by the current process. Keep these values exactly the same, including set versus unset: `GGML_OPENVINO_REQUANT_KQUANT`, `GGML_OPENVINO_EXACT_ZERO_POINT`, `GGML_OPENVINO_NATIVE_SOFTPLUS`, `GGML_OPENVINO_MANUAL_GQA_ATTN`, `GGML_OPENVINO_STATEFUL_EXECUTION`, `GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT`, `GGML_OPENVINO_DISABLE_REMOTE_OUTPUTS`, `GGML_OPENVINO_REDUCE_COMPILE_MEM`, `GGML_OPENVINO_MEMORY_OPTIMIZE`, `GGML_OPENVINO_PROFILING`, `GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK`, and `GGML_OPENVINO_DEBUG_NODE`, `GGML_OPENVINO_ENABLE_KV_4D`, and `GGML_OPENVINO_DISABLE_FUSED_RECURRENCE`. On GPU, also repeat `GGML_OPENVINO_MOE_OP=0` if used. `GGML_OPENVINO_SPILL_DIR` is optional on the first run and ignored in cache-only mode; host-weight release is disabled in cache-only mode.
+Cache-only mode uses the settings provided by the current process. Keep these values exactly the same, including set versus unset: `GGML_OPENVINO_REQUANT_KQUANT`, `GGML_OPENVINO_EXACT_ZERO_POINT`, `GGML_OPENVINO_NATIVE_SOFTPLUS`, `GGML_OPENVINO_MANUAL_GQA_ATTN`, `GGML_OPENVINO_STATEFUL_EXECUTION`, `GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT`, `GGML_OPENVINO_DISABLE_REMOTE_OUTPUTS`, `GGML_OPENVINO_REDUCE_COMPILE_MEM`, `GGML_OPENVINO_MEMORY_OPTIMIZE`, `GGML_OPENVINO_PROFILING`, `GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK`, and `GGML_OPENVINO_DEBUG_NODE`, `GGML_OPENVINO_ENABLE_KV_4D`, and `GGML_OPENVINO_DISABLE_SCALE_REORDER`. On GPU, also repeat `GGML_OPENVINO_MOE_OP=0` if used. `GGML_OPENVINO_SPILL_DIR` is optional on the first run and ignored in cache-only mode; host-weight release is disabled in cache-only mode.
 
 `GGML_OPENVINO_KV_SLICE` is a runtime binding option for dynamic graphs and can differ between cache population and cache-only runs. The same dynamic compiled graph accepts full-capacity and live-prefix attention K/V tensors. Slicing is enabled by default for contiguous ordinary K/V roots with one allocated stream, one active sequence at offset zero, and no sliding-window attention. Recurrent convolution/GDN caches and their rollback snapshots always retain their full stored row bank. Other layouts use full bindings. Repopulate caches made before this option was removed from the fingerprint once without cache-only mode.
 

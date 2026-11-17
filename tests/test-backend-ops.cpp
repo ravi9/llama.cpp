@@ -2514,6 +2514,11 @@ struct test_get_rows : public test_case {
     test_get_rows(ggml_type type = GGML_TYPE_F32, int n = 10, int m = 5, int r = 3, int be1 = 1, int be2 = 1, bool v = false, bool vs0 = false, int offset_cols = 0)
         : type(type), n(n), m(m), r(r), be1(be1), be2(be2), v(v), vs0(vs0), offset_cols(offset_cols) {}
 
+    double max_nmse_err() override {
+        // Quantized rows are compared after separate ggml and OpenVINO dequantization paths.
+        return ggml_is_quantized(type) ? 1e-6 : 1e-7;
+    }
+
     ggml_tensor * build_graph(ggml_context * ctx) override {
         ggml_tensor * in;
         if (vs0) {
@@ -3385,6 +3390,7 @@ struct test_cpy : public test_case {
     const std::array<int64_t, 4> permute_src;
     const std::array<int64_t, 4> permute_dst;
     const std::array<int64_t, 4> dst_alloc; // if set, dst is a view into a larger buffer (strided)
+    const int64_t dst_offset;
     bool _src_use_permute;
     bool _dst_use_permute;
     bool _src_transpose;
@@ -3392,6 +3398,9 @@ struct test_cpy : public test_case {
     bool _use_dst_alloc;
 
     std::string vars() override {
+        if (dst_offset > 0) {
+            return VARS_TO_STR7(type_src, type_dst, ne_src, permute_src, permute_dst, _src_transpose, dst_offset);
+        }
         if (_use_dst_alloc) {
             return VARS_TO_STR8(type_src, type_dst, ne_src, ne_dst, permute_src, permute_dst, _src_transpose, dst_alloc);
         }
@@ -3443,9 +3452,10 @@ struct test_cpy : public test_case {
             std::array<int64_t, 4> permute_src = {0, 0, 0, 0},
             std::array<int64_t, 4> permute_dst = {0, 0, 0, 0},
             bool transpose_src = false,
-            std::array<int64_t, 4> dst_alloc = {0, 0, 0, 0})
+            std::array<int64_t, 4> dst_alloc = {0, 0, 0, 0},
+            int64_t dst_offset = 0)
         : type_src(type_src), type_dst(type_dst), ne_src(ne_src), ne_dst(ne_dst), permute_src(permute_src), permute_dst(permute_dst),
-          dst_alloc(dst_alloc),
+          dst_alloc(dst_alloc), dst_offset(dst_offset),
           _src_use_permute(permute_src[0] + permute_src[1] + permute_src[2] + permute_src[3] > 0),
           _dst_use_permute(permute_dst[0] + permute_dst[1] + permute_dst[2] + permute_dst[3] > 0),
           _src_transpose(transpose_src),
@@ -3470,7 +3480,15 @@ struct test_cpy : public test_case {
         std::array<int64_t, 4> dst_ne = _use_dst_shape ? ne_dst : std::array<int64_t, 4>{src->ne[0], src->ne[1], src->ne[2], src->ne[3]};
         ggml_tensor * dst;
 
-        if (_use_dst_alloc) {
+        if (dst_offset > 0) {
+            ggml_tensor * dst_buf = ggml_new_tensor_1d(ctx, type_dst, ggml_nelements(src) + dst_offset + 3);
+            ggml_set_name(dst_buf, "dst_buf");
+            const auto row_bytes = ggml_row_size(type_dst, dst_ne[0]);
+            dst = ggml_view_4d(ctx, dst_buf, dst_ne[0], dst_ne[1], dst_ne[2], dst_ne[3],
+                row_bytes, row_bytes * dst_ne[1], row_bytes * dst_ne[1] * dst_ne[2],
+                ggml_row_size(type_dst, dst_offset));
+            ggml_set_name(dst, "dst_offset_view");
+        } else if (_use_dst_alloc) {
             // view a sub-block of a larger buffer -> strided dst
             ggml_tensor * dst_buf = ggml_new_tensor(ctx, type_dst, 4, dst_alloc.data());
             ggml_set_name(dst_buf, "dst_buf");
@@ -3779,6 +3797,11 @@ struct test_scale : public test_case {
             bool inplace = false,
             int v = 0)
         : type(type), ne(ne), scale(scale), bias(bias), inplace(inplace), v(v) {}
+
+    double max_nmse_err() override {
+        // BF16 multiply/add rounding can differ slightly across backend implementations.
+        return type == GGML_TYPE_BF16 ? 1e-6 : 1e-7;
+    }
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         auto ne_a = ne;
@@ -11296,6 +11319,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_set(GGML_TYPE_I32, GGML_TYPE_I32, {6, 5, 4, 3}, dim, false));
         test_cases.emplace_back(new test_set(GGML_TYPE_I32, GGML_TYPE_I32, {6, 5, 4, 3}, dim, true));
     }
+
+    test_cases.emplace_back(new test_cpy(GGML_TYPE_F32, GGML_TYPE_F32, {2, 3, 1, 1},
+        {-1, -1, -1, -1}, {0, 0, 0, 0}, {0, 0, 0, 0}, false, {0, 0, 0, 0}, 3));
+    test_cases.emplace_back(new test_cpy(GGML_TYPE_F32, GGML_TYPE_F32, {2, 3, 1, 1},
+        {-1, -1, -1, -1}, {1, 0, 2, 3}, {0, 0, 0, 0}, false, {0, 0, 0, 0}, 8));
 
     // same-type copy
     for (ggml_type type : all_types) {
