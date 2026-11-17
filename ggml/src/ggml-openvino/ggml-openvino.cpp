@@ -45,8 +45,13 @@
 #    include <windows.h>
 #    include <psapi.h>
 #else
+#    include <fcntl.h>
 #    include <sys/mman.h>
 #    include <unistd.h>
+#    ifdef __linux__
+#        include <linux/magic.h>
+#        include <sys/vfs.h>
+#    endif
 #endif
 
 // =====================================================
@@ -67,6 +72,59 @@
 // =====================================================
 
 namespace {
+#ifndef _WIN32
+// Back a host buffer with an unlinked temp file mapped MAP_SHARED, or return nullptr.
+// Anonymous pages can only go to swap. File-backed pages are reclaimable: under memory pressure the kernel
+// writes them back and drops them, then reads them again on demand. The file is freed when the process exits.
+// The directory is GGML_OPENVINO_SPILL_DIR, or on GPU by default $TMPDIR or /var/tmp if it is on disk.
+void * ggml_openvino_spill_alloc(size_t size) {
+    if (ggml_openvino_model_cache_only()) {
+        return nullptr;
+    }
+    const char * dir = ggml_openvino_getenv_str("GGML_OPENVINO_SPILL_DIR");
+#    ifdef __linux__
+    if (dir == nullptr && ggml_openvino_is_gpu()) {
+        const char * candidates[] = { getenv("TMPDIR"), "/var/tmp" };
+        for (const char * d : candidates) {
+            struct statfs fs;
+            // tmpfs and ramfs keep the file in RAM, which does not help. Keep 1 GiB free for the system.
+            if (d != nullptr && d[0] != '\0' && statfs(d, &fs) == 0 && fs.f_type != TMPFS_MAGIC &&
+                fs.f_type != RAMFS_MAGIC && (uint64_t) fs.f_bavail * fs.f_bsize >= size + (1ull << 30)) {
+                dir = d;
+                break;
+            }
+        }
+    }
+#    endif
+    if (dir == nullptr) {
+        return nullptr;
+    }
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/ggml-ov-weights-%d-XXXXXX", dir, (int) getpid());
+    int fd = mkstemp(path);
+    if (fd < 0) {
+        GGML_LOG_WARN("%s: mkstemp(%s) failed: %s\n", __func__, path, strerror(errno));
+        return nullptr;
+    }
+    unlink(path);
+    // Reserve the disk space now, so that a full disk fails here and not with SIGBUS on a later page write.
+    int err = posix_fallocate(fd, 0, (off_t) size);
+    if (err != 0) {
+        GGML_LOG_WARN("%s: posix_fallocate(%zu) in %s failed: %s\n", __func__, size, dir, strerror(err));
+        close(fd);
+        return nullptr;
+    }
+    void * m = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (m == MAP_FAILED) {
+        GGML_LOG_WARN("%s: mmap(%zu) failed: %s\n", __func__, size, strerror(errno));
+        return nullptr;
+    }
+    GGML_LOG_INFO("%s: host buffer backed by a file in %s (%zu MB)\n", __func__, dir, size / 1024 / 1024);
+    return m;
+}
+#endif
+
 // Buffer context that manages per-tensor allocations (no contiguous buffer for weights)
 struct ggml_backend_openvino_buffer_context {
     int device;
@@ -174,42 +232,9 @@ struct ggml_backend_openvino_buffer_context {
                 // backed by the Level Zero host tensor above
             } else
 #ifndef _WIN32
-            if (const char * spill_dir =
-                    ggml_openvino_model_cache_only() ? nullptr : ggml_openvino_getenv_str("GGML_OPENVINO_SPILL_DIR")) {
-                // Disk-backed weight buffer: back the repacked weights with a temp file via MAP_SHARED
-                // instead of anonymous memory. Anonymous pages can only be evicted to swap, so the
-                // repacked buffer stays pinned alongside the mmap'd source and both are resident at once
-                // -- that double residency is the load-time peak. File-backed pages are reclaimable: the
-                // kernel can write them back and drop them under pressure, then re-read on demand, so RSS
-                // becomes a working set rather than the whole buffer. The file is unlinked immediately,
-                // so it disappears when the process exits.
-                //
-                // The directory must be real storage. Pointing this at a tmpfs mount (/tmp on many
-                // systems) backs the "spill" with RAM and makes matters worse.
-                char path[PATH_MAX];
-                snprintf(path, sizeof(path), "%s/ggml-ov-weights-%d-XXXXXX", spill_dir, (int) getpid());
-                int fd = mkstemp(path);
-                if (fd < 0) {
-                    GGML_LOG_ERROR("%s: mkstemp(%s) failed: %s\n", __func__, path, strerror(errno));
-                    return;
-                }
-                unlink(path);  // anonymous-but-file-backed: freed on process exit
-                if (ftruncate(fd, (off_t) size) != 0) {
-                    GGML_LOG_ERROR("%s: ftruncate(%zu) failed: %s\n", __func__, size, strerror(errno));
-                    close(fd);
-                    return;
-                }
-                void * m = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-                close(fd);  // the mapping keeps the file alive
-                if (m == MAP_FAILED) {
-                    GGML_LOG_ERROR("%s: mmap(%zu) failed: %s\n", __func__, size, strerror(errno));
-                    return;
-                }
-                data = m;
-                spill_mapping = m;
+            if ((data = ggml_openvino_spill_alloc(size)) != nullptr) {
+                spill_mapping = data;
                 spill_size = size;
-                GGML_LOG_INFO("%s: weight buffer spilled to %s (%zu MB, file-backed)\n", __func__, spill_dir,
-                              size / 1024 / 1024);
                 ov_buffer = std::make_shared<ov::Tensor>(ov::element::u8, ov::Shape{size}, data);
             } else
 #endif
