@@ -261,6 +261,7 @@ static std::string compiled_graph_key(const ggml_cgraph * graph,
     append_string(device);
     append(decoder.is_static());
     append(decoder.is_stateful());
+    append(decoder.get_model_params().per_stream);
     append(prefill_chunk_size);
     append(ggml_openvino_npu_hfa_prefill_enabled());
     bool has_weight_buffer_id = false;
@@ -347,6 +348,7 @@ static std::string dynamic_graph_signature(const ggml_cgraph * graph,
     append(params.has_rs_rollback);
     append(params.mixed_rope_params);
     append(params.is_cacheless_attn);
+    append(params.per_stream);
     for (int layer : params.swa_layers) {
         append(layer);
     }
@@ -1172,6 +1174,385 @@ bool needs_bind(GgmlOvDecoder::ov_port_binding & b, const ov::Tensor & t, uint64
     return true;
 }
 
+const ggml_tensor * view_root(const ggml_tensor * t) {
+    while (t != nullptr && (t->view_src != nullptr || t->op == GGML_OP_RESHAPE)) {
+        t = t->view_src != nullptr ? t->view_src : t->src[0];
+    }
+    return t;
+}
+
+// The ubatch inputs that ov_infer_per_stream cuts per stream: token ids and positions [n_tokens], per token rows
+// [n, n_tokens], KQ masks [n_kv, n_tokens / n_streams, 1, n_streams], KV write indices and output ids
+enum class stream_input { tokens, rows, mask, kv_idx, out_ids };
+using stream_inputs = std::map<const ggml_tensor *, stream_input>;
+
+// A split KV cache graph (n_seq > 1) of a plain attention model, whose ubatch inputs are all laid out stream after
+// stream (llama_batch_allocr::split_equal). Returns the kind of each ubatch input, or nothing if the graph does not
+// qualify
+std::optional<stream_inputs> get_stream_inputs(const ggml_cgraph * cgraph, const ModelParams & m_params) {
+    // on GPU every KV cache has to take the 4-D layout (see GgmlOvDecoder::is_kvcache_4d)
+    if (m_params.n_seq <= 1 || m_params.n_rs_slots > 1 || m_params.is_cacheless_attn || m_params.v_trans ||
+        (ggml_openvino_is_gpu() && m_params.softcap_attn)) {
+        return std::nullopt;
+    }
+    stream_inputs inputs;
+    for (int i = 0; i < cgraph->n_nodes; i++) {
+        const auto * node = cgraph->nodes[i];
+        if (node->op == GGML_OP_SET_ROWS && view_root(node->src[2])->ne[2] != m_params.n_seq) {
+            return std::nullopt;
+        }
+        // unselected ggml_build_forward_select() branches (backend sampling) have outputs that are not per token rows
+        if (node->op != GGML_OP_NONE && !(node->flags & GGML_TENSOR_FLAG_COMPUTE)) {
+            return std::nullopt;
+        }
+        for (const auto * src : node->src) {
+            if (src == nullptr || !(src->flags & GGML_TENSOR_FLAG_INPUT)) {
+                continue;
+            }
+            std::optional<stream_input> kind;
+            if (GgmlOvDecoder::is_inp_mask(src, node) || strstr(src->name, "kq_mask") != nullptr) {
+                kind = stream_input::mask;
+            } else if (GgmlOvDecoder::is_kv_idx(src, node)) {
+                kind = stream_input::kv_idx;
+            } else if (GgmlOvDecoder::is_output_idx(src, node)) {
+                kind = stream_input::out_ids;
+            } else if (GgmlOvDecoder::is_inp_tok(src, node) || GgmlOvDecoder::is_inp_pos(src, node)) {
+                // IMROPE/VISION positions carry several planes per token
+                if (node->op == GGML_OP_ROPE && GgmlOvDecoder::get_inp_pos_n_planes(node) != 1) {
+                    return std::nullopt;
+                }
+                kind = stream_input::tokens;
+            } else if (strcmp(src->name, "inp_embd") == 0 || strcmp(src->name, "inp_scale_rows") == 0) {
+                kind = stream_input::rows;
+            }
+            if (!kind.has_value()) {
+                return std::nullopt;
+            }
+            auto it = inputs.emplace(src, *kind).first;
+            if (it->second != *kind) {
+                return std::nullopt;
+            }
+        }
+    }
+    int64_t n_tokens = -1;
+    for (const auto & [t, kind] : inputs) {
+        if (kind == stream_input::mask) {
+            if (t->ne[2] != 1 || (n_tokens != -1 && n_tokens != t->ne[1] * t->ne[3])) {
+                return std::nullopt;
+            }
+            n_tokens = t->ne[1] * t->ne[3];
+        }
+    }
+    if (n_tokens <= 0) {
+        return std::nullopt;
+    }
+    for (const auto & [t, kind] : inputs) {
+        bool ok = true;
+        switch (kind) {
+            case stream_input::tokens:
+            case stream_input::kv_idx:
+                ok = ggml_is_vector(t) && t->ne[0] == n_tokens;
+                break;
+            case stream_input::rows:
+                ok = t->ne[1] == n_tokens && t->ne[2] == 1 && t->ne[3] == 1;
+                break;
+            case stream_input::out_ids:
+                ok = ggml_is_vector(t);
+                break;
+            case stream_input::mask:
+                break;
+        }
+        if (!ok) {
+            return std::nullopt;
+        }
+    }
+    return inputs;
+}
+
+// The GPU plugin fails to write a ScatterUpdate output into a stream slab that does not start a ggml tensor
+// ("The allocated input memory is necessary to set kernel arguments"), so on GPU every KV cache has to take the 4-D
+// layout, which is updated in place
+bool per_stream_layout_supported(const GgmlOvDecoder & decoder) {
+    if (!ggml_openvino_is_gpu()) {
+        return true;
+    }
+    for (const auto & input : decoder.get_model_inputs()) {
+        const auto * t = decoder.get_input_ggml_tensor(input.first);
+        if (GgmlOvDecoder::is_kvcache(t, nullptr) && !decoder.is_kvcache_4d_input(t)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// ov_infer_per_stream cuts each output that is not a KV cache into the rows of the stream's outputs. With output ids,
+// only the tensors computed from them have one row per output (not intermediate outputs such as MoE tensors)
+bool per_stream_outputs_supported(const ggml_cgraph * cgraph,
+                                  const GgmlOvDecoder & decoder,
+                                  const stream_inputs & ubatch_inputs) {
+    const ggml_tensor * out_ids = nullptr;
+    int64_t n_tokens = 0;
+    for (const auto & [t, kind] : ubatch_inputs) {
+        if (kind == stream_input::out_ids) {
+            out_ids = t;
+        } else if (kind == stream_input::mask) {
+            n_tokens = t->ne[1] * t->ne[3];
+        }
+    }
+    std::set<const ggml_tensor *> per_output;
+    if (out_ids != nullptr) {
+        per_output.insert(out_ids);
+        for (int i = 0; i < cgraph->n_nodes; i++) {
+            const auto * node = cgraph->nodes[i];
+            for (const auto * src : node->src) {
+                if (src != nullptr && per_output.count(src) != 0) {
+                    per_output.insert(node);
+                    break;
+                }
+            }
+        }
+    }
+    for (const auto & [name, t] : decoder.get_model_outputs()) {
+        if (GgmlOvDecoder::is_kvcache(t, nullptr)) {
+            continue;
+        }
+        const bool rows_ok = out_ids != nullptr ? per_output.count(t) != 0 : t->ne[1] == n_tokens;
+        if (t->ne[2] != 1 || t->ne[3] != 1 || !rows_ok) {
+            return false;
+        }
+    }
+    return true;
+}
+
+ov::Tensor host_or_remote_tensor(const GgmlOvDecoder & decoder, const ggml_tensor * t, const ov::element::Type & type,
+                                 const ov::Shape & shape, void * data) {
+    if (ggml_openvino_buffer_is_remote(t)) {
+        auto gpu_context = ggml_openvino_get_remote_context(decoder.device)->as<ov::intel_gpu::ocl::ClContext>();
+        return gpu_context.create_tensor(type, shape, data);
+    }
+    return ov::Tensor(type, shape, data);
+}
+
+// The slab of `stream` in a split KV cache [emb, ctx, n_seq], in the layout the per stream model takes: 4-D for
+// GgmlOvDecoder::is_kvcache_4d, otherwise [1, 1, rows, emb] with rows cut to the attended length when possible
+ov::Tensor stream_kv_tensor(const std::shared_ptr<GgmlOvDecoder> & decoder, const ggml_tensor * cache, int stream) {
+    const auto type = GgmlOvDecoder::get_ov_type(cache);
+    const size_t ctx = static_cast<size_t>(cache->ne[1]);
+    ov::Shape shape{1, 1, ctx, static_cast<size_t>(cache->ne[0])};
+    if (decoder->is_kvcache_4d_input(cache)) {
+        const size_t n_heads_kv = static_cast<size_t>(decoder->get_n_heads_kv_for_tensor(cache));
+        shape = {1, ctx, n_heads_kv, static_cast<size_t>(cache->ne[0]) / n_heads_kv};
+    } else if (ggml_openvino_kv_slice_enabled()) {
+        const auto layer = extract_layer_from_name(cache->name);
+        const int n_kv = decoder->get_compute_params().attention_size;
+        if (layer.has_value() && !decoder->is_swa_layer(*layer) && n_kv > 0 && static_cast<size_t>(n_kv) < ctx) {
+            shape[2] = static_cast<size_t>(n_kv);
+        }
+    }
+    void * data = static_cast<char *>(cache->data) + stream * cache->nb[2];
+    return decoder->cached_kv_tensor(
+        cache, type, shape, [&]() { return host_or_remote_tensor(*decoder, cache, type, shape, data); }, stream);
+}
+
+// Run a split KV cache ubatch of n_streams streams (from stream0 on) as one inference per stream, all in flight at
+// once. Each request gets its stream's KV slabs and its part of the ubatch: tokens and masks are contiguous per stream,
+// the KV write indices are made local to the slab and the output ids local to the stream's tokens
+void ov_infer_per_stream(const ggml_cgraph * cgraph,
+                         const std::shared_ptr<GgmlOvDecoder> & decoder,
+                         const stream_inputs & ubatch_inputs,
+                         std::vector<ov_stream_request> & requests,
+                         const std::vector<std::string> & input_names,
+                         const std::vector<std::string> & output_names,
+                         int n_streams,
+                         int stream0) {
+    // KV write index input -> rows per stream of the cache it writes
+    std::map<const ggml_tensor *, int64_t> idx_rows;
+    for (int i = 0; i < cgraph->n_nodes; i++) {
+        const auto * node = cgraph->nodes[i];
+        if (node->op == GGML_OP_SET_ROWS) {
+            idx_rows[view_root(node->src[1])] = view_root(node->src[2])->ne[1];
+        }
+    }
+
+    int64_t n_tokens = -1;
+    const ggml_tensor * out_ids = nullptr;
+    for (const auto & [t, kind] : ubatch_inputs) {
+        if (kind == stream_input::mask) {
+            n_tokens = t->ne[1] * t->ne[3];
+        } else if (kind == stream_input::out_ids) {
+            out_ids = t;
+        }
+    }
+    GGML_ASSERT(n_tokens > 0 && n_tokens % n_streams == 0);
+    const int64_t n_tps = n_tokens / n_streams;
+
+    // outputs are in token order, so each stream's outputs are a contiguous range
+    std::vector<int64_t> out_begin(n_streams + 1, 0);
+    if (out_ids != nullptr) {
+        const auto * ids = static_cast<const int32_t *>(out_ids->data);
+        int64_t k = 0;
+        for (int j = 0; j < n_streams; j++) {
+            out_begin[j] = k;
+            while (k < out_ids->ne[0] && ids[k] / n_tps == j) {
+                k++;
+            }
+        }
+        out_begin[n_streams] = k;
+        GGML_ASSERT(k == out_ids->ne[0] && "output ids are not in stream order");
+    }
+
+    struct staged_output {
+        void * dst;
+        const void * src;
+        size_t bytes;
+    };
+    std::vector<staged_output> staged_outputs;
+
+    for (int j = 0; j < n_streams; j++) {
+        auto & req = requests[j];
+        const int stream = stream0 + j;
+        req.inputs.resize(input_names.size());
+        req.outputs.resize(output_names.size());
+
+        for (size_t i = 0; i < input_names.size(); i++) {
+            const auto & name = input_names[i];
+            ov::Tensor tensor;
+            uint64_t id = 0;
+            bool host = true;
+            const auto * t = decoder->get_model_extra_inputs().count(name) == 0 ? decoder->get_input_ggml_tensor(name) :
+                                                                                  nullptr;
+            const auto it = t != nullptr ? ubatch_inputs.find(t) : ubatch_inputs.end();
+            if (t == nullptr || (it == ubatch_inputs.end() && !GgmlOvDecoder::is_kvcache(t, nullptr))) {
+                // the same for every stream: extra inputs and non-ubatch inputs (Phi-3.5 rope factors)
+                tensor = get_ov_input_tensor(decoder, name);
+                host = t == nullptr || !ggml_openvino_buffer_is_remote(t);
+            } else {
+                const auto type = GgmlOvDecoder::get_ov_type(t);
+                auto * data = static_cast<char *>(t->data);
+                if (GgmlOvDecoder::is_kvcache(t, nullptr)) {
+                    decoder->take_last_kv_tensor_id();
+                    tensor = stream_kv_tensor(decoder, t, stream);
+                    id = decoder->take_last_kv_tensor_id();
+                    host = false;
+                } else {
+                    switch (it->second) {
+                        case stream_input::tokens:
+                            tensor = ov::Tensor(type, {1, 1, 1, (size_t) n_tps}, data + j * n_tps * t->nb[0]);
+                            break;
+                        case stream_input::rows:
+                            tensor = ov::Tensor(type, {1, 1, (size_t) n_tps, (size_t) t->ne[0]},
+                                                data + j * n_tps * t->nb[1]);
+                            break;
+                        case stream_input::mask: {
+                            GGML_ASSERT(t->ne[2] == 1 && t->ne[3] == n_streams);
+                            const size_t rows = t->ne[1];
+                            const size_t cols = t->ne[0];
+                            const auto & c_params = decoder->get_compute_params();
+                            const size_t padded_cols = name == c_params.mask_name ? c_params.attention_size : 0;
+                            if (padded_cols <= cols || !ggml_is_contiguous(t)) {
+                                tensor = ov::Tensor(type, {1, 1, rows, cols}, data + j * t->nb[3]);
+                                break;
+                            }
+                            // pad the full attention mask to the rounded KV length, as convert_ggml_input_to_ov does
+                            GGML_ASSERT(t->type == GGML_TYPE_F16 || t->type == GGML_TYPE_F32);
+                            tensor = ov::Tensor(type, {1, 1, rows, padded_cols});
+                            auto * dst = static_cast<char *>(tensor.data());
+                            const size_t es = ggml_type_size(t->type);
+                            const ggml_fp16_t inf16 = GGML_FP32_TO_FP16(-INFINITY);
+                            const float inf32 = -INFINITY;
+                            const void * pad = t->type == GGML_TYPE_F16 ? (const void *) &inf16 : (const void *) &inf32;
+                            for (size_t r = 0; r < rows; r++) {
+                                char * row = dst + r * padded_cols * es;
+                                std::memcpy(row, data + j * t->nb[3] + r * t->nb[1], cols * es);
+                                for (size_t c = cols; c < padded_cols; c++) {
+                                    std::memcpy(row + c * es, pad, es);
+                                }
+                            }
+                            break;
+                        }
+                        case stream_input::kv_idx: {
+                            const int64_t rows = idx_rows.at(t);
+                            const auto * src = reinterpret_cast<const int64_t *>(data) + j * n_tps;
+                            tensor = ov::Tensor(ov::element::i64, {1, 1, 1, (size_t) n_tps});
+                            auto * dst = tensor.data<int64_t>();
+                            for (int64_t k = 0; k < n_tps; k++) {
+                                GGML_ASSERT(src[k] / rows == stream && "KV write index outside the stream's slab");
+                                dst[k] = src[k] - stream * rows;
+                            }
+                            break;
+                        }
+                        case stream_input::out_ids: {
+                            const auto * src = reinterpret_cast<const int32_t *>(data) + out_begin[j];
+                            const size_t n = out_begin[j + 1] - out_begin[j];
+                            tensor = ov::Tensor(ov::element::i32, {1, 1, 1, n});
+                            auto * dst = tensor.data<int32_t>();
+                            for (size_t k = 0; k < n; k++) {
+                                dst[k] = src[k] - static_cast<int32_t>(j * n_tps);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            auto & binding = req.inputs[i];
+            if (host && io_staging_enabled() && stageable_size(tensor)) {
+                auto & staging = staging_for(*decoder, binding, tensor);
+                std::memcpy(binding.staging_ptr, tensor.data(), tensor.get_byte_size());
+                tensor = staging;
+                id = binding.staging_id;
+            }
+            if (needs_bind(binding, tensor, id)) {
+                req.request->set_input_tensor(i, tensor);
+            }
+        }
+
+        for (size_t i = 0; i < output_names.size(); i++) {
+            const auto & outputs = decoder->get_model_outputs();
+            auto it = outputs.find(output_names[i]);
+            if (it == outputs.end() || ggml_nbytes(it->second) == 0) {
+                continue;
+            }
+            const auto * t = it->second;
+            ov::Tensor tensor;
+            uint64_t id = 0;
+            if (GgmlOvDecoder::is_kvcache(t, nullptr)) {
+                decoder->take_last_kv_tensor_id();
+                tensor = stream_kv_tensor(decoder, t, stream);
+                id = decoder->take_last_kv_tensor_id();
+            } else {
+                // the rows of the stream's outputs
+                const int64_t n_out = out_ids != nullptr ? out_ids->ne[0] : n_tokens;
+                GGML_ASSERT(t->ne[1] == n_out && t->ne[2] == 1 && t->ne[3] == 1 && "unsupported per stream output");
+                const int64_t begin = out_ids != nullptr ? out_begin[j] : j * n_tps;
+                const int64_t rows = out_ids != nullptr ? out_begin[j + 1] - begin : n_tps;
+                if (rows == 0) {
+                    continue;
+                }
+                tensor = ov::Tensor(GgmlOvDecoder::get_ov_type(t), {1, 1, (size_t) rows, (size_t) t->ne[0]},
+                                    static_cast<char *>(t->data) + begin * t->nb[1]);
+                auto & binding = req.outputs[i];
+                if (k_stage_outputs && io_staging_enabled() && stageable_size(tensor)) {
+                    void * dst = tensor.data();
+                    const size_t bytes = tensor.get_byte_size();
+                    tensor = staging_for(*decoder, binding, tensor);
+                    staged_outputs.push_back({dst, binding.staging_ptr, bytes});
+                    id = binding.staging_id;
+                }
+            }
+            if (needs_bind(req.outputs[i], tensor, id)) {
+                req.request->set_output_tensor(i, tensor);
+            }
+        }
+        req.request->start_async();
+    }
+    for (int j = 0; j < n_streams; j++) {
+        requests[j].request->wait();
+    }
+    for (const auto & out : staged_outputs) {
+        std::memcpy(out.dst, out.src, out.bytes);
+    }
+}
+
 }  // namespace
 
 enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::shared_ptr<ov_runtime_context> & r_ctx) {
@@ -1221,6 +1602,25 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::share
     ComputeParams c_params;
     const int64_t graph_param_compute_start_time = ggml_time_us();
     std::tie(m_params, c_params) = GgmlOvDecoder::compute_llm_params(cgraph, is_static);
+    // a split KV cache run per stream: the model sees one stream, the requests are spread over the active ones
+    const int n_streams = c_params.n_seq_active;
+    const int stream0 = c_params.seq_active_start;
+    std::optional<stream_inputs> ubatch_inputs;
+    if (ggml_openvino_split_kv_per_stream_enabled() && !r_ctx->stateful && !model_is_splitted) {
+        bool rejected = false;
+        {
+            std::lock_guard<std::mutex> map_lock(r_ctx->ctx_mutex);
+            rejected = r_ctx->per_stream_rejected.count(key) != 0;
+        }
+        if (!rejected) {
+            ubatch_inputs = get_stream_inputs(cgraph, m_params);
+        }
+    }
+    if (ubatch_inputs.has_value()) {
+        m_params.per_stream = true;
+        c_params.n_seq_active = 1;
+        c_params.seq_active_start = 0;
+    }
     const int64_t graph_param_compute_time = ggml_time_us() - graph_param_compute_start_time;
 
     const bool cache_enabled = !model_is_splitted && !cache_disabled;
@@ -1406,6 +1806,29 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::share
             ggml_decoder = std::make_shared<GgmlOvDecoder>(cgraph, m_params, c_params, weight_names,
                                                           is_static, r_ctx->stateful, model_is_splitted);
             ggml_decoder->device = device;
+            const bool layout_ok = !m_params.per_stream || per_stream_layout_supported(*ggml_decoder);
+            if (m_params.per_stream &&
+                (!layout_ok || !per_stream_outputs_supported(cgraph, *ggml_decoder, *ubatch_inputs))) {
+                // under the compile lock; a model split into many graphs warns once
+                static bool warned[2] = {};
+                if (!warned[layout_ok]) {
+                    warned[layout_ok] = true;
+                    GGML_LOG_WARN("ggml-openvino: split KV cache graph not run per stream, %s\n",
+                                  layout_ok ? "an output cannot be cut per stream" :
+                                              "a KV cache cannot take the 4-D layout on GPU");
+                }
+                {
+                    std::lock_guard<std::mutex> map_lock(r_ctx->ctx_mutex);
+                    r_ctx->per_stream_rejected.insert(key);
+                }
+                m_params.per_stream = false;
+                c_params.n_seq_active = n_streams;
+                c_params.seq_active_start = stream0;
+                ggml_decoder = std::make_shared<GgmlOvDecoder>(cgraph, m_params, c_params, weight_names, is_static,
+                                                              r_ctx->stateful, model_is_splitted);
+            } else if (m_params.per_stream) {
+                GGML_LOG_INFO("ggml-openvino: split KV cache graph (%d streams) run per stream\n", m_params.n_seq);
+            }
             const std::string model_cache_dir = ggml_openvino_model_cache_dir();
             const std::string exact_key = cache_enabled ? compiled_graph_key(cgraph, *ggml_decoder, device) : "";
             uint64_t model_fp = 0;
@@ -1708,98 +2131,125 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::share
             }
         }
 
-        auto & in_bindings = ggml_decoder->port_bindings(true, ov_input_names.size(), infer_request.get());
-        for (size_t i = 0; i < ov_input_names.size(); i++) {
-            const auto & param_name = ov_input_names[i];
-            ggml_decoder->take_last_kv_tensor_id();  // clear
-            auto input_tensor = get_ov_input_tensor(ggml_decoder, param_name);
-            uint64_t id = ggml_decoder->take_last_kv_tensor_id();
-            auto & binding = in_bindings[i];
-            if (id == 0 && io_staging_enabled() && is_host_input(ggml_decoder, param_name) &&
-                stageable_size(input_tensor)) {
-                auto & staging = staging_for(*ggml_decoder, binding, input_tensor);
-                std::memcpy(binding.staging_ptr, input_tensor.data(), input_tensor.get_byte_size());
-                input_tensor = staging;
-                id = binding.staging_id;
-            }
-            if (needs_bind(binding, input_tensor, id)) {
-                infer_request->set_input_tensor(i, input_tensor);
-            }
-
-            if (ggml_openvino_getenv_int("GGML_OPENVINO_DEBUG_INPUT")) {
-                print_input_tensor_info(param_name, input_tensor);
-            }
-        }
-
-        auto & out_bindings = ggml_decoder->port_bindings(false, ov_output_names.size(), infer_request.get());
-
-        struct staged_output {
-            void * dst;
-            const void * src;
-            size_t bytes;
-        };
-
-        std::vector<staged_output> staged_outputs;  // copied back after infer()
-        for (size_t i = 0; i < ov_output_names.size(); i++) {
-            // Debug-only outputs added via GGML_OPENVINO_DEBUG_NODE (see
-            // translate_session.cpp) have no corresponding ggml tensor; leave
-            // them unbound so OpenVINO allocates its own tensor for them,
-            // rather than aliasing a ggml buffer that may be overwritten by a
-            // later in-place op before we get to read it.
-            const auto & model_outputs = ggml_decoder->get_model_outputs();
-            auto model_output_it = model_outputs.find(ov_output_names[i]);
-            if (model_output_it == model_outputs.end()) {
-                continue;
-            }
-            auto * ggml_tensor = model_output_it->second;
-            ggml_decoder->take_last_kv_tensor_id();  // clear
-            ov::Tensor output_tensor;
-            const bool inactive = (ggml_tensor->op != GGML_OP_NONE && !(ggml_tensor->flags & GGML_TENSOR_FLAG_COMPUTE)) ||
-                                  ggml_nbytes(ggml_tensor) == 0;
-            if (inactive) {
-                // Inactive pure sampling branches have no scheduler allocation. Never bind a stale active output.
-                auto & scratch = ggml_decoder->runtime_output_scratch[ov_output_names[i]];
-                const auto type = GgmlOvDecoder::get_ov_type(ggml_tensor);
-                const auto shape = GgmlOvDecoder::get_shape(ggml_tensor);
-                if (!scratch || scratch.get_element_type() != type || scratch.get_shape() != shape) {
-                    if (ggml_openvino_is_gpu() && ggml_nbytes(ggml_tensor) > 0) {
-                        auto context = ggml_openvino_get_remote_context(device)->as<ov::intel_gpu::ocl::ClContext>();
-                        scratch = context.create_usm_device_tensor(type, shape);
-                    } else {
-                        scratch = ov::Tensor(type, shape);
-                    }
-                }
-                output_tensor = scratch;
+        if (m_params.per_stream) {
+            std::vector<ov_stream_request> * requests = nullptr;
+            std::vector<ov_stream_request> uncached;
+            if (cache_enabled) {
+                std::lock_guard<std::mutex> map_lock(r_ctx->ctx_mutex);
+                requests = &r_ctx->stream_requests_cache[key];
             } else {
-                output_tensor = create_ov_output_tensor(ggml_decoder, infer_request, i, ggml_tensor);
+                requests = &uncached;
             }
-            uint64_t id = ggml_decoder->take_last_kv_tensor_id();
-            auto & binding = out_bindings[i];
-            if (k_stage_outputs && !inactive && id == 0 && io_staging_enabled() &&
-                !ggml_openvino_buffer_is_remote(ggml_tensor) && stageable_size(output_tensor)) {
-                void * dst = output_tensor.data();
-                const size_t bytes = output_tensor.get_byte_size();
-                output_tensor = staging_for(*ggml_decoder, binding, output_tensor);
-                staged_outputs.push_back({dst, binding.staging_ptr, bytes});
-                id = binding.staging_id;
+            if (requests->empty() || requests->front().request != infer_request) {
+                requests->clear();
+                requests->push_back({infer_request, {}, {}});
             }
-            if (needs_bind(binding, output_tensor, id)) {
-                infer_request->set_output_tensor(i, output_tensor);
+            while (requests->size() < static_cast<size_t>(n_streams)) {
+                requests->push_back(
+                    {std::make_shared<ov::InferRequest>(infer_request->get_compiled_model().create_infer_request()),
+                     {},
+                     {}});
             }
-        }
+            ov_raw_infer_start = ggml_time_us();
+            ov_infer_per_stream(cgraph, ggml_decoder, *ubatch_inputs, *requests, ov_input_names, ov_output_names,
+                                n_streams, stream0);
+            infer_end_time = ggml_time_us();
+        } else {
+            auto & in_bindings = ggml_decoder->port_bindings(true, ov_input_names.size(), infer_request.get());
+            for (size_t i = 0; i < ov_input_names.size(); i++) {
+                const auto & param_name = ov_input_names[i];
+                ggml_decoder->take_last_kv_tensor_id();  // clear
+                auto input_tensor = get_ov_input_tensor(ggml_decoder, param_name);
+                uint64_t id = ggml_decoder->take_last_kv_tensor_id();
+                auto & binding = in_bindings[i];
+                if (id == 0 && io_staging_enabled() && is_host_input(ggml_decoder, param_name) &&
+                    stageable_size(input_tensor)) {
+                    auto & staging = staging_for(*ggml_decoder, binding, input_tensor);
+                    std::memcpy(binding.staging_ptr, input_tensor.data(), input_tensor.get_byte_size());
+                    input_tensor = staging;
+                    id = binding.staging_id;
+                }
+                if (needs_bind(binding, input_tensor, id)) {
+                    infer_request->set_input_tensor(i, input_tensor);
+                }
 
-        ov_raw_infer_start = ggml_time_us();
-        infer_request->infer();
-        infer_end_time = ggml_time_us();
-        for (const auto & out : staged_outputs) {
-            std::memcpy(out.dst, out.src, out.bytes);
+                if (ggml_openvino_getenv_int("GGML_OPENVINO_DEBUG_INPUT")) {
+                    print_input_tensor_info(param_name, input_tensor);
+                }
+            }
+
+            auto & out_bindings = ggml_decoder->port_bindings(false, ov_output_names.size(), infer_request.get());
+
+            struct staged_output {
+                void * dst;
+                const void * src;
+                size_t bytes;
+            };
+
+            std::vector<staged_output> staged_outputs;  // copied back after infer()
+            for (size_t i = 0; i < ov_output_names.size(); i++) {
+                // Debug-only outputs added via GGML_OPENVINO_DEBUG_NODE (see
+                // translate_session.cpp) have no corresponding ggml tensor; leave
+                // them unbound so OpenVINO allocates its own tensor for them,
+                // rather than aliasing a ggml buffer that may be overwritten by a
+                // later in-place op before we get to read it.
+                const auto & model_outputs = ggml_decoder->get_model_outputs();
+                auto model_output_it = model_outputs.find(ov_output_names[i]);
+                if (model_output_it == model_outputs.end()) {
+                    continue;
+                }
+                auto * ggml_tensor = model_output_it->second;
+                ggml_decoder->take_last_kv_tensor_id();  // clear
+                ov::Tensor output_tensor;
+                const bool inactive =
+                    (ggml_tensor->op != GGML_OP_NONE && !(ggml_tensor->flags & GGML_TENSOR_FLAG_COMPUTE)) ||
+                    ggml_nbytes(ggml_tensor) == 0;
+                if (inactive) {
+                    // Inactive pure sampling branches have no scheduler allocation. Never bind a stale active output.
+                    auto & scratch = ggml_decoder->runtime_output_scratch[ov_output_names[i]];
+                    const auto type = GgmlOvDecoder::get_ov_type(ggml_tensor);
+                    const auto shape = GgmlOvDecoder::get_shape(ggml_tensor);
+                    if (!scratch || scratch.get_element_type() != type || scratch.get_shape() != shape) {
+                        if (ggml_openvino_is_gpu() && ggml_nbytes(ggml_tensor) > 0) {
+                            auto context =
+                                ggml_openvino_get_remote_context(device)->as<ov::intel_gpu::ocl::ClContext>();
+                            scratch = context.create_usm_device_tensor(type, shape);
+                        } else {
+                            scratch = ov::Tensor(type, shape);
+                        }
+                    }
+                    output_tensor = scratch;
+                } else {
+                    output_tensor = create_ov_output_tensor(ggml_decoder, infer_request, i, ggml_tensor);
+                }
+                uint64_t id = ggml_decoder->take_last_kv_tensor_id();
+                auto & binding = out_bindings[i];
+                if (k_stage_outputs && !inactive && id == 0 && io_staging_enabled() &&
+                    !ggml_openvino_buffer_is_remote(ggml_tensor) && stageable_size(output_tensor)) {
+                    void * dst = output_tensor.data();
+                    const size_t bytes = output_tensor.get_byte_size();
+                    output_tensor = staging_for(*ggml_decoder, binding, output_tensor);
+                    staged_outputs.push_back({dst, binding.staging_ptr, bytes});
+                    id = binding.staging_id;
+                }
+                if (needs_bind(binding, output_tensor, id)) {
+                    infer_request->set_output_tensor(i, output_tensor);
+                }
+            }
+
+            ov_raw_infer_start = ggml_time_us();
+            infer_request->infer();
+            infer_end_time = ggml_time_us();
+            for (const auto & out : staged_outputs) {
+                std::memcpy(out.dst, out.src, out.bytes);
+            }
+            if (stateful_recurrent) {
+                const auto * inp_pos = get_inp_pos_tensor(cgraph);
+                r_ctx->stateful_kv_size =
+                    static_cast<const int32_t *>(inp_pos->data)[0] + get_inp_pos_n_tokens(cgraph, inp_pos);
+            }
+            dump_ov_profiling_info(*infer_request);
         }
-        if (stateful_recurrent) {
-            const auto * inp_pos = get_inp_pos_tensor(cgraph);
-            r_ctx->stateful_kv_size =
-                static_cast<const int32_t *>(inp_pos->data)[0] + get_inp_pos_n_tokens(cgraph, inp_pos);
-        }
-        dump_ov_profiling_info(*infer_request);
 
         if (ggml_openvino_getenv_int("GGML_OPENVINO_DEBUG_OUTPUT") ||
             ggml_openvino_getenv_str("GGML_OPENVINO_DEBUG_NODE")) {

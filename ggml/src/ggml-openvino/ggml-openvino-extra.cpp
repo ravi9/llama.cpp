@@ -169,6 +169,7 @@ constexpr env_var env_vars[] = {
     {"GGML_OPENVINO_DISABLE_CACHE", env_type::BOOL},
     {"GGML_OPENVINO_DISABLE_FUSED_RECURRENCE", env_type::BOOL},
     {"GGML_OPENVINO_ENABLE_KV_4D", env_type::BOOL},
+    {"GGML_OPENVINO_SPLIT_KV_PER_STREAM", env_type::BOOL},
     {"GGML_OPENVINO_ENABLE_FALLBACK", env_type::BOOL},
     {"GGML_OPENVINO_KV_SCATTER_ELEMENTS", env_type::BOOL},
     {"GGML_OPENVINO_MANUAL_GQA_ATTN", env_type::BOOL},
@@ -904,6 +905,10 @@ void ggml_openvino_kv_storage_clear(const void * base, size_t size, uint8_t valu
             std::memset(it->second.storage.data(), value, it->second.storage.get_byte_size());
         }
     }
+}
+
+bool ggml_openvino_split_kv_per_stream_enabled() {
+    return ggml_openvino_getenv_int("GGML_OPENVINO_SPLIT_KV_PER_STREAM") != 0;
 }
 
 bool ggml_openvino_shape_from_mask_enabled() {

@@ -9,6 +9,7 @@
 #include <openvino/frontend/exception.hpp>
 #include <openvino/op/concat.hpp>
 #include <openvino/op/constant.hpp>
+#include <openvino/op/parameter.hpp>
 #include <openvino/op/reshape.hpp>
 #include <vector>
 
@@ -48,6 +49,13 @@ OutputVector translate_reshape(const NodeContext & context) {
     case 4:
         return {context.get_input(0).get_node_shared_ptr()->input_value(0)};
     case 5:
+        // the [emb, ctx * n_seq] write view of a split cache run per stream: the 4-D cache (see set_rows) is written
+        // as it is
+        if (ov::is_type<ov::op::v0::Parameter>(context.get_input(0).get_node()) &&
+            is_kvcache_4d_shape(context.get_input(0).get_partial_shape())) {
+            return {context.get_input(0)};
+        }
+        [[fallthrough]];
     case 7:
         shape = {1, 1, -1, shape[3]};
         if (context.is_stateful() && op_case == 5) {
