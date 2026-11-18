@@ -1498,6 +1498,9 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
     } else if (is_kvcache(input, op)) {
         // kvcache
         input_shape = ov::PartialShape{get_shape(input)};
+        if (m_model_params.per_stream) {
+            input_shape[1] = 1;
+        }
         // Whisper.cpp uses a fixed size 1D KV buffer [N, 1, 1, 1] (GGML) or [1, 1, 1, N] (OV).
         // the token fill level is handled by token_len_per_seq + dynamic mask input.
         // skip dynamic dim and stateful reshape for this layout.
@@ -1994,8 +1997,10 @@ const ggml_tensor * GgmlOvDecoder::get_tensor_used_op(const ggml_tensor * tensor
 }
 
 bool GgmlOvDecoder::is_kvcache_4d(const ggml_tensor * cache) const {
+    // a split cache run per stream always takes this layout on GPU (see per_stream_layout_supported)
     static const bool enabled = ggml_openvino_getenv_int("GGML_OPENVINO_ENABLE_KV_4D") > 0;
-    if (!enabled || m_is_static || m_is_stateful || m_model_is_splitted || !ggml_openvino_is_gpu()) {
+    if (!(enabled || m_model_params.per_stream) || m_is_static || m_is_stateful || m_model_is_splitted ||
+        !ggml_openvino_is_gpu()) {
         return false;
     }
     // `-fa off` (transposed V cache): keep the [1, 1, ctx, n_heads_kv * head_size] layout. The 4-D K cache breaks the
@@ -2007,8 +2012,10 @@ bool GgmlOvDecoder::is_kvcache_4d(const ggml_tensor * cache) const {
     if (cache->op != GGML_OP_NONE || cache->view_src != nullptr || !is_kvcache(cache, nullptr)) {
         return false;
     }
-    // one sequence, [n_heads_kv * head_size, ctx, 1, 1]; whisper's flat KV buffer has ctx == 1
-    if (cache->ne[1] <= 1 || cache->ne[2] != 1 || cache->ne[3] != 1) {
+    // one sequence, [n_heads_kv * head_size, ctx, 1, 1]; whisper's flat KV buffer has ctx == 1. A split cache run per
+    // stream has one sequence per inference
+    const bool per_stream = m_model_params.per_stream;
+    if (cache->ne[1] <= 1 || (cache->ne[2] != 1 && !per_stream) || cache->ne[3] != 1) {
         return false;
     }
     const int n_heads_kv = get_n_heads_kv_for_tensor(cache);
@@ -2028,6 +2035,18 @@ bool GgmlOvDecoder::is_kvcache_4d(const ggml_tensor * cache) const {
         }
         return true;
     };
+    auto writes_whole_rows = [this](const ggml_tensor * rows) {
+        for (int i = 0; i < m_cgraph->n_nodes; i++) {
+            const auto * node = m_cgraph->nodes[i];
+            for (int j = 0; j < GGML_MAX_SRC; j++) {
+                if (node->src[j] == rows && !(node->op == GGML_OP_SET_ROWS && j == 2 &&
+                                              node->src[0]->ne[0] == rows->ne[0])) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
     for (int i = 0; i < m_cgraph->n_nodes; i++) {
         const auto * node = m_cgraph->nodes[i];
         bool uses_cache = false;
@@ -2041,10 +2060,17 @@ bool GgmlOvDecoder::is_kvcache_4d(const ggml_tensor * cache) const {
         if (node->op == GGML_OP_SET_ROWS && node->src[2] == cache && node->src[0]->ne[0] == cache->ne[0]) {
             continue;
         }
-        // read: the first rows of the cache, each row split into heads, permuted for attention
-        if (node->op == GGML_OP_VIEW && node->src[0] == cache && node->view_offs == 0 &&
-            node->ne[0] * node->ne[1] == cache->ne[0] && node->nb[2] == cache->nb[1] && node->ne[3] == 1 &&
-            feeds_only_permutes(node)) {
+        // write per stream: whole rows into the [emb, ctx * n_seq] reshape of a split cache
+        if (per_stream && node->op == GGML_OP_RESHAPE && node->src[0] == cache && node->ne[0] == cache->ne[0] &&
+            writes_whole_rows(node)) {
+            continue;
+        }
+        // read: the first rows of the cache (of the first active stream when run per stream), each row split into
+        // heads, permuted for attention
+        const bool stream_start = per_stream ? node->view_offs % cache->nb[2] == 0 : node->view_offs == 0;
+        if (node->op == GGML_OP_VIEW && node->src[0] == cache && stream_start &&
+            node->ne[0] * node->ne[1] == cache->ne[0] && node->nb[2] == cache->nb[1] &&
+            (node->ne[3] == 1 || per_stream) && feeds_only_permutes(node)) {
             continue;
         }
         return false;

@@ -886,6 +886,7 @@ The defaults fit most models. The variables below trade one property for another
 | `GGML_OPENVINO_MANUAL_GQA_ATTN` | CPU, GPU | Boolean | on for GPU | Build grouped-query attention from separate MatMul operations. Unset: on for GPU, off for CPU and NPU. `1` turns it on, `0` turns it off. Try `1` on the CPU for faster decode. |
 | `GGML_OPENVINO_REQUANT_KQUANT` | CPU, GPU | String | `not set` | Requantize `Q6_K` and `Q5_K` weights to a 4-bit layout instead of `Q8_0_C`: faster decode for lower accuracy. One of `q4_asym64`, `q4_asym64_all` (also `Q4_K`), `q4_sym128`, `q4_sym128_all` (also `Q4_K`) or `native` (no requantization). On GPU with `Q4_K_M` files use `q4_asym64_all`, because `q4_asym64` does not compile there. |
 | `GGML_OPENVINO_EXACT_ZERO_POINT` | CPU, GPU | Boolean | `0` | Keep the exact zero point of asymmetric weights (`Q4_1`, `Q4_K`, `Q5_1`, `Q5_K`) instead of rounding it to an integer. This improves accuracy and lowers speed. Use it when accuracy matters more than speed. |
+| `GGML_OPENVINO_SPLIT_KV_PER_STREAM` | CPU, GPU | Boolean | `0` | With a split KV cache (`llama-server -np N` without `-kvu`), compile the model for one sequence and run one inference request per active sequence instead of one model over all sequences. Makes prefill and single-sequence decode faster; on GPU the requests run one after another. Graphs that do not qualify (recurrent models, `-fa off`, soft-capped attention on GPU) run as before. |
 
 </details>
 

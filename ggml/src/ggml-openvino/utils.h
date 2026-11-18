@@ -142,6 +142,13 @@ struct ov_compiled_model_cache {
     size_t backend_count = 0;
 };
 
+// One infer request of a split KV cache run per stream, with the state of its ports
+struct ov_stream_request {
+    std::shared_ptr<ov::InferRequest> request;
+    std::vector<GgmlOvDecoder::ov_port_binding> inputs;
+    std::vector<GgmlOvDecoder::ov_port_binding> outputs;
+};
+
 // Private to one backend instance. Only compiled_cache is shared with other
 // instances; clearing these local caches cannot invalidate their requests.
 struct ov_runtime_context {
@@ -158,6 +165,10 @@ struct ov_runtime_context {
     std::unordered_map<graph_key, std::vector<std::string>, graph_key_hash> ov_output_names_cache;
     std::unordered_map<graph_key, std::vector<std::string>, graph_key_hash> ov_input_names_cache_prefill;
     std::unordered_map<graph_key, std::vector<std::string>, graph_key_hash> ov_output_names_cache_prefill;
+    // per stream requests of a split KV cache graph, the first one is infer_request_cache's
+    std::unordered_map<graph_key, std::vector<ov_stream_request>, graph_key_hash> stream_requests_cache;
+    // split KV cache graphs that could not be converted per stream, kept across cache clears
+    std::unordered_set<graph_key, graph_key_hash> per_stream_rejected;
     size_t stateful_kv_size;
     std::map<std::string, std::string> kv_state_input_name_map;
     // compute-only copies of graphs that carry unselected ggml_build_forward_select() branches
@@ -177,6 +188,7 @@ struct ov_runtime_context {
         ov_output_names_cache.clear();
         ov_input_names_cache_prefill.clear();
         ov_output_names_cache_prefill.clear();
+        stream_requests_cache.clear();
         kv_state_input_name_map.clear();
         stateful_kv_size = 0;
     }

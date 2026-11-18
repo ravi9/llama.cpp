@@ -39,6 +39,9 @@ struct ModelParams {
     bool v_trans = false;
     // the graph has FLASH_ATTN_EXT with logit soft-capping (gemma-2)
     bool softcap_attn = false;
+    // split KV cache (n_seq > 1) run as one inference per active stream: the model is converted for one stream
+    // ([1, 1, ctx, emb] KV inputs) and each request is bound to its stream's slab (see ov_infer_per_stream)
+    bool per_stream = false;
     std::vector<int> swa_layers;
     // The sliding-window mask tensor, identified in compute_llm_params() by grouping attention
     // layers on the mask they consume. Only used to tell the two masks apart when naming OV
@@ -59,7 +62,7 @@ struct ModelParams {
     // swa_layers: the masks and KV write indices of these layers are separate graph inputs
     bool can_reuse_dynamically(const ModelParams & other) const {
         return same_rope_params(other) && n_rs_slots == other.n_rs_slots && has_rs_rollback == other.has_rs_rollback &&
-               swa_layers == other.swa_layers;
+               swa_layers == other.swa_layers && per_stream == other.per_stream;
     }
 
     bool can_reuse_statically(const ModelParams & other) const {
@@ -377,8 +380,9 @@ public:
     ov::Tensor cached_kv_tensor(const ggml_tensor * kv,
                                 const ov::element::Type & type,
                                 const ov::Shape & shape,
-                                Make && make) const {
-        auto & entry = m_kv_tensor_cache[kv];
+                                Make && make,
+                                int stream = 0) const {
+        auto & entry = m_kv_tensor_cache[{kv, stream}];
         if (!entry.tensor || entry.data != kv->data || entry.type != type || entry.shape != shape) {
             entry = {kv->data, type, shape, make(), next_tensor_id()};
         }
@@ -745,7 +749,7 @@ private:
         uint64_t id = 0;
     };
 
-    mutable std::map<const ggml_tensor *, kv_tensor_entry> m_kv_tensor_cache;
+    mutable std::map<std::pair<const ggml_tensor *, int>, kv_tensor_entry> m_kv_tensor_cache;
     mutable uint64_t m_tensor_id = 0;
     mutable uint64_t m_last_kv_tensor_id = 0;
     mutable std::vector<ov_port_binding> m_input_bindings;

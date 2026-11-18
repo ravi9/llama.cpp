@@ -200,6 +200,10 @@ void ggml_openvino_kv_storage_clear(const void * base, size_t size, uint8_t valu
 // Check if running on a GPU (GPU, GPU.0, GPU.1, ...)
 bool ggml_openvino_is_gpu();
 
+// Split KV cache (-np N without -kvu) on CPU/GPU: run one inference per active stream on a model converted for one
+// stream (GGML_OPENVINO_SPLIT_KV_PER_STREAM=1)
+bool ggml_openvino_split_kv_per_stream_enabled();
+
 // Read n_seq_active and attention_size(_swa) from the KQ mask shape (off with GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK=1)
 bool ggml_openvino_shape_from_mask_enabled();
 
