@@ -293,6 +293,7 @@ llama_model_kimi_linear::graph::graph(const llm_graph_params & params) :
 
             // Get conv states from r_l tensor (Q, K, V each have separate state)
             ggml_tensor * conv_states_all = mctx_cur->get_r_l(il);
+            // OpenVINO backend finds the conv state by this rename
             cb(conv_states_all, "conv_states_all", il);
             ggml_tensor * conv_state_all = build_rs(inp_rs, conv_states_all, hparams.n_embd_r(), n_seqs);
             ggml_tensor * q_in = cur, * k_in = cur, * v_in = cur;
