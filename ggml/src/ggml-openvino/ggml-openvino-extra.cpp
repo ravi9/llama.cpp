@@ -180,7 +180,6 @@ constexpr env_var env_vars[] = {
     {"GGML_OPENVINO_REDUCE_COMPILE_MEM", env_type::BOOL},
     {"GGML_OPENVINO_LOG_UNSUPPORTED_OPS", env_type::BOOL},
     {"GGML_OPENVINO_LOG_SWA_LAYERS", env_type::BOOL},
-    {"GGML_OPENVINO_NATIVE_SOFTPLUS", env_type::BOOL},
     {"GGML_OPENVINO_DISABLE_REMOTE_OUTPUTS", env_type::BOOL},
     {"GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT", env_type::BOOL},
     {"GGML_OPENVINO_NPU_FAST_MASK", env_type::BOOL},
