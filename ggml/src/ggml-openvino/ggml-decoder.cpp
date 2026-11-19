@@ -35,6 +35,24 @@
 #include <unordered_map>
 #include <vector>
 
+static std::set<std::string> collect_graph_output_names(const ggml_cgraph * cgraph) {
+    std::set<std::string> outputs;
+    for (int node_n = 0; node_n < cgraph->n_nodes; node_n++) {
+        auto * node = cgraph->nodes[node_n];
+        if (node->flags & GGML_TENSOR_FLAG_OUTPUT) {
+            outputs.insert(node->name);
+        }
+    }
+    return outputs;
+}
+
+bool GgmlOvDecoder::has_same_graph_io(const ggml_cgraph * cgraph) const {
+    if (m_built_output_names.empty()) {
+        return true;  // no snapshot (naive / test decoders): nothing to compare against
+    }
+    return collect_graph_output_names(cgraph) == m_built_output_names;
+}
+
 GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph,
                              ModelParams & model_params,
                              ComputeParams & compute_params,
@@ -64,6 +82,8 @@ GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph,
 
     validate_cgraph();
 
+    m_built_output_names = collect_graph_output_names(cgraph);
+
     set_input_output();
     compute_node_dynamic_dims();
     compute_model_inputs();
@@ -79,6 +99,7 @@ GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph,
 
 void GgmlOvDecoder::update_io(ggml_cgraph * cgraph) {
     m_cgraph = cgraph;
+    m_built_output_names = collect_graph_output_names(cgraph);
     m_model_inputs.clear();
     m_model_outputs.clear();
     m_node_info_list.clear();
@@ -1573,7 +1594,7 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
     else {
         input_shape = ov::PartialShape{get_shape(input)};
     }
-    if (dynamic_dim_index != -1 && m_model_is_splitted) {
+    if (dynamic_dim_index != -1) {
         input_shape[3 - dynamic_dim_index] = -1;
     }
     if (op->op == GGML_OP_SOFT_MAX && op->src[1] != nullptr && op->src[1]->op == GGML_OP_NONE &&
@@ -2851,6 +2872,10 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
                     m_node_dynamic_dims[src] = 1;
                     continue;
                 }
+                if (is_inp_embd_2d(src, node)) {
+                    m_node_dynamic_dims[src] = 1;
+                    continue;
+                }
                 self(self, src);
             }
         }
@@ -2919,6 +2944,12 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
             if (node->src[0]->op == GGML_OP_SSM_SCAN) {
                 // y part [head_dim, n_head, n_tokens, n_seqs] at offset 0; the state part is token-independent
                 m_node_dynamic_dims[node] = node->view_offs == 0 ? 2 : -1;
+                break;
+            }
+
+            // A VIEW that does not change the shape is a pass-through for dynamic-dim purposes.
+            if (is_same_shape(node->src[0], node)) {
+                m_node_dynamic_dims[node] = m_node_dynamic_dims[node->src[0]];
                 break;
             }
             // Use stride-based matching: the stride of a VIEW dimension directly
