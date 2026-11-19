@@ -111,27 +111,6 @@ OutputVector translate_unary_expm1(const NodeContext & context) {
     return rename_outputs_with_suffix({res}, context.get_name());
 }
 
-OutputVector translate_unary_softplus(const NodeContext & context) {
-    num_inputs_check(context, 1, 1);
-
-    if (ggml_openvino_getenv_int("GGML_OPENVINO_NATIVE_SOFTPLUS") != 0) {
-        return translate_1to1_match_1_input<ov::op::v4::SoftPlus>(context);
-    }
-
-    auto input = process_view_input_new(context, 0);
-    const auto element_type = input.get_element_type();
-    auto one = ov::op::v0::Constant::create(element_type, ov::Shape{}, {1.0f});
-
-    auto positive = std::make_shared<ov::op::v0::Relu>(input);
-    auto abs = std::make_shared<ov::op::v0::Abs>(input);
-    auto neg_abs = std::make_shared<ov::op::v0::Negative>(abs);
-    auto exp_neg_abs = std::make_shared<ov::op::v0::Exp>(neg_abs);
-    auto log_term = std::make_shared<ov::op::v0::Log>(std::make_shared<ov::op::v1::Add>(one, exp_neg_abs));
-    auto res = std::make_shared<ov::op::v1::Add>(positive, log_term);
-
-    return rename_outputs_with_suffix({res}, context.get_name());
-}
-
 }  // namespace op
 }  // namespace ggml
 }  // namespace frontend
