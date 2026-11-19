@@ -10,10 +10,12 @@
 #include <cctype>
 #include <cerrno>
 #include <climits>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <openvino/core/version.hpp>
 #include <openvino/runtime/intel_gpu/ocl/ocl.hpp>
 #include <openvino/runtime/intel_npu/level_zero/level_zero.hpp>
 #include <openvino/runtime/properties.hpp>
@@ -912,6 +914,22 @@ void ggml_openvino_kv_storage_clear(const void * base, size_t size, uint8_t valu
 
 bool ggml_openvino_shape_from_mask_enabled() {
     return ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK") == 0;
+}
+
+bool ggml_openvino_kv_4d_enabled() {
+    // GGML_OPENVINO_ENABLE_KV_4D unset: on with OpenVINO 2026.5 or later. The GPU plugin updates the 4-D cache in
+    // place from that version (openvino#37569); 2026.4 and older run this layout much slower.
+    static const bool enabled = [] {
+        if (ggml_openvino_getenv_str("GGML_OPENVINO_ENABLE_KV_4D") != nullptr) {
+            return ggml_openvino_getenv_int("GGML_OPENVINO_ENABLE_KV_4D") > 0;
+        }
+        const char * build = ov::get_openvino_version().buildNumber;
+        int          major = 0;
+        int          minor = 0;
+        return build != nullptr && std::sscanf(build, "%d.%d", &major, &minor) == 2 &&
+               (major > 2026 || (major == 2026 && minor >= 5));
+    }();
+    return enabled;
 }
 
 size_t ggml_openvino_max_alloc_size(const std::string & device) {

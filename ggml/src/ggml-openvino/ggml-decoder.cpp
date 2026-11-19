@@ -2013,8 +2013,8 @@ const ggml_tensor * GgmlOvDecoder::get_tensor_used_op(const ggml_tensor * tensor
 }
 
 bool GgmlOvDecoder::is_kvcache_4d(const ggml_tensor * cache) const {
-    static const bool enabled = ggml_openvino_getenv_int("GGML_OPENVINO_ENABLE_KV_4D") > 0;
-    if (!enabled || m_is_static || m_is_stateful || m_model_is_splitted || !ggml_openvino_is_gpu()) {
+    if (!ggml_openvino_kv_4d_enabled() || m_is_static || m_is_stateful || m_model_is_splitted ||
+        !ggml_openvino_is_gpu()) {
         return false;
     }
     // `-fa off` (transposed V cache): keep the [1, 1, ctx, n_heads_kv * head_size] layout. The 4-D K cache breaks the
