@@ -20,7 +20,6 @@
 #include <openvino/op/relu.hpp>
 #include <openvino/op/round.hpp>
 #include <openvino/op/sigmoid.hpp>
-#include <openvino/op/softplus.hpp>
 #include <openvino/op/subtract.hpp>
 
 namespace ov {
