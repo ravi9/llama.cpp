@@ -1583,6 +1583,7 @@ static bool is_supported_flash_attn_pattern(const ggml_tensor * op) {
     //   PERMUTE -> RESHAPE -> base (view_src==nullptr)  (whisper Q)
     //   VIEW -> base (view_src==nullptr)                (whisper K/V from kv_pad)
     //   PERMUTE -> VIEW -> RESHAPE -> base              (Q of a layer without RoPE, e.g. SmolLM3)
+    //   PERMUTE -> ROPE -> VIEW/RESHAPE -> base         (vision Q/K, e.g. Qwen3-VL, Qwen2-VL)
     for (int i = 0; i < 3; i++) {
         const ggml_tensor * src = op->src[i];
         if (src->op == GGML_OP_PERMUTE) {
@@ -1599,11 +1600,18 @@ static bool is_supported_flash_attn_pattern(const ggml_tensor * op) {
                 src->src[0]->src[0]->src[0]->view_src == nullptr) {
                 continue;
             }
-            if (src->src[0]->op != GGML_OP_VIEW && src->src[0]->op != GGML_OP_RESHAPE) {
+            const ggml_tensor * inner = src->src[0];
+            if (inner->op == GGML_OP_ROPE) {
+                inner = inner->src[0];
+                if (inner == nullptr) {
+                    return false;
+                }
+            }
+            if (inner->op != GGML_OP_VIEW && inner->op != GGML_OP_RESHAPE) {
                 return false;
             }
-            const ggml_tensor * base = src->src[0]->src[0];
-            if (base != nullptr && src->src[0]->op == GGML_OP_VIEW && base->op == GGML_OP_RESHAPE) {
+            const ggml_tensor * base = inner->src[0];
+            if (base != nullptr && inner->op == GGML_OP_VIEW && base->op == GGML_OP_RESHAPE) {
                 base = base->src[0];
             }
             if (base == nullptr || base->view_src != nullptr) {
