@@ -956,6 +956,9 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
     // Ternary weights are already at 2 bits and OpenVINO carries them natively as u2. Every
     // requant target here is 4 bit or wider, so it would inflate them and also lose the ternary
     // FullyConnected path, which is the only one that applies a fused Hadamard input transform.
+    if (tensor->type == GGML_TYPE_Q2_0) {
+        return std::nullopt;
+    }
 #ifdef GGML_OPENVINO_HAS_PQ2_0
     if (tensor->type == GGML_TYPE_PQ2_0) {
         return std::nullopt;
@@ -1230,11 +1233,18 @@ ggml_openvino_extracted_layout ggml_openvino_get_extracted_layout(const ggml_ten
     case GGML_TYPE_Q5_K:
         break;
 
-#ifdef GGML_OPENVINO_HAS_PQ2_0
-    case GGML_TYPE_PQ2_0:
+    case GGML_TYPE_Q2_0:
         // Ternary: codes {0,1,2} dequantized as (code - 1) * scale. The zero point is the
         // same for every block, so make_int2_weights emits it as a scalar and no zp array
         // is stored here (is_symmetric only means "no per-block zp" in this layout).
+        layout.is_u2 = true;
+        layout.weights_per_block = 64;
+        layout.is_symmetric = true;
+        break;
+
+#ifdef GGML_OPENVINO_HAS_PQ2_0
+    case GGML_TYPE_PQ2_0:
+        // Same codec as Q2_0 at group 128.
         layout.is_u2 = true;
         layout.weights_per_block = 128;
         layout.is_symmetric = true;

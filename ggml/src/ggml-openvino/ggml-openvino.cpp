@@ -2191,7 +2191,7 @@ static ggml_openvino_op_support ggml_backend_openvino_device_supports_op_impl(gg
     static std::unordered_set<ggml_type> supported_types{
         GGML_TYPE_F32,  GGML_TYPE_F16,  GGML_TYPE_BF16, GGML_TYPE_I64,  GGML_TYPE_I32,  GGML_TYPE_Q4_0,
         GGML_TYPE_Q4_1, GGML_TYPE_Q4_K, GGML_TYPE_Q5_0, GGML_TYPE_Q5_1, GGML_TYPE_Q5_K, GGML_TYPE_Q8_0, GGML_TYPE_Q6_K,
-        GGML_TYPE_MXFP4,
+        GGML_TYPE_MXFP4, GGML_TYPE_Q2_0,
 #ifdef GGML_OPENVINO_HAS_PQ2_0
         GGML_TYPE_PQ2_0,
 #endif
