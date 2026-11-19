@@ -33,6 +33,12 @@ The recommended Qwen3.6-35B-A3B Q4_K_M setup uses GPU with `GGML_OPENVINO_REQUAN
 
 See the [implementation guide](dev_doc/OPENVINO-RECURRENT-CACHE.md) for buffer ownership and rollback.
 
+# MXFP4 expert weights
+
+MXFP4 expert weights are extracted once during loading into backend-buffer planes: 16 bytes of adjacent F4 pairs and one F32 scale (4 bytes) per 32 weights, with an aligned scale-plane offset. The raw 17-byte blocks are not retained in the regular backend weight buffer. The fallback graph and GPU conversion pass share these planes; the pass only creates Constant views and graph nodes, without allocating or converting weight data.
+
+Non-backend weights and self-contained-blob paths that preserve raw bytes still require separate extracted storage. Source GGUF mappings can also remain mapped; load-time extraction does not unmap those files.
+
 # Compiled model cache
 
 `GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR` exports compiled CPU/GPU graphs with their weights. It bypasses the plugin-level `GGML_OPENVINO_CACHE_DIR` and uses `OPTIMIZE_SPEED`, so weightless caching is disabled.

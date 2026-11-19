@@ -5,13 +5,9 @@
 #include "ggml-openvino/ggml-openvino-extra.h"
 
 #include <cstdint>
-#include <cstring>
-#include <limits>
 #include <memory>
 #include <numeric>
 #include <openvino/op/add.hpp>
-#include <openvino/op/bitwise_and.hpp>
-#include <openvino/op/bitwise_right_shift.hpp>
 #include <openvino/op/broadcast.hpp>
 #include <openvino/op/concat.hpp>
 #include <openvino/op/constant.hpp>
@@ -49,11 +45,6 @@ namespace {
 
 std::shared_ptr<ov::op::v0::Constant> const_i64(const std::vector<int64_t> & values) {
     return ov::op::v0::Constant::create(ov::element::i64, ov::Shape{values.size()}, values);
-}
-
-ov::Output<ov::Node> slice_axis(const ov::Output<ov::Node> & input, int64_t axis, int64_t begin, int64_t end) {
-    return std::make_shared<ov::op::v8::Slice>(input, const_i64({begin}), const_i64({end}), const_i64({1}),
-                                              const_i64({axis}));
 }
 
 // GGML tensors are rank 4, but stateful models drop the leading size-1 batch dim, so
@@ -160,22 +151,20 @@ ov::Output<ov::Node> distinct_ids_for_skipped_slots(const ov::Output<ov::Node> &
     return std::make_shared<v1::Select>(skip, picked, ids);
 }
 
-ov::Output<ov::Node> translate_mul_mat_id_mxfp4_packed(const NodeContext & context,
+ov::Output<ov::Node> translate_mul_mat_id_mxfp4_planes(const NodeContext & context,
                                                        ov::Output<ov::Node> expert_weights,
                                                        ov::Output<ov::Node> activations,
                                                        ov::Output<ov::Node> ids) {
-    auto packed_shape = expert_weights.get_partial_shape().to_shape();
-    FRONT_END_OP_CONVERSION_CHECK(packed_shape.size() == 5 && packed_shape[4] == 17,
-                                  "Expected packed MXFP4 expert weights with shape [1, n_expert, m, k_blocks, 17]");
-
-    const int64_t n_expert = static_cast<int64_t>(packed_shape[1]);
-    const int64_t rows = static_cast<int64_t>(packed_shape[2]);
-    const int64_t k_blocks = static_cast<int64_t>(packed_shape[3]);
-    const int64_t qk = 32;
-    const int64_t cols = k_blocks * qk;
-
-    auto packed_shape_4d = const_i64({n_expert, rows, k_blocks, 17});
-    expert_weights = std::make_shared<ov::op::v1::Reshape>(expert_weights, packed_shape_4d, false);
+    auto reshape = ov::as_type_ptr<ov::op::v1::Reshape>(expert_weights.get_node_shared_ptr());
+    auto product = reshape ? ov::as_type_ptr<ov::op::v1::Multiply>(reshape->input_value(0).get_node_shared_ptr()) :
+                             nullptr;
+    auto convert = product ? ov::as_type_ptr<ov::op::v0::Convert>(product->input_value(0).get_node_shared_ptr()) :
+                             nullptr;
+    FRONT_END_OP_CONVERSION_CHECK(convert && product, "Expected extracted MXFP4 expert planes");
+    const auto shape = expert_weights.get_shape();
+    FRONT_END_OP_CONVERSION_CHECK(shape.size() == 3, "Expected MXFP4 experts with shape [n_expert, m, k]");
+    const int64_t rows = static_cast<int64_t>(shape[1]);
+    const int64_t cols = static_cast<int64_t>(shape[2]);
 
     auto activations_shape_4d = std::make_shared<ov::op::v3::ShapeOf>(activations, ov::element::i64);
     auto ids_shape_4d = std::make_shared<ov::op::v3::ShapeOf>(ids, ov::element::i64);
@@ -197,32 +186,9 @@ ov::Output<ov::Node> translate_mul_mat_id_mxfp4_packed(const NodeContext & conte
 
     auto gather_axis = ov::op::v0::Constant::create(ov::element::i32, ov::Shape{}, {0});
 
-    static const std::vector<float> f4e2m1_lut = {0.0f,  0.5f,  1.0f,  1.5f,  2.0f,  3.0f,  4.0f,  6.0f,
-                                                  -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f};
-    std::vector<float> e8m0_lut(256);
-    for (size_t i = 0; i < e8m0_lut.size(); ++i) {
-        uint32_t bits = static_cast<uint32_t>(i) << 23;
-        memcpy(&e8m0_lut[i], &bits, sizeof(float));
-    }
-    e8m0_lut[0] = std::numeric_limits<float>::min() / 2.0f;
-    e8m0_lut[255] = std::numeric_limits<float>::quiet_NaN();
-
-    auto f4_lut = ov::op::v0::Constant::create(ov::element::f32, ov::Shape{f4e2m1_lut.size()}, f4e2m1_lut);
-    auto scale_lut = ov::op::v0::Constant::create(ov::element::f32, ov::Shape{e8m0_lut.size()}, e8m0_lut);
-
-    auto selected_packed_weights = std::make_shared<ov::op::v8::Gather>(expert_weights, ids, gather_axis);
-    auto scale_byte = slice_axis(selected_packed_weights, 4, 0, 1);
-    auto qs = slice_axis(selected_packed_weights, 4, 1, 17);
-    auto low = std::make_shared<ov::op::v13::BitwiseAnd>(
-        qs, ov::op::v0::Constant::create(ov::element::u8, ov::Shape{}, {0x0F}), ov::op::AutoBroadcastType::NUMPY);
-    auto high_shift = std::make_shared<ov::op::v15::BitwiseRightShift>(
-        qs, ov::op::v0::Constant::create(ov::element::u8, ov::Shape{}, {4}), ov::op::AutoBroadcastType::NUMPY);
-    auto nibbles = std::make_shared<ov::op::v0::Concat>(ov::OutputVector{low, high_shift}, 4);
-    auto nibble_indices = std::make_shared<ov::op::v0::Convert>(nibbles, ov::element::i32);
-    auto weights_f32 = std::make_shared<ov::op::v8::Gather>(f4_lut, nibble_indices, gather_axis);
-
-    auto scale_indices = std::make_shared<ov::op::v0::Convert>(scale_byte, ov::element::i32);
-    auto scales_f32 = std::make_shared<ov::op::v8::Gather>(scale_lut, scale_indices, gather_axis);
+    auto selected_quants = std::make_shared<ov::op::v8::Gather>(convert->input_value(0), ids, gather_axis);
+    auto weights_f32 = std::make_shared<ov::op::v0::Convert>(selected_quants, ov::element::f32);
+    auto scales_f32 = std::make_shared<ov::op::v8::Gather>(product->input_value(1), ids, gather_axis);
     ov::Output<ov::Node> selected_weights = std::make_shared<ov::op::v1::Multiply>(weights_f32, scales_f32,
                                                                                   ov::op::AutoBroadcastType::NUMPY);
 
@@ -270,6 +236,7 @@ OutputVector translate_mul_mat_id(const NodeContext & context) {
     auto activations = process_view_input_new(context, 1);
     auto ids = process_view_input_new(context, 2);
 
+    
     if (activations.get_partial_shape().rank() == 3) {
         activations = std::make_shared<ov::op::v0::Unsqueeze>(activations, const_i64({0}));
     }
@@ -277,9 +244,8 @@ OutputVector translate_mul_mat_id(const NodeContext & context) {
         ids = std::make_shared<ov::op::v0::Unsqueeze>(ids, const_i64({0}));
     }
 
-    if (expert_weights.get_element_type() == ov::element::u8 && expert_weights.get_partial_shape().rank().is_static() &&
-        expert_weights.get_partial_shape().rank().get_length() == 5) {
-        return rename_outputs_with_suffix({translate_mul_mat_id_mxfp4_packed(context, expert_weights, activations, ids)},
+    if (expert_weights.get_node()->get_rt_info().count("__ggml_openvino_mxfp4_moe_planes")) {
+        return rename_outputs_with_suffix({translate_mul_mat_id_mxfp4_planes(context, expert_weights, activations, ids)},
                                           context.get_name());
     }
 
