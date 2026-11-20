@@ -32,8 +32,10 @@ struct graph_key {
     int n_leaves;
     std::string first_node_name;
     std::string last_node_name;
-    // External source descriptors, sampler row names, image shapes and weight allocation generations.
+    // External source descriptors, sampler row names and image shapes.
     std::vector<std::string> input_srcs;
+    // Process-local identities used only by the private cache key.
+    std::vector<size_t> weight_buffer_ids;
 
     graph_key(const ggml_cgraph * cgraph, bool include_inputs = false, bool dynamic_vision = false) :
         n_nodes(cgraph->n_nodes), n_leaves(cgraph->n_leafs) {
@@ -58,7 +60,7 @@ struct graph_key {
                     weight_buffers.insert(buffer).second) {
                     const auto id = ggml_backend_openvino_buffer_get_ctx_id(buffer);
                     if (id != 0) {
-                        input_srcs.push_back("weight_buffer:" + std::to_string(id));
+                        weight_buffer_ids.push_back(id);
                     }
                 }
             }
@@ -117,7 +119,8 @@ struct graph_key {
     bool operator==(const graph_key & other) const {
         return n_nodes == other.n_nodes && n_leaves == other.n_leaves &&
                first_node_name == other.first_node_name &&
-               last_node_name == other.last_node_name && input_srcs == other.input_srcs;
+               last_node_name == other.last_node_name && input_srcs == other.input_srcs &&
+               weight_buffer_ids == other.weight_buffer_ids;
     }
 };
 
@@ -131,6 +134,9 @@ struct graph_key_hash {
         }
         for (const auto & s : key.input_srcs) {
             hash ^= std::hash<std::string>{}(s) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        }
+        for (const auto id : key.weight_buffer_ids) {
+            hash ^= std::hash<size_t>{}(id) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
         }
         return hash;
     }
