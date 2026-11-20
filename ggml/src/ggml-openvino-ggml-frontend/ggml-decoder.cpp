@@ -155,7 +155,7 @@ std::vector<int64_t> permute_order_from_params(const int32_t * params) {
 }
 
 bool is_inplace_op(const ggml_tensor * node) {
-    return node->op == GGML_OP_SET_ROWS || node->op == GGML_OP_CPY || (node->op == GGML_OP_SCALE && node->view_src);
+    return node->op == GGML_OP_SET_ROWS || node->op == GGML_OP_CPY || ((node->op == GGML_OP_SCALE || node->op == GGML_OP_FILL) && node->view_src);
 }
 
 bool is_same_shape(const ggml_tensor * a, const ggml_tensor * b) {
@@ -483,8 +483,10 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         }
         break;
     }
-    case GGML_OP_SCALE: {
-        if (node->view_src && node->buffer->usage == GGML_BACKEND_BUFFER_USAGE_ANY) {
+    case GGML_OP_SCALE:
+    case GGML_OP_FILL: {
+        if ((node->op == GGML_OP_SCALE || is_recurrent_cache_reset(node)) && node->view_src &&
+            node->buffer->usage == GGML_BACKEND_BUFFER_USAGE_ANY) {
             op_case = node->view_src->ne[1] == 1 ? 2 : 1;
         }
         break;
@@ -857,7 +859,7 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
         if (node->op == GGML_OP_GATED_DELTA_NET) {
             model_params.state_size = node->src[0]->ne[0];
         }
-        if (node->op == GGML_OP_SCALE && node->view_src != nullptr && is_recurrent_cache(node->view_src)) {
+        if (is_recurrent_cache_reset(node)) {
             if (model_params.n_rs_slots == -1) {
                 model_params.n_rs_slots = node->view_src->ne[1];
             } else {
@@ -1825,7 +1827,8 @@ std::vector<std::string> GgmlOvDecoder::get_input_names(int node_idx) const {
     const auto & info = m_node_info_list[node_idx];
     const auto * node = info.node;
     auto inputs = info.node_inputs_names;
-    if (node->op == GGML_OP_SCALE && info.node_op_case == 1 && m_model_inputs.count("cache_rs_reset_idx")) {
+    if ((node->op == GGML_OP_SCALE || is_recurrent_cache_reset(node)) && info.node_op_case == 1 &&
+        m_model_inputs.count("cache_rs_reset_idx")) {
         inputs[0] = get_tensor_ov_name(m_cgraph, node->view_src);
         inputs.push_back("cache_rs_reset_idx");
         inputs.push_back("cache_rs_reset_len");
@@ -2054,7 +2057,7 @@ ov::Any GgmlOvDecoder::get_attribute(const std::string & name) const {
             if (name == "kq_soft_cap") return op_param_float(node, 2);
             if (name == "has_mask") return node->src[3] != nullptr;
             // Stateful graphs keep the fused SDPA, which the stateful-SDPA fusion expects.
-            if (name == "manual_gqa_attention") return !m_is_stateful && ggml_openvino_manual_gqa_attn_enabled();
+            if (name == "manual_gqa_attention") return !m_is_stateful && ggml_openvino_manual_gqa_enabled();
             // Fold a small attention scale into Q (see ggml_openvino_scale_reorder_enabled).
             if (name == "prescale_q") return ggml_openvino_scale_reorder_enabled();
             break;
@@ -2080,6 +2083,12 @@ ov::Any GgmlOvDecoder::get_attribute(const std::string & name) const {
             break;
 
         case GGML_OP_FILL:
+            if (is_recurrent_cache_reset(node)) {
+                // presented to the frontend as SCALE by 0 on the cache view
+                if (name == "axis" && op_case == 1 && m_model_inputs.count("cache_rs_reset_idx")) return int64_t{2};
+                if (name == "scale" || name == "bias") return 0.0f;
+                break;
+            }
             if (name == "fill_value") return op_param_float(node, 0);
             break;
 
@@ -2215,6 +2224,8 @@ std::vector<std::string> GgmlOvDecoder::get_output_names() const {
 
 std::string GgmlOvDecoder::compute_op_type(const ggml_tensor * node) {
     switch (node->op) {
+    case GGML_OP_FILL:
+        return is_recurrent_cache_reset(node) ? std::string("GGML_OP_SCALE") : std::string("GGML_OP_FILL");
     case GGML_OP_UNARY:
         return std::string("GGML_UNARY_OP_") + ggml_unary_op_name(ggml_get_unary_op(node));
     case GGML_OP_GLU:
@@ -2695,7 +2706,6 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
         case GGML_OP_CLAMP:
         case GGML_OP_PAD:
         // Element-wise math (e.g. the squared-ReLU FFN uses SQR), ROLL and UPSCALE keep the dynamic extent.
-        case GGML_OP_ADD1:
         case GGML_OP_SQR:
         case GGML_OP_SQRT:
         case GGML_OP_LOG:

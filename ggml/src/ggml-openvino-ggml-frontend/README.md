@@ -1,4 +1,31 @@
-# Compiled model cache
+# OpenVINO GGUF frontend translation path
+
+This directory is an alternative build of the `ggml-openvino` backend. Instead of the in-tree GGML-to-OpenVINO translator
+in `ggml/src/ggml-openvino/`, `GgmlOvDecoder` here bridges ggml graphs to the OpenVINO GGUF frontend, which owns the op
+translations. The in-tree translator stays the default and is not changed by this path.
+
+## Build
+
+Add `-DGGML_OPENVINO_GGUF_FRONTEND=ON` to the usual OpenVINO configure line from [docs/backend/OPENVINO.md](../../../docs/backend/OPENVINO.md):
+
+```sh
+cmake -B build/ReleaseOV -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_OPENVINO=ON -DGGML_OPENVINO_GGUF_FRONTEND=ON
+cmake --build build/ReleaseOV --parallel
+```
+
+This requires an OpenVINO build that exports the `openvino::frontend::gguf` CMake target; configuration fails with an
+explicit error if it is missing. The build rules are in [CMakeLists.cmake](CMakeLists.cmake). Quantization, the model cache and
+device selection are compiled from `ggml/src/ggml-openvino/` in both modes; the headers of the same name here only forward to them.
+
+## Settings that only apply to this path
+
+All `GGML_OPENVINO_*` variables in [docs/backend/OPENVINO.md](../../../docs/backend/OPENVINO.md) keep their meaning. In addition:
+
+| Variable | Devices | Type | Default | Description |
+| --- | --- | --- | --- | --- |
+| `GGML_OPENVINO_DISABLE_SCALE_REORDER` | GPU, NPU | Boolean | `0` | Apply a constant scale (Granite's residual and attention multipliers) before the MatMul it follows instead of after it, so an f16 plugin does not overflow on blocks whose unscaled result is out of range. The result is identical in exact arithmetic. Not applied on the CPU, which runs in f32. `1` turns it off. With the default translator it has no effect. |
+
+## Compiled model cache
 
 `GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR` exports compiled CPU/GPU graphs with their weights. It bypasses the plugin-level `GGML_OPENVINO_CACHE_DIR` and uses `OPTIMIZE_SPEED`, so weightless caching is disabled.
 
@@ -33,7 +60,7 @@ Cache-only mode uses the settings provided by the current process. Keep these va
 
 A missing or incompatible graph fails with an error instead of compiling with absent weights. The fingerprint uses the dynamic graph's topology, ports, model parameters, weights, settings, and OpenVINO version; changing only dynamic token or KV sizes does not require a new entry. A different workload can still require another graph; populate it first without cache-only mode.
 
-## Restrictions
+### Restrictions
 
 - Cache-only mode requires Linux or Windows and mmap loading (`--load-mode mmap`, or the default when all selected devices support mmap). Do not use tensor validation or mlock when trying to avoid weight reads.
 - On Windows, the backend commits virtual memory for its buffers without touching weight pages. Large models can still reach the system commit limit.

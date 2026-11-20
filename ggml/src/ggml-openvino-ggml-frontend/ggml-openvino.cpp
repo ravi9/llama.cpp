@@ -17,9 +17,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <openvino/core/type/element_type.hpp>
+#include <openvino/op/constant.hpp>
+#include <openvino/op/convert.hpp>
+#include <openvino/op/parameter.hpp>
 #include <openvino/openvino.hpp>
 #include <openvino/runtime/allocator.hpp>
 #include <openvino/runtime/intel_gpu/ocl/ocl.hpp>
@@ -126,11 +130,11 @@ struct ggml_backend_openvino_buffer_context {
             return;
         }
 
-        const auto & device_name = ggml_openvino_get_device_name();
+        const auto & device_name = ggml_openvino_get_available_devices()[device];
 
         if (is_remote) {
             GGML_ASSERT(ggml_openvino_is_gpu());
-            auto remote_context = ggml_openvino_get_remote_context();
+            auto remote_context = ggml_openvino_get_remote_context(device_name);
             auto gpu_context = remote_context->as<ov::intel_gpu::ocl::ClContext>();
             ov::intel_gpu::ocl::USMTensor usm_tensor =
                 gpu_context.create_usm_device_tensor(ov::element::u8, ov::Shape{size});
@@ -380,9 +384,12 @@ static enum ggml_status ggml_backend_openvino_buffer_init_tensor(ggml_backend_bu
     // GGML_LOG_DEBUG("%s: buffer usage=%d, tensor name=%s\n", __func__, buffer->usage, tensor->name);
     ggml_backend_openvino_buffer_context * ctx = (ggml_backend_openvino_buffer_context *) buffer->context;
 
-    // Put kvcache on device memory for GPU (NPU memory is too small even for kvcache)
-    if (strncmp(tensor->name, "cache_", 6) == 0 && !ctx->is_remote && ggml_openvino_is_gpu() &&
-        !is_stateful_enabled()) {
+    // Put kvcache on device memory for GPU (NPU memory is too small even for kvcache). Same for the speculative
+    // decoding feature buffers (llama_context::layer_inp_dev / h_nextn_dev): every graph reads or writes the whole
+    // buffer, so in host memory the plugin copies it to the device and back on every inference.
+    const bool is_device_state = strncmp(tensor->name, "cache_", 6) == 0 ||
+                                 strcmp(tensor->name, "layer_inp_dev") == 0 || strcmp(tensor->name, "h_nextn_dev") == 0;
+    if (is_device_state && !ctx->is_remote && ggml_openvino_is_gpu() && !is_stateful_enabled()) {
         GGML_ASSERT(ctx->tensor_extras.empty());
         auto device = ctx->device;
         auto size = ctx->size;
@@ -427,7 +434,8 @@ static enum ggml_status ggml_backend_openvino_buffer_init_tensor(ggml_backend_bu
             if (!ggml_are_same_shape(tensor, tensor->view_src) && ggml_is_contiguous(tensor) &&
                 !ggml_is_quantized(tensor->type) && tensor->data != nullptr && ggml_nbytes(tensor) > 0) {
                 if (ggml_openvino_tensor_extra * extra =
-                        ggml_openvino_create_tensor_extra(tensor, ctx->is_remote)) {
+                        ggml_openvino_create_tensor_extra(tensor, ctx->is_remote,
+                                                          ggml_openvino_get_available_devices()[ctx->device])) {
                     auto it = ctx->tensor_extras.find(tensor);
                     if (it != ctx->tensor_extras.end()) {
                         delete it->second;
@@ -445,7 +453,8 @@ static enum ggml_status ggml_backend_openvino_buffer_init_tensor(ggml_backend_bu
     ctx = (ggml_backend_openvino_buffer_context *) buffer->context;
 
     if (tensor->data != nullptr && !ggml_is_quantized(tensor->type) && ggml_nbytes(tensor) > 0) {
-        ggml_openvino_tensor_extra * extra = ggml_openvino_create_tensor_extra(tensor, ctx->is_remote);
+        ggml_openvino_tensor_extra * extra = ggml_openvino_create_tensor_extra(
+            tensor, ctx->is_remote, ggml_openvino_get_available_devices()[ctx->device]);
         if (extra != nullptr) {
             auto it = ctx->tensor_extras.find(tensor);
             if (it != ctx->tensor_extras.end()) {
@@ -470,7 +479,7 @@ static void ggml_backend_openvino_buffer_memset_tensor(ggml_backend_buffer_t buf
 
     if (ctx->is_remote) {
         // For remote (device) buffers, use OpenCL USM memfill
-        cl_command_queue queue = ggml_openvino_get_cl_queue();
+        cl_command_queue queue = ggml_openvino_get_cl_queue(ggml_openvino_get_available_devices()[ctx->device]);
         auto mem_fill_fn = ggml_openvino_get_clEnqueueMemFillINTEL();
         if (mem_fill_fn != nullptr) {
             uint8_t pattern = value;
@@ -669,7 +678,7 @@ static void ggml_backend_openvino_buffer_set_tensor(ggml_backend_buffer_t buffer
     } else {
         // Non-weight tensor (KV cache, activations, etc.) - copy data. test-backend-ops also goes here
         if (ctx->is_remote) {
-            cl_command_queue queue = ggml_openvino_get_cl_queue();
+            cl_command_queue queue = ggml_openvino_get_cl_queue(ggml_openvino_get_available_devices()[ctx->device]);
             auto mem_cpy_fn = ggml_openvino_get_clEnqueueMemcpyINTEL();
             if (mem_cpy_fn != nullptr) {
                 cl_int err = mem_cpy_fn(queue, CL_TRUE, (char *) tensor->data + offset, data, size,
@@ -689,7 +698,8 @@ static void ggml_backend_openvino_buffer_set_tensor(ggml_backend_buffer_t buffer
         if (ggml_openvino_extra_unchanged(ctx, tensor)) {
             return;
         }
-        ggml_openvino_tensor_extra * extra = ggml_openvino_create_tensor_extra(tensor, ctx->is_remote);
+        ggml_openvino_tensor_extra * extra = ggml_openvino_create_tensor_extra(
+            tensor, ctx->is_remote, ggml_openvino_get_available_devices()[ctx->device]);
         if (extra == nullptr) {
             // GGML_LOG_ERROR("%s: failed to create tensor extra for %s\n", __func__, tensor->name);
             return;
@@ -701,6 +711,64 @@ static void ggml_backend_openvino_buffer_set_tensor(ggml_backend_buffer_t buffer
         }
         ctx->tensor_extras[tensor] = extra;
         tensor->extra = extra;
+    }
+}
+
+// Evaluates a weight node (Constant -> Convert -> [Subtract] -> Multiply -> [Reshape]) on the host.
+static ov::Tensor ggml_openvino_eval_weight_node(const ov::Output<ov::Node> & output) {
+    const auto node = output.get_node_shared_ptr();
+    if (const auto constant = ov::as_type_ptr<ov::op::v0::Constant>(node)) {
+        return constant->get_tensor_view();
+    }
+    ov::TensorVector inputs;
+    for (const auto & input : node->input_values()) {
+        inputs.push_back(ggml_openvino_eval_weight_node(input));
+    }
+    ov::TensorVector outputs;
+    for (size_t i = 0; i < node->get_output_size(); i++) {
+        outputs.emplace_back(node->get_output_element_type(i), node->get_output_shape(i));
+    }
+    if (!node->evaluate(outputs, inputs)) {
+        OPENVINO_THROW("cannot evaluate ", node->get_type_name());
+    }
+    return outputs[output.get_index()];
+}
+
+// set_tensor converts a quantized weight in place (extracted or requantized layout), so tensor->data
+// no longer holds the ggml bytes. Rebuild them from the weight node: dequantize, then quantize back
+// to the tensor type. The result is close to the original data, but not bit-exact.
+static bool ggml_openvino_weight_to_ggml(const ggml_tensor * tensor, std::vector<uint8_t> & out) {
+    const auto * extra = static_cast<const ggml_openvino_extra_base *>(tensor->extra);
+    std::shared_ptr<ov::Node> weight_node;
+    if (extra->type == ggml_openvino_extra_base::Type::QUANTIZED_WEIGHT) {
+        weight_node = static_cast<const ggml_openvino_quantized_weight_extra *>(extra)->weight_node;
+    } else if (extra->type == ggml_openvino_extra_base::Type::WEIGHT) {
+        weight_node = static_cast<const ggml_openvino_weight_extra *>(extra)->weight_node;
+    }
+    if (weight_node == nullptr || ggml_quantize_requires_imatrix(tensor->type)) {
+        return false;
+    }
+    try {
+        ov::Tensor values = ggml_openvino_eval_weight_node(weight_node->output(0));
+        if (values.get_size() != (size_t) ggml_nelements(tensor)) {
+            return false;
+        }
+        if (values.get_element_type() != ov::element::f32) {
+            auto param = std::make_shared<ov::op::v0::Parameter>(values.get_element_type(), values.get_shape());
+            auto convert = std::make_shared<ov::op::v0::Convert>(param, ov::element::f32);
+            ov::TensorVector f32{ov::Tensor(ov::element::f32, values.get_shape())};
+            if (!convert->evaluate(f32, {values})) {
+                return false;
+            }
+            values = f32[0];
+        }
+        out.resize(ggml_nbytes(tensor));
+        ggml_quantize_chunk(tensor->type, values.data<float>(), out.data(), 0, ggml_nrows(tensor), tensor->ne[0],
+                            nullptr);
+        return true;
+    } catch (const std::exception & e) {
+        GGML_LOG_WARN("%s: cannot rebuild %s: %s\n", __func__, tensor->name, e.what());
+        return false;
     }
 }
 
@@ -717,9 +785,18 @@ static void ggml_backend_openvino_buffer_get_tensor(ggml_backend_buffer_t buffer
         GGML_ABORT("ggml-openvino: cannot read unloaded weights in cache-only mode");
     }
 
+    if (ggml_is_quantized(tensor->type) && tensor->view_src == nullptr && tensor->extra != nullptr &&
+        static_cast<const ggml_openvino_extra_base *>(tensor->extra)->type != ggml_openvino_extra_base::Type::TENSOR) {
+        std::vector<uint8_t> rebuilt;
+        if (ggml_openvino_weight_to_ggml(tensor, rebuilt)) {
+            memcpy(data, rebuilt.data() + offset, size);
+            return;
+        }
+    }
+
     if (ctx->is_remote) {
         // For remote (device) buffers, use OpenCL USM memcpy (device-to-host)
-        cl_command_queue queue = ggml_openvino_get_cl_queue();
+        cl_command_queue queue = ggml_openvino_get_cl_queue(ggml_openvino_get_available_devices()[ctx->device]);
         auto mem_cpy_fn = ggml_openvino_get_clEnqueueMemcpyINTEL();
         if (mem_cpy_fn != nullptr) {
             cl_int err = mem_cpy_fn(queue, CL_TRUE, data, (const char *) tensor->data + offset,
@@ -745,7 +822,7 @@ static bool ggml_backend_openvino_buffer_cpy_tensor(ggml_backend_buffer_t buffer
 
     if (ctx->is_remote) {
         // For remote (device) buffers, use OpenCL USM memcpy
-        cl_command_queue queue = ggml_openvino_get_cl_queue();
+        cl_command_queue queue = ggml_openvino_get_cl_queue(ggml_openvino_get_available_devices()[ctx->device]);
         auto mem_cpy_fn = ggml_openvino_get_clEnqueueMemcpyINTEL();
         if (mem_cpy_fn == nullptr) {
             GGML_LOG_ERROR("%s: clEnqueueMemcpyINTEL not available for GPU buffer\n", __func__);
@@ -765,7 +842,7 @@ static bool ggml_backend_openvino_buffer_cpy_tensor(ggml_backend_buffer_t buffer
         if (ggml_backend_buffer_is_openvino(src->buffer)) {
             ggml_backend_openvino_buffer_context * src_ctx =
                 (ggml_backend_openvino_buffer_context *) src->buffer->context;
-            if (src_ctx->is_remote) {
+            if (src_ctx->is_remote && src_ctx->device == ctx->device) {
                 cl_int err = mem_cpy_fn(queue, CL_TRUE, dst->data,
                                         src->data, ggml_nbytes(src),
                                         0, nullptr, nullptr);
@@ -801,7 +878,7 @@ static void ggml_backend_openvino_buffer_clear(ggml_backend_buffer_t buffer, uin
     ggml_backend_openvino_buffer_context * ctx = (ggml_backend_openvino_buffer_context *) buffer->context;
     GGML_ASSERT(ctx->data != nullptr);
     if (ctx->is_remote) {
-        cl_command_queue queue = ggml_openvino_get_cl_queue();
+        cl_command_queue queue = ggml_openvino_get_cl_queue(ggml_openvino_get_available_devices()[ctx->device]);
         auto mem_fill_fn = ggml_openvino_get_clEnqueueMemFillINTEL();
         if (mem_fill_fn != nullptr) {
             uint8_t pattern = value;
@@ -865,9 +942,9 @@ static size_t ggml_backend_openvino_buffer_type_get_alignment(ggml_backend_buffe
 }
 
 static size_t ggml_backend_openvino_buffer_type_get_max_size(ggml_backend_buffer_type_t buft) {
-    GGML_UNUSED(buft);
     // A GPU caps a single memory object, so let ggml split a large buffer into parts that fit
-    return ggml_openvino_max_alloc_size();
+    ggml_backend_openvino_buffer_type_context * buft_ctx = (ggml_backend_openvino_buffer_type_context *) buft->context;
+    return ggml_openvino_max_alloc_size(ggml_openvino_get_available_devices()[buft_ctx->device]);
 }
 
 static size_t ggml_backend_openvino_buffer_type_get_alloc_size(ggml_backend_buffer_type_t buft,
@@ -1130,11 +1207,11 @@ static ggml_guid_t ggml_backend_openvino_guid(void) {
     return &guid;
 }
 
-static std::shared_ptr<ov_runtime_context> get_ov_runtime_context_ptr() {
+static std::shared_ptr<ov_runtime_context> get_ov_runtime_context_ptr(int device) {
     // Share compiled models, but give every backend its own requests and KV state.
     static auto cache = std::make_shared<ov_compiled_model_cache>();
     auto r_ctx = std::make_shared<ov_runtime_context>();
-    r_ctx->device = ggml_openvino_get_device_name();
+    r_ctx->device = ggml_openvino_get_available_devices()[device];
     r_ctx->stateful = is_stateful_enabled() && !ggml_openvino_is_npu();
     r_ctx->compiled_cache = cache;
     std::lock_guard<std::mutex> cache_lock(cache->mutex);
@@ -1155,7 +1232,7 @@ GGML_BACKEND_API ggml_backend_t ggml_backend_openvino_init(int device) {
         return nullptr;
     }
 
-    ctx->runtime_context = get_ov_runtime_context_ptr();
+    ctx->runtime_context = get_ov_runtime_context_ptr(device);
     if (ctx->runtime_context == nullptr) {
         GGML_LOG_ERROR("%s: failed to allocate runtime context\n", __func__);
         delete ctx;
@@ -1343,9 +1420,9 @@ static void ggml_backend_openvino_device_get_memory(ggml_backend_dev_t dev, size
 
 static enum ggml_backend_dev_type ggml_backend_openvino_device_get_type(ggml_backend_dev_t dev) {
     ggml_backend_openvino_device_context * ctx = (ggml_backend_openvino_device_context *) dev->context;
-    // Only the device selected by GGML_OPENVINO_DEVICE is offered for offload. The others are
+    // Only the devices selected by GGML_OPENVINO_DEVICE are offered for offload. The others are
     // registered for discovery (--list-devices) only; llama.cpp skips IGPU devices when a GPU exists.
-    return ctx->ov_name == ggml_openvino_get_device_name() ? GGML_BACKEND_DEVICE_TYPE_GPU : GGML_BACKEND_DEVICE_TYPE_IGPU;
+    return ggml_openvino_is_selected_device(ctx->ov_name) ? GGML_BACKEND_DEVICE_TYPE_GPU : GGML_BACKEND_DEVICE_TYPE_IGPU;
 }
 
 static void ggml_backend_openvino_device_get_props(ggml_backend_dev_t dev, ggml_backend_dev_props * props) {
@@ -1366,7 +1443,7 @@ static void ggml_backend_openvino_device_get_props(ggml_backend_dev_t dev, ggml_
 static ggml_backend_t ggml_backend_openvino_device_init(ggml_backend_dev_t dev, const char * params) {
     GGML_UNUSED(params);
     ggml_backend_openvino_device_context * ctx = (ggml_backend_openvino_device_context *) dev->context;
-    if (ctx->ov_name != ggml_openvino_get_device_name()) {
+    if (!ggml_openvino_is_selected_device(ctx->ov_name)) {
         // Not an error: test-backend-ops initializes every device
         GGML_LOG_WARN("%s: %s (OpenVINO %s) is not the selected device, no ops will run on it; "
                       "set GGML_OPENVINO_DEVICE=%s to use it\n",
@@ -1459,7 +1536,7 @@ static ggml_openvino_op_support ggml_backend_openvino_device_supports_op_impl(gg
     GGML_ASSERT(dev->reg != nullptr);
 
     ggml_backend_openvino_device_context * dev_ctx = (ggml_backend_openvino_device_context *) dev->context;
-    if (dev_ctx->ov_name != ggml_openvino_get_device_name()) {
+    if (!ggml_openvino_is_selected_device(dev_ctx->ov_name)) {
         // Data placed on a non-selected device (e.g. with -dev) can never run here; stop with a hint
         // instead of the generic scheduler abort. Unallocated tensors (test-backend-ops) pass through.
         for (int i = -1; i < GGML_MAX_SRC; i++) {
@@ -1514,21 +1591,124 @@ static ggml_openvino_op_support ggml_backend_openvino_device_supports_op_impl(gg
     return {true, ""};
 }
 
+// Report what supports_op() accepts and rejects, so a graph that silently falls back to another
+// backend can be diagnosed. Every op rejected here becomes a graph split; if nothing is rejected,
+// the whole graph runs on OpenVINO.
+//
+// Gated by GGML_OPENVINO_LOG_SUPPORTS_OP:
+//   1  one summary at exit listing every distinct op kind and verdict -- start here
+//   2  additionally log every individual call, with the tensor name and shape
+//
+// This wraps the decision function instead of instrumenting it, so all of its return paths are
+// covered -- including the several that reject without logging a reason of their own, and any
+// added later.
+//
+// The summary is reported at exit rather than on each op's first occurrence, because the earliest
+// calls happen before the log handler emits anything: with level 2 the first line to actually
+// appear already reads "call 1244". A first-occurrence line would therefore be silently dropped
+// for exactly the ops that are only ever seen early. Counting is unaffected, so the summary is the
+// reliable view; treat the level-2 stream as a sample, not a complete trace.
+namespace {
+
+struct supports_op_tally {
+    std::mutex mutex;
+    // key: "<op>:ok" / "<op>:no" -> number of calls
+    std::map<std::string, size_t> counts;
+
+    // Report totals once, at exit. Registered lazily so a run with the knob off costs nothing.
+    // atexit runs while the ggml log callback is still valid, which static destruction does not
+    // guarantee.
+    void arm_summary() {
+        static std::once_flag armed;
+        std::call_once(armed, [] {
+            std::atexit([] {
+                auto & self = instance();
+                std::lock_guard<std::mutex> lock(self.mutex);
+
+                size_t n_accept_kinds = 0;
+                size_t n_reject_kinds = 0;
+                GGML_LOG_WARN("ov-supports-op: ---- summary (distinct op kinds, with call counts) ----\n");
+                for (const auto & [key, count] : self.counts) {
+                    const bool ok = key.size() > 3 && key.compare(key.size() - 3, 3, ":ok") == 0;
+                    ok ? ++n_accept_kinds : ++n_reject_kinds;
+                    GGML_LOG_WARN("ov-supports-op:   %-8s %-24s %zu call(s)\n", ok ? "ACCEPT" : "REJECT",
+                                  key.substr(0, key.size() - 3).c_str(), count);
+                }
+                if (n_reject_kinds == 0) {
+                    GGML_LOG_WARN("ov-supports-op: %zu op kind(s) accepted, 0 rejected"
+                                  " -- every op was supported, so no split originated here\n",
+                                  n_accept_kinds);
+                } else {
+                    GGML_LOG_WARN("ov-supports-op: %zu op kind(s) accepted, %zu REJECTED"
+                                  " -- each rejected kind forces a graph split\n",
+                                  n_accept_kinds, n_reject_kinds);
+                }
+            });
+        });
+    }
+
+    static supports_op_tally & instance() {
+        static supports_op_tally tally;
+        return tally;
+    }
+};
+
+}  // namespace
+
 static bool ggml_backend_openvino_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
     auto res = ggml_backend_openvino_device_supports_op_impl(dev, op);
-    if (!res.is_supported) {
+    const bool supported = res.is_supported;
+    if (!supported) {
         static const bool log_unsupported = ggml_openvino_getenv_int("GGML_OPENVINO_LOG_UNSUPPORTED_OPS") != 0;
         if (log_unsupported) {
             GGML_LOG_WARN("OpenVINO op unsupported: op '%s' (%s), type %s: %s\n",
                           op->name, ggml_op_name(op->op), ggml_type_name(op->type), res.reason.c_str());
         }
     }
-    return res.is_supported;
+
+    static const int log_level = ggml_openvino_getenv_int("GGML_OPENVINO_LOG_SUPPORTS_OP");
+    if (log_level <= 0) {
+        return supported;
+    }
+
+    // Name the op the way ggml does: UNARY and GLU carry their real identity in a sub-enum, so
+    // logging only "UNARY" would merge SILU with everything else.
+    std::string op_desc = ggml_op_name(op->op);
+    if (op->op == GGML_OP_UNARY) {
+        op_desc += std::string("/") + ggml_unary_op_name(ggml_get_unary_op(op));
+    } else if (op->op == GGML_OP_GLU) {
+        op_desc += std::string("/") + ggml_glu_op_name(ggml_get_glu_op(op));
+    }
+
+    // The scheduler calls supports_op() on every graph build and may do so from several threads,
+    // so the tally needs a lock. Keyed on op identity *and* verdict, because the same op can be
+    // accepted at one shape and rejected at another (e.g. a quantized 3-D src).
+    auto & tally = supports_op_tally::instance();
+    tally.arm_summary();
+
+    size_t count;
+    {
+        std::lock_guard<std::mutex> lock(tally.mutex);
+        count = ++tally.counts[op_desc + (supported ? ":ok" : ":no")];
+    }
+
+    if (log_level >= 2) {
+        GGML_LOG_WARN("ov-supports-op: %-6s %-22s name='%s' type=%s ne=[%ld,%ld,%ld,%ld] (call %zu)\n",
+                      supported ? "ACCEPT" : "REJECT", op_desc.c_str(), op->name, ggml_type_name(op->type),
+                      (long) op->ne[0], (long) op->ne[1], (long) op->ne[2], (long) op->ne[3], count);
+    }
+
+    return supported;
 }
 
 static bool ggml_backend_openvino_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
-    return ggml_backend_buft_is_openvino(buft) || ggml_backend_buft_is_host(buft);
-    GGML_UNUSED(dev);
+    if (ggml_backend_buft_is_openvino(buft)) {
+        ggml_backend_openvino_device_context * dev_ctx = (ggml_backend_openvino_device_context *) dev->context;
+        ggml_backend_openvino_buffer_type_context * buft_ctx =
+            (ggml_backend_openvino_buffer_type_context *) buft->context;
+        return buft_ctx->device == dev_ctx->device;
+    }
+    return ggml_backend_buft_is_host(buft);
 }
 
 static const struct ggml_backend_device_i ggml_backend_openvino_device_interface = {
@@ -1605,7 +1785,7 @@ GGML_BACKEND_API ggml_backend_reg_t ggml_backend_openvino_reg(void) {
                 dev_ctx->ov_name = openvino_devices[i];
                 // The device is chosen with GGML_OPENVINO_DEVICE, not -dev, so show the value to set
                 dev_ctx->description = "GGML_OPENVINO_DEVICE=" + dev_ctx->ov_name +
-                                       (dev_ctx->ov_name == ggml_openvino_get_device_name() ? " (selected)" : "") +
+                                       (ggml_openvino_is_selected_device(dev_ctx->ov_name) ? " (selected)" : "") +
                                        " - " + ggml_openvino_get_device_description(dev_ctx->ov_name);
                 dev_ctx->total_memory = 0;
                 if (ov_device_has_prefix(dev_ctx->ov_name, "GPU")) {

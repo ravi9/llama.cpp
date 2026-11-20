@@ -107,7 +107,7 @@ std::optional<ov::Tensor> try_make_kv_sliced_tensor(const std::shared_ptr<GgmlOv
     sliced_shape[2] = static_cast<size_t>(n_kv);
 
     if (ggml_openvino_buffer_is_remote(ggml_tensor)) {
-        auto remote_context = ggml_openvino_get_remote_context();
+        auto remote_context = ggml_openvino_get_remote_context(ggml_decoder->device);
         auto gpu_context = remote_context->as<ov::intel_gpu::ocl::ClContext>();
         return gpu_context.create_tensor(ggml_decoder->get_ov_type(ggml_tensor), sliced_shape, ggml_tensor->data);
     }
@@ -247,7 +247,7 @@ std::optional<ov::Tensor> try_make_kv_4d_tensor(const std::shared_ptr<GgmlOvDeco
     const ov::Shape shape{1, static_cast<size_t>(ggml_tensor->ne[1]), n_heads_kv,
                           static_cast<size_t>(ggml_tensor->ne[0]) / n_heads_kv};
     if (ggml_openvino_buffer_is_remote(ggml_tensor)) {
-        auto remote_context = ggml_openvino_get_remote_context();
+        auto remote_context = ggml_openvino_get_remote_context(ggml_decoder->device);
         auto gpu_context = remote_context->as<ov::intel_gpu::ocl::ClContext>();
         return gpu_context.create_tensor(ggml_decoder->get_ov_type(ggml_tensor), shape, ggml_tensor->data);
     }
@@ -255,7 +255,7 @@ std::optional<ov::Tensor> try_make_kv_4d_tensor(const std::shared_ptr<GgmlOvDeco
 }
 
 static uint64_t ggml_openvino_model_cache_extra_cfg(bool stateful, bool recurrent) {
-    const bool manual_gqa_enabled = ggml_openvino_manual_gqa_attn_enabled();
+    const bool manual_gqa_enabled = ggml_openvino_manual_gqa_enabled();
 
     uint64_t extra_cfg = 1;  // Graph-ordinal port names (invalidate older disk-cache blobs).
     extra_cfg = extra_cfg * 131 + (stateful ? (recurrent ? 2u : 1u) : 0u);
@@ -265,6 +265,9 @@ static uint64_t ggml_openvino_model_cache_extra_cfg(bool stateful, bool recurren
     extra_cfg = extra_cfg * 131 + (manual_gqa_enabled ? 1u : 0u);
     extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_PROFILING") >= 2 ? 1u : 0u);
     extra_cfg = extra_cfg * 131 + (ggml_openvino_shape_from_mask_enabled() ? 1u : 0u);
+    // Frontend-only settings are hashed here rather than in the shared model-cache.cpp settings list, so adding one
+    // never changes the cache fingerprint of the in-tree translator.
+    extra_cfg = extra_cfg * 131 + (ggml_openvino_scale_reorder_enabled() ? 1u : 0u);
     return extra_cfg;
 }
 
@@ -498,7 +501,7 @@ static void reset_single_slot_recurrent_cache(ggml_cgraph * cgraph,
     std::set<ggml_backend_buffer_t> buffers;
     for (int i = 0; i < cgraph->n_nodes; i++) {
         auto * node = cgraph->nodes[i];
-        if (node->op == GGML_OP_SCALE && GgmlOvDecoder::is_recurrent_cache(node->view_src) &&
+        if (GgmlOvDecoder::is_recurrent_cache_reset(node) &&
             node->view_src->ne[1] == 1 && node->view_src->buffer != nullptr) {
             buffers.insert(node->view_src->buffer);
         }
@@ -892,13 +895,14 @@ enum ggml_status naive_compute(ggml_cgraph * cgraph,
     bool naive = true;
     auto model_weights = GgmlOvDecoder::create_weight_nodes(cgraph, naive);
     auto decoder = std::make_shared<GgmlOvDecoder>(cgraph, model_weights);
+    decoder->device = device;
     auto model = convert_to_ov_model(decoder);
     if (ggml_openvino_getenv_int("GGML_OPENVINO_DUMP_IR")) {
         ov::serialize(model, "IR_naive.xml");
     }
 
     std::shared_ptr<ov::InferRequest> infer_request;
-    auto remote_context = ggml_openvino_get_remote_context();
+    auto remote_context = ggml_openvino_get_remote_context(device);
     ov::AnyMap compile_config = config;
     if (cgraph->nodes[0]->op == GGML_OP_MUL_MAT) {
         // TODO ACCURACY hint triggers a bug in GPU plugin/driver on Lunar Lake. Remove once CVS-182166 is resolved
@@ -1187,6 +1191,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::share
             auto weight_names = get_weight_names(cgraph);
             ggml_decoder = std::make_shared<GgmlOvDecoder>(cgraph, m_params, c_params, weight_names,
                                                           is_static, r_ctx->stateful, model_is_splitted);
+            ggml_decoder->device = device;
             const std::string model_cache_dir = ggml_openvino_model_cache_dir();
             const std::string exact_key = cache_enabled ? compiled_graph_key(cgraph, *ggml_decoder, device) : "";
             uint64_t model_fp = 0;
@@ -1266,7 +1271,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::share
                     const int64_t import_start = ggml_time_us();
                     try {
                         ov::CompiledModel cm;
-                        auto remote_context = ggml_openvino_get_remote_context();
+                        auto remote_context = ggml_openvino_get_remote_context(device);
                         if (remote_context.has_value()) {
                             cm = core.import_model(blob_in, remote_context.value(), mc_config);
                         } else {
@@ -1344,6 +1349,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::share
 
                 ggml_decoder = std::make_shared<GgmlOvDecoder>(cgraph, m_params, c_params, model_weights, is_static,
                                                                r_ctx->stateful, model_is_splitted);
+                ggml_decoder->device = device;
                 decoder_end_time = ggml_time_us();
 
                 model = convert_to_ov_model(ggml_decoder);
@@ -1361,7 +1367,7 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::share
                 // the resulting CompiledModel can be exported and later re-imported.
                 const ov::AnyMap & compile_config = model_cache_dir.empty() ? config : mc_config;
                 ov::CompiledModel compiled_model;
-                auto remote_context = ggml_openvino_get_remote_context();
+                auto remote_context = ggml_openvino_get_remote_context(device);
                 if (remote_context.has_value()) {
                     compiled_model = core.compile_model(model, remote_context.value(), compile_config);
                 } else {
@@ -1678,6 +1684,7 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, const std::shared
         auto weight_names = get_weight_names(cgraph);
         auto local_decoder = std::make_shared<GgmlOvDecoder>(cgraph, m_params, c_params, weight_names, is_static,
                                                              stateful, false, is_prefill, prefill_chunk_size);
+        local_decoder->device = device;
         const std::string shared_key =
             cache_enabled ? compiled_graph_key(cgraph, *local_decoder, device, prefill_chunk_size) : "";
         auto shared_it = shared_cache->graphs.find(shared_key);
@@ -1708,6 +1715,8 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, const std::shared
                 no_kv_cache ? ggml_decoder_prefill :
                               std::make_shared<GgmlOvDecoder>(cgraph, m_params, c_params, model_weights, is_static,
                                                               stateful, false, false, prefill_chunk_size);
+            ggml_decoder_prefill->device = device;
+            ggml_decoder_decode->device = device;
             decoder_end_time = ggml_time_us();
 
             const bool dump_ir = ggml_openvino_getenv_int("GGML_OPENVINO_DUMP_IR");

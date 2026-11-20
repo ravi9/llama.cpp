@@ -144,6 +144,9 @@ bool is_moe_expert_sum_add(const ggml_tensor * node);
 
 class GgmlOvDecoder : public ov::frontend::gguf::GgufDecoder {
 public:
+    // OpenVINO device that runs the graph, e.g. GPU.1. Set by whoever creates the decoder.
+    std::string device;
+
     static std::string get_tensor_name(const ggml_cgraph * cgraph, const ggml_tensor * tensor);
     struct NodeInfo {
         ggml_tensor * node;
@@ -406,6 +409,21 @@ public:
         return tensor != nullptr && (strncmp(tensor->name, "cache_r_l", strlen("cache_r_l")) == 0 ||
                                      strncmp(tensor->name, "cache_s_l", strlen("cache_s_l")) == 0 ||
                                      strncmp(tensor->name, "cache_ple_r_l", strlen("cache_ple_r_l")) == 0);
+    }
+
+    // A step that restarts a recurrent state: the graph zeroes the cache rows of the sequences that begin, with
+    // ggml_scale(.., 0) in older llama.cpp and ggml_fill(.., 0) in newer. The decoder presents both to the frontend
+    // as the SCALE by 0 on the cache view that it already translates (see compute_op_type and get_attribute).
+    static bool is_recurrent_cache_reset(const ggml_tensor * node) {
+        if (node == nullptr || node->view_src == nullptr || !is_recurrent_cache(node->view_src)) {
+            return false;
+        }
+        if (node->op == GGML_OP_SCALE) {
+            return true;
+        }
+        float fill_value = 1.0f;
+        memcpy(&fill_value, node->op_params, sizeof(float));
+        return node->op == GGML_OP_FILL && fill_value == 0.0f;
     }
 
     inline static bool is_cache(const ggml_tensor * tensor, const ggml_tensor * op) {
