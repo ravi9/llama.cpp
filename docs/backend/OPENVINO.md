@@ -296,6 +296,9 @@ cmake --build build\ReleaseOV --parallel
 ```
 
 > [!NOTE]
+> **Translation path.** By default the backend uses the in-tree GGML-to-OpenVINO translator (`ggml/src/ggml-openvino/`), which needs only the stock OpenVINO runtime. To translate with the OpenVINO GGUF frontend instead (`ggml/src/ggml-openvino-ggml-frontend/`), add `-DGGML_OPENVINO_GGUF_FRONTEND=ON`; this requires an OpenVINO build that exports the `openvino::frontend::gguf` CMake target, and configuration fails with an explicit error if it is missing. Settings that only exist on the frontend path (for example `GGML_OPENVINO_DISABLE_SCALE_REORDER`) have no effect with the default translator.
+
+> [!NOTE]
 > The Windows install path is `C:\Intel\openvino` (no spaces) to avoid quoting problems some CMake/Ninja toolchains have with `C:\Program Files (x86)\...`. Adjust to wherever you installed OpenVINO Runtime. From `cmd`, run `C:\Intel\openvino\setupvars.bat`; from PowerShell, run `& "C:\Intel\openvino\setupvars.ps1"` instead. Once the build is finished you can launch the binaries from any `cmd` or `PowerShell` window after sourcing the matching `setupvars` script for that shell.
 
 </details>
@@ -885,6 +888,7 @@ The defaults fit most models. The variables below trade one property for another
 | `GGML_OPENVINO_NPU_TOKEN_EMBD_QUANT` | NPU | String | `q8_0_c` | How a `Q6_K` `token_embd.weight` is stored for the NPU: `q8_0_c` (8-bit, one scale per row), `f16`, `q4_0_128` (4-bit, one scale per 128 weights) or `q4_0_c` (4-bit, one scale per row). The 4-bit layouts use less memory at some cost in accuracy; `f16` uses more memory. Keep the default unless memory is tight. |
 | `GGML_OPENVINO_GDN_DECOMPOSE` | all | Boolean | auto | Translate `GATED_DELTA_NET` (Qwen3.5) into MatMul operations instead of the OpenVINO `GatedDeltaNet` op. Unset: on for the Lunar Lake NPU, off elsewhere. `0` turns it off, `1` turns it on for any device. Try `1` for Qwen3.5 on the Panther Lake NPU. |
 | `GGML_OPENVINO_MANUAL_GQA_ATTN` | CPU, GPU | Boolean | on for GPU | Build grouped-query attention from separate MatMul operations. Unset: on for GPU, off for CPU and NPU. `1` turns it on, `0` turns it off. Try `1` on the CPU for faster decode. |
+| `GGML_OPENVINO_DISABLE_SCALE_REORDER` | GPU, NPU | Boolean | `0` | OpenVINO GGUF frontend path only. Apply a constant scale (Granite's residual and attention multipliers) before the MatMul it follows instead of after it, so an f16 plugin does not overflow on blocks whose unscaled result is out of range. The result is identical in exact arithmetic. Not applied on the CPU, which runs in f32. `1` turns it off. |
 | `GGML_OPENVINO_REQUANT_KQUANT` | CPU, GPU | String | `not set` | Requantize `Q6_K` and `Q5_K` weights to a 4-bit layout instead of `Q8_0_C`: faster decode for lower accuracy. One of `q4_asym64`, `q4_asym64_all` (also `Q4_K`), `q4_sym128`, `q4_sym128_all` (also `Q4_K`) or `native` (no requantization). On GPU with `Q4_K_M` files use `q4_asym64_all`, because `q4_asym64` does not compile there. |
 | `GGML_OPENVINO_EXACT_ZERO_POINT` | CPU, GPU | Boolean | `0` | Keep the exact zero point of asymmetric weights (`Q4_1`, `Q4_K`, `Q5_1`, `Q5_K`) instead of rounding it to an integer. This improves accuracy and lowers speed. Use it when accuracy matters more than speed. |
 

@@ -27,7 +27,8 @@ on:
       '**/.cmake',
       'ggml/src/*',
       'ggml/src/ggml-cpu/**',
-      'ggml/src/ggml-openvino/**'
+      'ggml/src/ggml-openvino/**',
+      'ggml/src/ggml-openvino-ggml-frontend/**'
     ]
 
 cache-mode: none

@@ -61,6 +61,7 @@
 /ggml/src/ggml-metal/                   @ggml-org/ggml-metal
 /ggml/src/ggml-opencl/                  @ggml-org/ggml-opencl
 /ggml/src/ggml-openvino/                @cavusmustafa @wine99
+/ggml/src/ggml-openvino-ggml-frontend/  @cavusmustafa @wine99
 /ggml/src/ggml-opt.cpp                  @JohannesGaessler
 /ggml/src/ggml-quants.*                 @ggerganov
 /ggml/src/ggml-rpc/                     @ggml-org/ggml-rpc

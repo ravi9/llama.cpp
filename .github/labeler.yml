@@ -138,4 +138,5 @@ OpenVINO:
         - any-glob-to-any-file:
             - ggml/include/ggml-openvino.h
             - ggml/src/ggml-openvino/**
+            - ggml/src/ggml-openvino-ggml-frontend/**
             - docs/backend/OPENVINO.md
