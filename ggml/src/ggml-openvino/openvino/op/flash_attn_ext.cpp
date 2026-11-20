@@ -389,7 +389,9 @@ OutputVector translate_flash_attn_ext(const NodeContext & context) {
         res = std::make_shared<ov::op::v1::Transpose>(
             sdpa, ov::op::v0::Constant::create(ov::element::i64, {4}, {0, 2, 1, 3}));
     } else {
-        auto sdpa = std::make_shared<ov::op::v13::ScaledDotProductAttention>(q, k, v, scale_node, causal);
+        // SDPA's fourth input is a mask; use a neutral mask to pass the requested scale as input five.
+        auto neutral_mask = ov::op::v0::Constant::create(ov::element::f16, ov::Shape{}, {0.0f});
+        auto sdpa = std::make_shared<ov::op::v13::ScaledDotProductAttention>(q, k, v, neutral_mask, scale_node, causal);
         res = std::make_shared<ov::op::v1::Transpose>(
             sdpa, ov::op::v0::Constant::create(ov::element::i64, {4}, {0, 2, 1, 3}));
     }

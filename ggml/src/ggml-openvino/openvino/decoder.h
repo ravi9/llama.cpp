@@ -26,6 +26,7 @@ struct ModelExtraInputInfo {
     // when set, the value is read from dimension shape_axis of this model input instead of a Parameter
     std::string shape_source;
     int64_t shape_axis = -1;
+    // Optional model shape for runtime controls whose allocation changes per compute.
     PartialShape parameter_shape = PartialShape::dynamic();
 };
 
@@ -135,6 +136,7 @@ public:
     virtual int is_swa_layer(int layer) const = 0;
 
     virtual int32_t get_op_dynamic_dim(int node_idx) const = 0;
+    virtual std::vector<int64_t> get_vision_reshape_pattern(int node_idx) const = 0;
 };
 
 }  // namespace ggml

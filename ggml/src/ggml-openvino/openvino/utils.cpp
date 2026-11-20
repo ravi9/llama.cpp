@@ -38,6 +38,48 @@ namespace ov {
 namespace frontend {
 namespace ggml {
 
+ov::Output<Node> vision_reshape_target(const NodeContext & context) {
+    auto runtime = context.get_input("vision_shape_" + context.get_name());
+    const auto pattern = context.get_vision_reshape_pattern();
+    ov::OutputVector dimensions;
+    for (size_t axis = 0; axis < pattern.size(); ++axis) {
+        if (pattern[axis] == -2) {
+            dimensions.push_back(std::make_shared<ov::op::v8::Gather>(runtime,
+                ov::op::v0::Constant::create(ov::element::i64, {1}, {int64_t(axis)}),
+                ov::op::v0::Constant::create(ov::element::i64, {}, {0})));
+        } else {
+            dimensions.push_back(ov::op::v0::Constant::create(ov::element::i64, {1}, {pattern[axis]}));
+        }
+    }
+    return std::make_shared<ov::op::v0::Concat>(dimensions, 0);
+}
+
+std::vector<float> bilinear_antialias_projection(size_t input_size, size_t output_size, bool transpose) {
+    std::vector<float> weights(input_size * output_size, 0.0f);
+    const float scale = static_cast<float>(output_size) / input_size;
+    const float support = std::max(1.0f, 1.0f / scale);
+    const float invscale = 1.0f / support;
+    for (size_t out = 0; out < output_size; ++out) {
+        const float center = (static_cast<float>(out) + 0.5f) / scale;
+        const auto start = static_cast<int64_t>(center - support + 0.5f);
+        const auto end = static_cast<int64_t>(center + support + 0.5f);
+        const size_t begin = start > 0 ? static_cast<size_t>(start) : 0;
+        const size_t finish = end > 0 ? std::min<size_t>(end, input_size) : 0;
+        float sum = 0.0f;
+        for (size_t in = begin; in < finish; ++in) {
+            const float weight = std::max(1.0f - std::abs((static_cast<float>(in) - center + 0.5f) * invscale), 0.0f);
+            weights[transpose ? in * output_size + out : out * input_size + in] = weight;
+            sum += weight;
+        }
+        if (sum > 0.0f) {
+            for (size_t in = begin; in < finish; ++in) {
+                weights[transpose ? in * output_size + out : out * input_size + in] /= sum;
+            }
+        }
+    }
+    return weights;
+}
+
 void num_inputs_check(const NodeContext & context, size_t min_inputs, size_t max_inputs) {
     auto input_size = context.get_input_size();
     FRONT_END_OP_CONVERSION_CHECK(input_size >= min_inputs, "Got less inputs than expected");
@@ -558,6 +600,14 @@ ov::Output<ov::Node> process_view_input_new(const NodeContext & context, int inp
         return std::make_shared<ov::op::v1::Reshape>(part, target, false);
     }
 
+    // A translated VIEW is authoritative; packed-projection slicing applies only to its unresolved base.
+    const auto view_name = context.get_view_input_name(input_index, 0);
+    const auto base_name = context.get_view_input_src_name(input_index, view_input_size - 1);
+    if (context.has_input(view_name) &&
+        (!context.has_input(base_name) || context.get_input(view_name) != context.get_input(base_name))) {
+        return input;
+    }
+
     // Integer router views can share these strides when their row count is zero.
     // Packed projections can store query and gate in separate halves of each head.
     if (!context.is_static() && view_input_size == 1 && input.get_element_type().is_real()) {
@@ -591,8 +641,7 @@ ov::Output<ov::Node> process_view_input_new(const NodeContext & context, int inp
         }
     }
 
-    if (!context.is_static() && view_input_size == 1 && input.get_element_type().is_real() &&
-        context.has_input("s_copy_active_slot_len")) {
+    if (!context.is_static() && view_input_size == 1 && input.get_element_type().is_real()) {
         const auto source = context.get_view_input_src_ggml_shape(input_index, 0);
         const auto view = context.get_view_input_ggml_shape(input_index, 0);
         const auto source_stride = context.get_view_input_src_stride(input_index, 0);

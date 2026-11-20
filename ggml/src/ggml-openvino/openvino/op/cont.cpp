@@ -18,6 +18,16 @@ OutputVector translate_cont(const NodeContext & context) {
     auto src_shape = context.get_input_shape(0).to_shape();
     auto dst_shape = context.get_output_shape().to_shape();
 
+    if (context.has_input("vision_shape_" + context.get_name())) {
+        auto input = process_view_input_new(context, 0);
+        // CONT without a layout change already has its runtime shape.
+        if (src_shape == dst_shape) {
+            return rename_outputs_with_suffix({input}, context.get_name());
+        }
+        auto target = vision_reshape_target(context);
+        return rename_outputs_with_suffix({std::make_shared<ov::op::v1::Reshape>(input, target, false)}, context.get_name());
+    }
+
     if (context.get_op_dynamic_dim() != -1) {
         dst_shape[3 - context.get_op_dynamic_dim()] = -1;
     }

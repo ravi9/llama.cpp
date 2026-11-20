@@ -26,7 +26,8 @@ OutputVector translate_upscale(const NodeContext & context) {
     const auto input_shape = context.get_input_shape(0).to_shape();
     const auto output_shape = context.get_output_shape().to_shape();
 
-    if (input_shape == output_shape) {
+    const bool dynamic = context.has_input("vision_size_" + context.get_name());
+    if (!dynamic && input_shape == output_shape) {
         return rename_outputs_with_suffix({input}, context.get_name());
     }
 
@@ -49,7 +50,7 @@ OutputVector translate_upscale(const NodeContext & context) {
     }
 
     // Spatial interpolation for ne[1] and ne[0] (OV axes 2 and 3)
-    if (input_shape[2] != output_shape[2] || input_shape[3] != output_shape[3]) {
+    if (dynamic || input_shape[2] != output_shape[2] || input_shape[3] != output_shape[3]) {
         const int32_t * op_params = context.get_output_op_params();
         const int32_t mode_flags = op_params != nullptr ? op_params[0] : 0;
 
@@ -63,64 +64,16 @@ OutputVector translate_upscale(const NodeContext & context) {
             const size_t H_out = output_shape[2];
             const size_t W_out = output_shape[3];
 
-            const float pixel_offset = 0.5f;
-
-            // Height projection: [H_out, H_in]
-            std::vector<float> Wy_data(H_out * H_in, 0.0f);
-            const float sf1 = static_cast<float>(H_out) / H_in;
-            const float support1 = std::max(1.0f, 1.0f / sf1);
-            const float invscale1 = 1.0f / support1;
-
-            for (size_t i1 = 0; i1 < H_out; ++i1) {
-                const float y = (static_cast<float>(i1) + pixel_offset) / sf1;
-                const auto y_start = static_cast<int64_t>(y - support1 + pixel_offset);
-                const size_t y_min = y_start > 0 ? static_cast<size_t>(y_start) : 0;
-                const auto y_end = static_cast<int64_t>(y + support1 + pixel_offset);
-                const size_t y_max = y_end > 0 ? std::min<size_t>(static_cast<size_t>(y_end), H_in) : 0;
-
-                float total_weight = 0.0f;
-                for (size_t sy = y_min; sy < y_max; ++sy) {
-                    float diff = std::abs((static_cast<float>(sy) - y + pixel_offset) * invscale1);
-                    float weight = std::max(1.0f - diff, 0.0f);
-                    Wy_data[i1 * H_in + sy] = weight;
-                    total_weight += weight;
-                }
-                if (total_weight > 0.0f) {
-                    for (size_t sy = y_min; sy < y_max; ++sy) {
-                        Wy_data[i1 * H_in + sy] /= total_weight;
-                    }
-                }
+            ov::Output<Node> Wy_node, Wx_node;
+            if (dynamic) {
+                Wy_node = context.get_input("vision_y_" + context.get_name());
+                Wx_node = context.get_input("vision_x_" + context.get_name());
+            } else {
+                Wy_node = ov::op::v0::Constant::create(ov::element::f32, {H_out, H_in},
+                    bilinear_antialias_projection(H_in, H_out, false));
+                Wx_node = ov::op::v0::Constant::create(ov::element::f32, {W_in, W_out},
+                    bilinear_antialias_projection(W_in, W_out, true));
             }
-
-            // Width projection: [W_in, W_out]
-            std::vector<float> Wx_data(W_in * W_out, 0.0f);
-            const float sf0 = static_cast<float>(W_out) / W_in;
-            const float support0 = std::max(1.0f, 1.0f / sf0);
-            const float invscale0 = 1.0f / support0;
-
-            for (size_t i0 = 0; i0 < W_out; ++i0) {
-                const float x = (static_cast<float>(i0) + pixel_offset) / sf0;
-                const auto x_start = static_cast<int64_t>(x - support0 + pixel_offset);
-                const size_t x_min = x_start > 0 ? static_cast<size_t>(x_start) : 0;
-                const auto x_end = static_cast<int64_t>(x + support0 + pixel_offset);
-                const size_t x_max = x_end > 0 ? std::min<size_t>(static_cast<size_t>(x_end), W_in) : 0;
-
-                float total_weight = 0.0f;
-                for (size_t sx = x_min; sx < x_max; ++sx) {
-                    float diff = std::abs((static_cast<float>(sx) - x + pixel_offset) * invscale0);
-                    float weight = std::max(1.0f - diff, 0.0f);
-                    Wx_data[sx * W_out + i0] = weight;
-                    total_weight += weight;
-                }
-                if (total_weight > 0.0f) {
-                    for (size_t sx = x_min; sx < x_max; ++sx) {
-                        Wx_data[sx * W_out + i0] /= total_weight;
-                    }
-                }
-            }
-
-            auto Wy_node = ov::op::v0::Constant::create(ov::element::f32, {H_out, H_in}, Wy_data);
-            auto Wx_node = ov::op::v0::Constant::create(ov::element::f32, {W_in, W_out}, Wx_data);
 
             auto res_y = std::make_shared<ov::op::v0::MatMul>(Wy_node, res);
             res = std::make_shared<ov::op::v0::MatMul>(res_y, Wx_node);
@@ -163,7 +116,8 @@ OutputVector translate_upscale(const NodeContext & context) {
                 static_cast<float>(output_shape[3]) / static_cast<float>(input_shape[3]),
             };
 
-            auto target_shape_node = ov::op::v0::Constant::create(ov::element::i64, {2}, target_shape_vec);
+            ov::Output<Node> target_shape_node = dynamic ? context.get_input("vision_size_" + context.get_name()) :
+                ov::op::v0::Constant::create(ov::element::i64, {2}, target_shape_vec);
             auto scales_node = ov::op::v0::Constant::create(ov::element::f32, {2}, scales_vec);
             auto axes_node = ov::op::v0::Constant::create(ov::element::i64, {2}, {2, 3});
 
