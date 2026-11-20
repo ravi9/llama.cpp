@@ -22,6 +22,7 @@ GGML_OP_CONVERTER(translate_im2col);
 GGML_OP_CONVERTER(translate_im2col_3d);
 GGML_OP_CONVERTER(translate_mulmat);
 GGML_OP_CONVERTER(translate_mul_mat_id);
+GGML_OP_CONVERTER(translate_moe_tiled);
 GGML_OP_CONVERTER(translate_permute);
 GGML_OP_CONVERTER(translate_reshape);
 GGML_OP_CONVERTER(translate_rms_norm);

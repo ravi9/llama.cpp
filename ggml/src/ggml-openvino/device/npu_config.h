@@ -25,6 +25,12 @@ ov::AnyMap ggml_openvino_npu_gdn_config(const ov::AnyMap & base);
 // True when ggml_openvino_npu_gdn_config() switches the compiler. Part of the model cache key.
 bool ggml_openvino_npu_gdn_uses_plugin_compiler();
 
+// Graphs with a MoE block in the batched form (see translate_moe_tiled). NPUW isolates the
+// experts into functions and runs only the routed experts per token, with the router on the host (the HOST_ROUTED mode of
+// NPUW_LLM_*_MOE_HINT, which only the NPUW LLM pipeline sets itself), with one expert chunk size and no expert request
+// pool. Keys the environment already sets (GGML_OPENVINO_NPU_CONFIG) are kept.
+ov::AnyMap ggml_openvino_npu_moe_config(const ov::AnyMap & base);
+
 // Static prefill graph. With GGML_OPENVINO_NPU_HFA_PREFILL, switches NPUW to the HFA attention pipeline.
 ov::AnyMap ggml_openvino_npu_prefill_config(const ov::AnyMap & base, const GgmlOvDecoder & decoder);
 

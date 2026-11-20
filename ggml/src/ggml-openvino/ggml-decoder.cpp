@@ -267,6 +267,90 @@ bool is_moe_expert_sum_add(const ggml_tensor * node) {
     return base != nullptr && base->ne[1] > 1 && plane_indices.size() == static_cast<size_t>(base->ne[1]);
 }
 
+// Walks the graph that build_moe_ffn emits for a softmax router with SwiGLU experts:
+//   probs = softmax(logits); ids = top_k(probs); w = get_rows(probs, ids); [w = w / clamp(sum_rows(w))]
+//   out = sum_i(down(swiglu(gate(x, ids), up(x, ids)), ids)[i] * w[i])
+// and returns false for any other shape of the block (bias on the router, sigmoid gating, scaled weights, GELU ...).
+bool match_moe_block(const ggml_tensor * sum_add, moe_block & block) {
+    // build_moe_ffn reshapes the router probs and the weights between the steps matched below
+    auto skip_reshape = [](const ggml_tensor * t) {
+        while (t != nullptr && t->op == GGML_OP_RESHAPE) {
+            t = t->src[0];
+        }
+        return t;
+    };
+
+    if (sum_add->op != GGML_OP_ADD || !is_moe_expert_sum_add(sum_add)) {
+        return false;
+    }
+    const ggml_tensor * plane = sum_add;
+    while (plane->op == GGML_OP_ADD) {
+        plane = plane->src[0];
+    }
+    const ggml_tensor * weighted = plane->src[0];
+    if (weighted == nullptr || weighted->op != GGML_OP_MUL) {
+        return false;
+    }
+    const ggml_tensor * down = weighted->src[0];
+    if (down == nullptr || down->op != GGML_OP_MUL_MAT_ID) {
+        return false;
+    }
+    const ggml_tensor * glu = down->src[1];
+    if (glu == nullptr || glu->op != GGML_OP_GLU || ggml_get_glu_op(glu) != GGML_GLU_OP_SWIGLU ||
+        ggml_get_op_params_i32(glu, 1) != 0) {
+        return false;
+    }
+    const ggml_tensor * gate = glu->src[0];
+    const ggml_tensor * up = glu->src[1];
+    const ggml_tensor * ids = down->src[2];
+    if (gate == nullptr || up == nullptr || gate->op != GGML_OP_MUL_MAT_ID || up->op != GGML_OP_MUL_MAT_ID ||
+        gate->src[1] != up->src[1] || gate->src[2] != ids || up->src[2] != ids) {
+        return false;
+    }
+    // ids = view(argsort(probs)) or top_k(probs)
+    const ggml_tensor * selection = ids;
+    while (selection != nullptr && selection->op == GGML_OP_VIEW) {
+        selection = selection->src[0];
+    }
+    if (selection == nullptr || (selection->op != GGML_OP_ARGSORT && selection->op != GGML_OP_TOP_K) ||
+        selection->src[0] == nullptr || selection->src[0]->op != GGML_OP_SOFT_MAX) {
+        return false;
+    }
+    const ggml_tensor * probs = selection->src[0];
+
+    const ggml_tensor * w = skip_reshape(weighted->src[1]);
+    const ggml_tensor * clamp = nullptr;
+    if (w != nullptr && w->op == GGML_OP_DIV) {
+        const ggml_tensor * den = w->src[1];
+        if (den == nullptr || den->op != GGML_OP_CLAMP || den->src[0] == nullptr ||
+            den->src[0]->op != GGML_OP_SUM_ROWS || skip_reshape(den->src[0]->src[0]) != skip_reshape(w->src[0])) {
+            return false;
+        }
+        float bounds[2];
+        memcpy(bounds, den->op_params, sizeof(bounds));
+        if (bounds[1] < 1e30f) {
+            return false;  // only a lower bound is translated
+        }
+        clamp = den;
+        w = skip_reshape(w->src[0]);
+    }
+    if (w == nullptr || w->op != GGML_OP_GET_ROWS || w->src[1] != ids || skip_reshape(w->src[0]) != probs) {
+        return false;
+    }
+    if (gate->src[0]->ne[2] != probs->ne[0] || gate->src[0]->ne[2] <= ids->ne[0]) {
+        return false;
+    }
+
+    block.probs = probs;
+    block.x = gate->src[1];
+    block.gate = gate->src[0];
+    block.up = up->src[0];
+    block.down = down->src[0];
+    block.down_out = down;
+    block.clamp = clamp;
+    return true;
+}
+
 std::string GgmlOvDecoder::get_tensor_name(const ggml_cgraph * cgraph, const ggml_tensor * tensor) {
     if (tensor == nullptr) {
         return "";
@@ -353,6 +437,7 @@ static std::string get_tensor_graph_input_ov_name(const GgmlOvDecoder * decoder,
 }
 
 void GgmlOvDecoder::set_input_output() {
+    m_moe_tiled_replaced.clear();
     for (int node_n = 0; node_n < m_cgraph->n_nodes; node_n++) {
         auto * node = m_cgraph->nodes[node_n];
 
@@ -401,6 +486,28 @@ void GgmlOvDecoder::set_input_output() {
 
                 // Assign all collected view inputs to node_inputs_views
                 current_node_info.node_inputs_views[src_name] = view_chain;
+            }
+        }
+
+        // The expert sum of a MoE block also reads the router, the input and the expert weights (translate_moe_tiled).
+        moe_block block;
+        if (ggml_openvino_moe_tiled_enabled() && match_moe_block(node, block)) {
+            for (const ggml_tensor * t : {block.probs, block.x, block.gate, block.up, block.down, block.down_out, block.clamp}) {
+                if (t != nullptr) {
+                    auto name = get_tensor_ov_name(m_cgraph, t);
+                    current_node_info.node_inputs[name] = const_cast<ggml_tensor *>(t);
+                    current_node_info.node_inputs_names.push_back(name);
+                }
+            }
+            // the ADD chain below this node and its expert-plane VIEWs
+            for (const ggml_tensor * cur = node; cur->op == GGML_OP_ADD; cur = cur->src[0]) {
+                if (cur != node) {
+                    m_moe_tiled_replaced.insert(cur);
+                }
+                m_moe_tiled_replaced.insert(cur->src[1]);
+                if (cur->src[0]->op != GGML_OP_ADD) {
+                    m_moe_tiled_replaced.insert(cur->src[0]);
+                }
             }
         }
 
@@ -702,6 +809,9 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         if (is_sampling_view(node)) {
             return 3;
         }
+        if (m_moe_tiled_replaced.count(node)) {
+            return 1;  // identity: expert-plane view of an expert sum replaced by translate_moe_tiled
+        }
         if (node->view_offs == 0 && node->src[0]->op == GGML_OP_GET_ROWS &&
             is_recurrent_cache(node->src[0]->src[0]) && node->ne[0] == node->src[0]->ne[0] &&
             node->ne[2] == 1 && node->ne[3] == 1 && m_compute_params.s_copy_active_slot_len != -1) {
@@ -856,7 +966,15 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
         break;
     }
     case GGML_OP_ADD: {
-        if (is_moe_expert_sum_add(node)) {
+        if (m_moe_tiled_replaced.count(node)) {
+            op_case = 4;  // inner ADD of an expert sum replaced by translate_moe_tiled
+            break;
+        }
+        moe_block block;
+        if (ggml_openvino_moe_tiled_enabled() && match_moe_block(node, block)) {
+            // The whole MoE block in the batched form: 2 with the weights as they are, 3 normalized and clamped
+            op_case = block.clamp != nullptr ? 3 : 2;
+        } else if (is_moe_expert_sum_add(node)) {
             // Outermost ADD of a MoE expert-plane sum chain: translated as a single
             // ReduceSum over the base tensor instead of N-1 chained Adds over N Slices.
             op_case = 1;
