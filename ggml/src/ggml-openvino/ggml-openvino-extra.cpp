@@ -578,6 +578,10 @@ bool ggml_openvino_gdn_decompose_enabled() {
     return ggml_openvino_npu_is_4000();
 }
 
+bool ggml_openvino_moe_tiled_enabled() {
+    return ggml_openvino_is_npu() || ggml_openvino_getenv_int("GGML_OPENVINO_FORCE_STATIC") != 0;
+}
+
 int ggml_openvino_gdn_decompose_chunk() {
     const int chunk = ggml_openvino_getenv_int("GGML_OPENVINO_GDN_DECOMPOSE_CHUNK");
     if (chunk >= 2 && chunk <= 128 && (chunk & (chunk - 1)) == 0) {

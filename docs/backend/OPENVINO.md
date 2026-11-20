@@ -1034,6 +1034,29 @@ build\ReleaseOV\bin\llama-simple.exe -m "C:\models\Llama-3.2-1B-Instruct-Q4_K_M.
 - Lunar Lake NPU: `gemma-4-12B` does not run. The first inference fails with `ZE_RESULT_ERROR_UNINITIALIZED` from the NPU driver. The model runs on CPU and GPU.
 - The first load of a model on the NPU compiles it for the device, which can take minutes for large models.
   - **Workaround:** Use the [compiled model cache](#compiled-model-cache).
+- MoE models with a softmax router and SwiGLU experts (for example Qwen3.6-35B-A3B) run on the NPU through the MoE support of NPUW: only the routed experts run for each token, with the router on the host. Tested with `Qwen3.6-35B-A3B-Q4_0` on Panther Lake (Windows) and Lunar Lake (Windows, Ubuntu) systems with 32 GB.
+  - A 35B MoE model needs nearly all of a 32 GB system: the backend and NPUW each hold a copy of the weights (about 18 GB each), and the NPU can address 18 GB of the shared memory. Use a small context and these settings:
+
+    ```bash
+    export GGML_OPENVINO_DEVICE=NPU
+    export GGML_OPENVINO_PREFILL_CHUNK_SIZE=128
+    export GGML_OPENVINO_NPU_CONFIG="NPUW_WEIGHTS_BANK_ALLOC=CPU,NPUW_FUNCALL_ASYNC=NO,COMPILATION_NUM_THREADS=1"
+    ./llama-cli -m Qwen_Qwen3.6-35B-A3B-Q4_0.gguf -c 256
+    ```
+
+    ```bat
+    REM Windows
+    set GGML_OPENVINO_DEVICE=NPU
+    set GGML_OPENVINO_PREFILL_CHUNK_SIZE=128
+    set GGML_OPENVINO_NPU_CONFIG=NPUW_WEIGHTS_BANK_ALLOC=CPU,NPUW_FUNCALL_ASYNC=NO,COMPILATION_NUM_THREADS=1
+    llama-cli.exe -m Qwen_Qwen3.6-35B-A3B-Q4_0.gguf -c 256
+    ```
+
+    - `NPUW_WEIGHTS_BANK_ALLOC=CPU` keeps the NPUW copy of the weights in host memory instead of the NPU-addressable memory, at some cost in speed.
+    - `NPUW_FUNCALL_ASYNC=NO` and `COMPILATION_NUM_THREADS=1` lower the memory peak. `GGML_OPENVINO_COMPILATION_NUM_THREADS=1` is an older name for the second one.
+    - The backend sets `NPUW_MOE_POOL_SIZE=0` and `NPUW_MOE_TOKEN_CHUNK_SIZE=16` itself for MoE models (see the [developer documentation](../../ggml/src/ggml-openvino/dev_doc/OpenVINO-ENV-VARS.md#npu-plugin-properties)). Without them the load can hang on a 32 GB system.
+    - The NPU compiler type can stay unset: models with `GATED_DELTA_NET` layers, such as Qwen3.6, then compile with the compiler in OpenVINO. `NPU_COMPILER_TYPE=PREFER_PLUGIN` gives the same result.
+  - `llama-perplexity` with these models: use a `-c` of at most twice `GGML_OPENVINO_PREFILL_CHUNK_SIZE` (for example `-c 256` with a chunk size of 128). The output rows of the last layer must not exceed the chunk size.
 
 > [!NOTE]
 > The OpenVINO backend is actively under development. Fixes and improvements are underway, and this document will continue to be updated.

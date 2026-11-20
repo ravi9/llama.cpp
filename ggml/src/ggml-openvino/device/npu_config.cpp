@@ -78,6 +78,35 @@ ov::AnyMap ggml_openvino_npu_gdn_config(const ov::AnyMap & base) {
     return gdn_config;
 }
 
+ov::AnyMap ggml_openvino_npu_moe_config(const ov::AnyMap & base) {
+    ov::AnyMap moe_config = base;
+    // Same properties as the HOST_ROUTED hint of the NPUW LLM pipeline (apply_moe_config)
+    moe_config.insert({"NPUW_ONLINE_PIPELINE", "REP"});
+    moe_config.insert({"NPUW_ONLINE_KEEP_BLOCK_SIZE", "4"});
+    moe_config.insert({"NPUW_UNFOLD_IREQS", "NO"});
+    // NPUW keeps a pool of 8 infer requests per MoE layer for decode, caching the requests bound to a set of
+    // experts. Each one holds NPU memory: with 40 MoE layers (Qwen3.6-35B-A3B) the pool fills the 18 GB the NPU can
+    // address on a 32 GB system and the load hangs. A cache hit needs the same experts as an earlier token, which is
+    // rare with 256 experts, so the pool is off by default.
+    moe_config.insert({"NPUW_MOE_POOL_SIZE", "0"});
+    // Prefill runs the routed experts in chunks of tokens. By default NPUW compiles 8 chunk sizes (16 to 512); a
+    // 128-token chunk gives each of 256 experts about 4 tokens, so one small size is enough.
+    moe_config.insert({"NPUW_MOE_TOKEN_CHUNK_SIZE", "16"});
+    // tags are appended to the ones that are set
+    auto append_tag = [&](const char * key, const std::string & tag) {
+        auto it = moe_config.find(key);
+        const std::string current = it == moe_config.end() ? "" : it->second.as<std::string>();
+        if (current.empty()) {
+            moe_config[key] = tag;
+        } else if (("," + current + ",").find("," + tag + ",") == std::string::npos) {
+            moe_config[key] = current + "," + tag;
+        }
+    };
+    append_tag("NPUW_ONLINE_KEEP_BLOCKS_TAGGED", "expert");
+    append_tag("NPUW_ONLINE_ISOLATE", "MOE");
+    return moe_config;
+}
+
 ov::AnyMap ggml_openvino_npu_without_npuw(const ov::AnyMap & config) {
     ov::AnyMap out;
     for (const auto & kv : config) {
@@ -94,7 +123,12 @@ ov::AnyMap ggml_openvino_npu_prefill_config(const ov::AnyMap & base, const GgmlO
     if (ggml_openvino_npu_hfa_prefill_enabled()) {
         prefill_config["NPUW_ATTN_HISTORY_SIZE_INPUT"] = decoder.get_hfa_history_input_name();
         prefill_config["NPUW_ONLINE_PIPELINE"] = "REP";
-        prefill_config["NPUW_ONLINE_ISOLATE"] = "ATTN";
+        // keep the tags of a MoE graph
+        const auto isolate = prefill_config.find("NPUW_ONLINE_ISOLATE");
+        prefill_config["NPUW_ONLINE_ISOLATE"] =
+            isolate != prefill_config.end() && !isolate->second.as<std::string>().empty() ?
+                "ATTN," + isolate->second.as<std::string>() :
+                std::string("ATTN");
         prefill_config["NPUW_ONLINE_KEEP_BLOCK_SIZE"] = "4";
         prefill_config["NPUW_UNFOLD_IREQS"] = "NO";
         prefill_config["NPUW_ATTN"] = "HFA";

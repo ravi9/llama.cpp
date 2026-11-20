@@ -2219,9 +2219,26 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, const std::shared
         fprintf(stderr, "GGML OpenVINO profiling: static graph kind=%s, input_tokens=%lld, chunk_size=%d\n",
                 is_prefill ? "prefill" : "decode", static_cast<long long>(input_tokens), prefill_chunk_size);
     }
-    const ov::AnyMap compile_config = no_kv_cache              ? ggml_openvino_npu_without_npuw(config) :
-                                      m_params.state_size >= 0 ? ggml_openvino_npu_gdn_config(config) :
-                                                                 config;
+    // Compile properties for this graph: cacheless (encoder) graphs compile on the plain NPU plugin, graphs with
+    // GATED_DELTA_NET layers may switch the compiler (see npu_config.h), the others take the base config.
+    ov::AnyMap compile_config = no_kv_cache              ? ggml_openvino_npu_without_npuw(config) :
+                                m_params.state_size >= 0 ? ggml_openvino_npu_gdn_config(config) :
+                                                           config;
+    // A graph with a MoE block that translate_moe_tiled turns into the batched form also needs the NPUW properties
+    // that make NPUW isolate the experts and run only the routed ones (ggml_openvino_npu_moe_config). They are
+    // NPUW properties, so not for cacheless graphs, which compile without NPUW, and not for the static path that
+    // GGML_OPENVINO_FORCE_STATIC runs on the CPU or the GPU. One matching block is enough: the properties apply to
+    // the whole graph.
+    if (!no_kv_cache && device == "NPU" && ggml_openvino_moe_tiled_enabled()) {
+        for (int i = 0; i < cgraph->n_nodes; i++) {
+            // match_moe_block() takes the outermost ADD of an expert sum, the node translate_moe_tiled replaces
+            moe_block block;
+            if (cgraph->nodes[i]->op == GGML_OP_ADD && match_moe_block(cgraph->nodes[i], block)) {
+                compile_config = ggml_openvino_npu_moe_config(compile_config);
+                break;
+            }
+        }
+    }
     if (m_params.n_heads_kv == -1) {
         prefill_chunk_size = inp_pos->ne[0];
     }
