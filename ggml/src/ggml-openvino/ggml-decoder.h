@@ -353,6 +353,9 @@ public:
 
     virtual bool is_splited_model() const override { return m_model_is_splitted; }
 
+    // The graph has a MoE block that translate_moe_tiled translates (found in set_input_output)
+    bool has_moe_block() const { return m_has_moe_block; }
+
     ov::PartialShape get_graph_input_shape(const ggml_tensor * op,
                                            const ggml_tensor * input,
                                            int dynamic_dim_index = -1) const;
@@ -796,6 +799,7 @@ private:
     // used, and are translated as pass-throughs: building them can fail, e.g. a VIEW of the last layer whose row
     // count (the output rows) differs from the one its static shape was derived with.
     std::set<const ggml_tensor *> m_moe_tiled_replaced;
+    bool m_has_moe_block = false;
 
     struct kv_tensor_entry {
         const void * data = nullptr;
