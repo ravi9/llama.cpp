@@ -438,6 +438,7 @@ static std::string get_tensor_graph_input_ov_name(const GgmlOvDecoder * decoder,
 
 void GgmlOvDecoder::set_input_output() {
     m_moe_tiled_replaced.clear();
+    m_has_moe_block = false;
     for (int node_n = 0; node_n < m_cgraph->n_nodes; node_n++) {
         auto * node = m_cgraph->nodes[node_n];
 
@@ -492,6 +493,7 @@ void GgmlOvDecoder::set_input_output() {
         // The expert sum of a MoE block also reads the router, the input and the expert weights (translate_moe_tiled).
         moe_block block;
         if (ggml_openvino_moe_tiled_enabled() && match_moe_block(node, block)) {
+            m_has_moe_block = true;
             for (const ggml_tensor * t : {block.probs, block.x, block.gate, block.up, block.down, block.down_out, block.clamp}) {
                 if (t != nullptr) {
                     auto name = get_tensor_ov_name(m_cgraph, t);

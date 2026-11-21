@@ -2357,8 +2357,14 @@ static ov::AnyMap static_variant_config(const static_graph_args & a,
                                         const decoder_runtime_ctx & e,
                                         const GgmlOvDecoder & decoder,
                                         bool prefill) {
-    ov::AnyMap config = prefill ? ggml_openvino_npu_prefill_config(a.compile_config, decoder) :
-                                  ggml_openvino_npu_decode_config(a.compile_config, a.device);
+    // A graph with a MoE block that translate_moe_tiled turns into the batched form also needs the NPUW properties
+    // that make NPUW isolate the experts and run only the routed ones (ggml_openvino_npu_moe_config). They are
+    // NPUW properties, so not for cacheless graphs, which compile without NPUW, and not for the static path that
+    // GGML_OPENVINO_FORCE_STATIC runs on the CPU or the GPU. The decoder finds the block once, when it is built.
+    const bool moe = !a.no_kv_cache && a.device == "NPU" && decoder.has_moe_block();
+    const ov::AnyMap base = moe ? ggml_openvino_npu_moe_config(a.compile_config) : a.compile_config;
+    ov::AnyMap config = prefill ? ggml_openvino_npu_prefill_config(base, decoder) :
+                                  ggml_openvino_npu_decode_config(base, a.device);
     if (!a.model_cache_dir.empty()) {
         config.erase("CACHE_DIR");
         config.erase("CACHE_MODE");
@@ -2572,24 +2578,9 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, const std::shared
     }
     // Compile properties for this graph: cacheless (encoder) graphs compile on the plain NPU plugin, graphs with
     // GATED_DELTA_NET layers may switch the compiler (see npu_config.h), the others take the base config.
-    ov::AnyMap compile_config = no_kv_cache              ? ggml_openvino_npu_without_npuw(config) :
-                                m_params.state_size >= 0 ? ggml_openvino_npu_gdn_config(config) :
-                                                           config;
-    // A graph with a MoE block that translate_moe_tiled turns into the batched form also needs the NPUW properties
-    // that make NPUW isolate the experts and run only the routed ones (ggml_openvino_npu_moe_config). They are
-    // NPUW properties, so not for cacheless graphs, which compile without NPUW, and not for the static path that
-    // GGML_OPENVINO_FORCE_STATIC runs on the CPU or the GPU. One matching block is enough: the properties apply to
-    // the whole graph.
-    if (!no_kv_cache && device == "NPU" && ggml_openvino_moe_tiled_enabled()) {
-        for (int i = 0; i < cgraph->n_nodes; i++) {
-            // match_moe_block() takes the outermost ADD of an expert sum, the node translate_moe_tiled replaces
-            moe_block block;
-            if (cgraph->nodes[i]->op == GGML_OP_ADD && match_moe_block(cgraph->nodes[i], block)) {
-                compile_config = ggml_openvino_npu_moe_config(compile_config);
-                break;
-            }
-        }
-    }
+    const ov::AnyMap compile_config = no_kv_cache              ? ggml_openvino_npu_without_npuw(config) :
+                                      m_params.state_size >= 0 ? ggml_openvino_npu_gdn_config(config) :
+                                                                 config;
     // Decided by the first call of a graph; later calls follow entry->kv_only_prefill.
     // The output step runs the decode model of the KV window covering the output token (the full context without
     // decode KV windows).
