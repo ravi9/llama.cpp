@@ -230,6 +230,13 @@ bool ggml_openvino_npu_is_4000();
 // Snapshot (MTP) graphs still use the op.
 bool ggml_openvino_gdn_decompose_enabled();
 
+// Translate the MoE block of a model (router, experts, expert sum) into the batched form of the NPUW MoE support:
+// every expert is computed (Tile + batched MatMul) and weighted by scattered router scores, and NPUW runs only the
+// routed experts. The NPU has no GatherMatmul.
+// On for the NPU, and with GGML_OPENVINO_FORCE_STATIC on the CPU or the GPU, which then computes every expert: that
+// mode reproduces the NPU path to check the translation.
+bool ggml_openvino_moe_tiled_enabled();
+
 // Tokens per chunk of the decomposed GATED_DELTA_NET: GGML_OPENVINO_GDN_DECOMPOSE_CHUNK,
 // a power of 2 in [2, 128], default 16.
 int ggml_openvino_gdn_decompose_chunk();

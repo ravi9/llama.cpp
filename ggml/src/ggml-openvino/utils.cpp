@@ -2219,9 +2219,20 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, const std::shared
         fprintf(stderr, "GGML OpenVINO profiling: static graph kind=%s, input_tokens=%lld, chunk_size=%d\n",
                 is_prefill ? "prefill" : "decode", static_cast<long long>(input_tokens), prefill_chunk_size);
     }
+    // Compile properties for this graph: cacheless (encoder) graphs compile on the plain NPU plugin, graphs with
+    // GATED_DELTA_NET layers may switch the compiler (see npu_config.h), the others take the base config.
     const ov::AnyMap compile_config = no_kv_cache              ? ggml_openvino_npu_without_npuw(config) :
                                       m_params.state_size >= 0 ? ggml_openvino_npu_gdn_config(config) :
                                                                  config;
+    // A graph with a MoE block that translate_moe_tiled turns into the batched form also needs the NPUW properties
+    // that make NPUW isolate the experts and run only the routed ones (ggml_openvino_npu_moe_config). They are
+    // NPUW properties, so not for cacheless graphs, which compile without NPUW, and not for the static path that
+    // GGML_OPENVINO_FORCE_STATIC runs on the CPU or the GPU. The decoder finds the block once, when it is built, so
+    // this costs nothing on a cache hit.
+    auto graph_compile_config = [&](const GgmlOvDecoder & decoder) {
+        const bool moe = !no_kv_cache && device == "NPU" && decoder.has_moe_block();
+        return moe ? ggml_openvino_npu_moe_config(compile_config) : compile_config;
+    };
     if (m_params.n_heads_kv == -1) {
         prefill_chunk_size = inp_pos->ne[0];
     }
@@ -2409,8 +2420,9 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, const std::shared
             if (decode_bucket > 0) {
                 decode_c_params.attention_size = decode_window;
             }
-            const ov::AnyMap prefill_config = ggml_openvino_npu_prefill_config(compile_config, *local_decoder);
-            const ov::AnyMap decode_config = ggml_openvino_npu_decode_config(compile_config, device);
+            const ov::AnyMap graph_config = graph_compile_config(*local_decoder);
+            const ov::AnyMap prefill_config = ggml_openvino_npu_prefill_config(graph_config, *local_decoder);
+            const ov::AnyMap decode_config = ggml_openvino_npu_decode_config(graph_config, device);
 
             const std::string model_cache_dir = ggml_openvino_model_cache_dir();
             const bool self_contained = device == "NPU" && !model_cache_dir.empty() &&
@@ -2932,8 +2944,8 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, const std::shared
                             auto window_decoder =
                                 std::make_shared<GgmlOvDecoder>(cgraph, m_params, window_c_params, model_weights,
                                                                 is_static, stateful, false, true, prefill_chunk_size);
-                            ov::AnyMap window_config =
-                                ggml_openvino_npu_prefill_config(compile_config, *window_decoder);
+                            ov::AnyMap window_config = ggml_openvino_npu_prefill_config(
+                                graph_compile_config(*window_decoder), *window_decoder);
                             window_config.erase("CACHE_DIR");
                             window_config.erase("CACHE_MODE");
                             window_config["NPUW_WEIGHTS_BANK"] = graph.decode_config.at("NPUW_WEIGHTS_BANK");
@@ -2986,7 +2998,8 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, const std::shared
                             }
                             GgmlOvDecoder window_decoder(cgraph, m_params, window_c_params, weight_names, is_static,
                                                          stateful, false, true, prefill_chunk_size);
-                            ov::AnyMap import_config = ggml_openvino_npu_prefill_config(compile_config, window_decoder);
+                            ov::AnyMap import_config =
+                                ggml_openvino_npu_prefill_config(graph_compile_config(window_decoder), window_decoder);
                             import_config.erase("CACHE_DIR");
                             import_config.erase("CACHE_MODE");
                             import_config["NPUW_WEIGHTS_BANK"] = graph.decode_config.at("NPUW_WEIGHTS_BANK");

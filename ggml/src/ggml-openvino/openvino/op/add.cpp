@@ -15,6 +15,14 @@ namespace ggml {
 namespace op {
 
 OutputVector translate_add(const NodeContext & context) {
+    if (context.get_op_case() == 2 || context.get_op_case() == 3) {
+        return translate_moe_tiled(context);
+    }
+    if (context.get_op_case() == 4) {
+        // Inner ADD of an expert sum that translate_moe_tiled replaces: not used, so pass input 0 through
+        // instead of building the Add and the slices of its VIEW inputs.
+        return {context.get_input(0)};
+    }
     num_inputs_check(context, 2, 2);
 
     if (context.get_op_case() == 1) {

@@ -140,6 +140,19 @@ std::optional<int> extract_layer_from_name(const std::string & name);
 // detects the MoE expert-plane-sum ADD chain (see definition); used by supports_op too
 bool is_moe_expert_sum_add(const ggml_tensor * node);
 
+// The tensors of one MoE block (build_moe_ffn: softmax router, top-k, SwiGLU experts, weighted expert sum), found from the
+// outermost ADD of the expert sum. Used to translate the block as a whole (see translate_moe_tiled).
+struct moe_block {
+    const ggml_tensor * probs = nullptr;  // router SOFT_MAX
+    const ggml_tensor * x = nullptr;      // input of the gate and up projections
+    const ggml_tensor * gate = nullptr;   // expert weights [k, m, n_expert]
+    const ggml_tensor * up = nullptr;
+    const ggml_tensor * down = nullptr;
+    const ggml_tensor * down_out = nullptr;  // MUL_MAT_ID of the down projection, [n_embd, n_expert_used, n_tokens]
+    const ggml_tensor * clamp = nullptr;     // CLAMP of the weight sum when the top-k weights are normalized
+};
+bool match_moe_block(const ggml_tensor * sum_add, moe_block & block);
+
 class GgmlOvDecoder : public ov::frontend::ggml::GgmlDecoder {
 public:
     static std::string get_tensor_name(const ggml_cgraph * cgraph, const ggml_tensor * tensor);
@@ -336,9 +349,12 @@ public:
 
     virtual bool is_prefill() const override { return m_is_prefill; }
 
-    int get_static_n_tokens() const { return m_is_prefill ? m_prefill_chunk_size : 1; }
+    virtual int get_static_n_tokens() const override { return m_is_prefill ? m_prefill_chunk_size : 1; }
 
     virtual bool is_splited_model() const override { return m_model_is_splitted; }
+
+    // The graph has a MoE block that translate_moe_tiled translates (found in set_input_output)
+    bool has_moe_block() const { return m_has_moe_block; }
 
     ov::PartialShape get_graph_input_shape(const ggml_tensor * op,
                                            const ggml_tensor * input,
@@ -779,6 +795,11 @@ private:
     std::vector<NodeInfo> m_node_info_list;
     std::map<ggml_tensor *, int> m_node_dynamic_dims;
     std::set<const ggml_tensor *> m_kvcache_4d;
+    // The expert-plane VIEWs and inner ADDs of the expert sums that translate_moe_tiled replaces. They are not
+    // used, and are translated as pass-throughs: building them can fail, e.g. a VIEW of the last layer whose row
+    // count (the output rows) differs from the one its static shape was derived with.
+    std::set<const ggml_tensor *> m_moe_tiled_replaced;
+    bool m_has_moe_block = false;
 
     struct kv_tensor_entry {
         const void * data = nullptr;

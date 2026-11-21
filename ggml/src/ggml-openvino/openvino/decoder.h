@@ -126,6 +126,9 @@ public:
 
     virtual bool is_prefill() const = 0;
 
+    // Tokens of a static graph: the prefill chunk size or 1 for decode
+    virtual int get_static_n_tokens() const = 0;
+
     virtual bool is_splited_model() const = 0;
 
     virtual int is_swa_layer(int layer) const = 0;
