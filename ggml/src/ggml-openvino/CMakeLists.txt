@@ -27,3 +27,20 @@ endif()
 if (WIN32)
     target_link_libraries(ggml-openvino PRIVATE psapi)
 endif()
+
+# Precision-sensitive MatMul needs a node-level guard, not a whole-model precision hint.
+unset(GGML_OPENVINO_HAS_PRECISION_CONTROL CACHE)
+set(CMAKE_REQUIRED_LIBRARIES openvino::runtime)
+set(CMAKE_REQUIRED_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/openvino")
+check_cxx_source_compiles("#include <precision_control.hpp>
+int main() {
+    std::shared_ptr<ov::Node> node;
+    ov::disable_conversion(node, ov::element::f16);
+    ov::disable_conversion(node, ov::element::bf16);
+}"
+    GGML_OPENVINO_HAS_PRECISION_CONTROL)
+unset(CMAKE_REQUIRED_LIBRARIES)
+unset(CMAKE_REQUIRED_INCLUDES)
+if(GGML_OPENVINO_HAS_PRECISION_CONTROL)
+    target_compile_definitions(ggml-openvino PRIVATE GGML_OPENVINO_HAS_PRECISION_CONTROL=1)
+endif()

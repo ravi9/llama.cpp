@@ -1,6 +1,11 @@
 #include "../node_context.h"
 #include "../op_table.h"
 #include "../utils.h"
+#include "ggml.h"
+
+#ifdef GGML_OPENVINO_HAS_PRECISION_CONTROL
+#    include "../precision_control.hpp"
+#endif
 
 #include <cstdint>
 #include <memory>
@@ -16,6 +21,7 @@
 #include <openvino/op/transpose.hpp>
 #include <openvino/op/unsqueeze.hpp>
 #include <openvino/op/util/op_types.hpp>
+#include <openvino/op/util/precision_sensitive_attribute.hpp>
 #include <vector>
 
 namespace ov {
@@ -33,9 +39,35 @@ OutputVector translate_mulmat(const NodeContext & context) {
     // the stateful V cache with `-fa off` is not transposed (see permute)
     const bool transpose_b = B.get_node()->get_rt_info().count(GGML_OV_V_TOKEN_MAJOR) == 0;
 
-    if (A.get_element_type() != B.get_element_type()) {
+    // MUL_MAT stores the minimum src1 precision in op_params[3].
+    const auto * params = context.get_output_op_params();
+    const bool preserve_f32 = params != nullptr && params[3] == GGML_PREC_F32;
+    if (preserve_f32) {
+        if (A.get_element_type() != ov::element::f32) {
+            A = std::make_shared<ov::op::v0::Convert>(A, ov::element::f32);
+        }
+        if (B.get_element_type() != ov::element::f32) {
+            B = std::make_shared<ov::op::v0::Convert>(B, ov::element::f32);
+        }
+    } else if (A.get_element_type() != B.get_element_type()) {
         B = std::make_shared<ov::op::v0::Convert>(B, context.get_input_type(1));
     }
+
+    auto make_matmul = [&](const ov::Output<ov::Node> & a, const ov::Output<ov::Node> & b) {
+        auto node = std::make_shared<ov::op::v0::MatMul>(a, b, false, transpose_b);
+        if (preserve_f32) {
+#ifdef GGML_OPENVINO_HAS_PRECISION_CONTROL
+            // Keep this MatMul and its input layout/conversion paths in F32; other branches keep their precision.
+            ov::disable_conversion(node, ov::element::f16);
+            ov::disable_conversion(node, ov::element::bf16);
+            ov::mark_as_precision_sensitive(node->input(0));
+            ov::mark_as_precision_sensitive(node->input(1));
+#else
+            FRONT_END_CHECK_IMPLEMENTED(false, "F32 MatMul input precision requires OpenVINO node precision control");
+#endif
+        }
+        return node;
+    };
 
     auto B_shape = context.get_input_shape(0).to_shape();
     auto A_shape = context.get_input_shape(1).to_shape();
@@ -68,7 +100,7 @@ OutputVector translate_mulmat(const NodeContext & context) {
             A_reshape->get_input_partial_shape(0)[1] == batch_small) {
             A_grouped = A_reshape->input_value(0);
         }
-        ov::Output<Node> res = std::make_shared<ov::op::v0::MatMul>(A_grouped, B, false, transpose_b);
+        ov::Output<Node> res = make_matmul(A_grouped, B);
         res = std::make_shared<ov::op::v1::Reshape>(
             res, ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{0, batch_large, -1, 0}),
             true);
@@ -107,7 +139,7 @@ OutputVector translate_mulmat(const NodeContext & context) {
         A = Z;
     }
 
-    ov::Output<Node> res = std::make_shared<ov::op::v0::MatMul>(A, B, false, transpose_b);
+    ov::Output<Node> res = make_matmul(A, B);
 
     const auto output_type = context.get_output_type();
     if (res.get_element_type() != output_type) {

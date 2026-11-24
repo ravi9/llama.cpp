@@ -47,6 +47,10 @@ struct graph_key {
         std::unordered_set<ggml_backend_buffer_t> weight_buffers;
         for (int i = 0; i < n_nodes; ++i) {
             const auto * node = cgraph->nodes[i];
+            if (node->op == GGML_OP_MUL_MAT && ggml_prec_get_src(node, 1) == GGML_PREC_F32) {
+                // Node precision guards are part of the compiled graph, including in the dynamic disk cache.
+                input_srcs.push_back("f32_matmul_" + std::to_string(i));
+            }
             // A later model load may use the same graph names and shapes but new
             // weights. Allocation generations survive pointer reuse, whereas
             // the lightweight topology key alone would select stale Constants.

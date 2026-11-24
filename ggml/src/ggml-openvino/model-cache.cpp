@@ -334,7 +334,8 @@ uint64_t ggml_openvino_model_fingerprint(const ggml_cgraph * cgraph,
     // Version 9 hashes GGML_OPENVINO_ROPE_F32_ANGLE, which became opt-in.
     // Version 10 hashes only whether GGML_OPENVINO_PROFILING is 2 or more (it then compiles with enable_profiling),
     // and no longer GGML_OPENVINO_DISABLE_REMOTE_OUTPUTS, which only changes the output bindings.
-    h = fnv1a_u64(h, 10);
+    // Version 11 honors explicit F32 MatMul input precision with node-level guards.
+    h = fnv1a_u64(h, 11);
     h = fnv1a(h, graph_signature.data(), graph_signature.size());
     for (const char * name : cache_settings) {
         const char * value = ggml_openvino_getenv_str(name, "");
