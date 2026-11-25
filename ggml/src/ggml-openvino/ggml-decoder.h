@@ -47,6 +47,15 @@ struct ModelParams {
     // The attention masks that are graph inputs, by identity: gemma-4's KV-shared layers also read them through
     // GET_ROWS, which must resolve to the same OV parameter as the attention ops
     std::set<const ggml_tensor *> kq_masks;
+    // gemma-4's KV-shared layers attend for the output rows only (prune_shared in src/models/gemma4.cpp): llama.cpp
+    // copies their mask rows from the input masks on the host into separate inputs (out_mask, out_mask_swa), and
+    // gathers their activations, positions and per-layer embeddings with an index list (inp_prune_ids). The static
+    // models bind the input masks per prefill chunk, so these masks are not graph inputs: each maps to the input
+    // mask it copies, and the OV model gathers its rows from that mask with inp_prune_ids instead.
+    std::map<const ggml_tensor *, const ggml_tensor *> pruned_masks;
+    const ggml_tensor * prune_ids = nullptr;
+    // the output rows among the gathered rows (inp_prune_keep)
+    const ggml_tensor * prune_keep = nullptr;
 
     std::vector<std::string> kv_names;
     size_t kv_buffer_ctx_id = 0;
@@ -287,6 +296,32 @@ public:
     }
 
     virtual std::set<std::string> get_model_output_names() const override { return m_model_output_names; }
+
+    virtual std::set<std::string> get_cache_output_names() const override {
+        std::set<std::string> names;
+        for (const auto & name : m_model_output_names) {
+            const ggml_tensor * tensor = m_model_outputs.at(name);
+            if (is_kvcache(tensor, nullptr) || is_recurrent_cache(tensor)) {
+                names.insert(name);
+            }
+        }
+        return names;
+    }
+
+    virtual bool is_kv_only_outputs() const override { return m_kv_only_outputs; }
+
+    // Convert the model with only the cache writes as outputs (GGML_OPENVINO_KV_ONLY_PREFILL); the conversion pipeline
+    // then drops everything that only feeds the other outputs, see pass::KeepCacheResults.
+    void set_kv_only_outputs(bool kv_only) { m_kv_only_outputs = kv_only; }
+
+    // GET_ROWS of a large host-resident weight table by graph-input ids (GGML_OPENVINO_NPU_HOST_GATHER): its rows
+    // are gathered on the host and fed through the "ggml_host_rows_<node>" input instead of an OV Gather.
+    static bool is_host_gather_rows(const ggml_tensor * node);
+    static constexpr const char * host_rows_prefix = "ggml_host_rows_";
+    const ggml_tensor * get_host_gather_rows(const std::string & input_name) const {
+        auto it = m_host_gather_rows.find(input_name);
+        return it == m_host_gather_rows.end() ? nullptr : it->second;
+    }
 
     const std::map<std::string, ggml_tensor *> & get_model_outputs() const { return m_model_outputs; }
 
@@ -697,6 +732,8 @@ public:
 
     bool is_kq_mask(const ggml_tensor * tensor) const { return m_model_params.kq_masks.count(tensor) != 0; }
 
+    bool is_pruned_mask(const ggml_tensor * tensor) const { return m_model_params.pruned_masks.count(tensor) != 0; }
+
     // A graph-input index list of GET_ROWS: out_ids, or the inp->s_copy leaf when build_rs gathers
     // every recurrent state at once.
     static bool is_get_rows_input_idx(const ggml_tensor * tensor, const ggml_tensor * op) {
@@ -776,6 +813,8 @@ private:
     std::set<std::string> m_model_output_names;
     // The output set the compiled model was built from, for has_same_graph_io().
     std::set<std::string> m_built_output_names;
+    bool m_kv_only_outputs = false;
+    std::map<std::string, const ggml_tensor *> m_host_gather_rows;
     std::vector<NodeInfo> m_node_info_list;
     std::map<ggml_tensor *, int> m_node_dynamic_dims;
     std::set<const ggml_tensor *> m_kvcache_4d;
