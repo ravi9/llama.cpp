@@ -25,6 +25,7 @@
 #include <future>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <openvino/core/any.hpp>
 #include <openvino/core/graph_util.hpp>
@@ -371,9 +372,17 @@ static std::string dynamic_graph_signature(const ggml_cgraph * graph,
     for (const auto & [name, input] : decoder.get_model_extra_inputs()) {
         append_string(name);
         append_string(input.type.get_type_name());
-        append(input.shape.size());
-        for (auto dim : input.shape) {
-            append(dim);
+        // Replay control lengths change with the batch. The compiled graph uses the declared Parameter shape.
+        if (input.is_parameter && input.parameter_shape.rank().is_static() && input.parameter_shape.is_dynamic()) {
+            append(std::numeric_limits<size_t>::max());
+            append_string(input.parameter_shape.to_string());
+        } else {
+            const auto shape = input.is_parameter && input.parameter_shape.is_static() ?
+                                   input.parameter_shape.to_shape() : input.shape;
+            append(shape.size());
+            for (const auto dim : shape) {
+                append(dim);
+            }
         }
         append(input.is_parameter);
         if (!input.is_parameter) {
