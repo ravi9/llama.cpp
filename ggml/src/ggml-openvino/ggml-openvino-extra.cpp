@@ -1081,11 +1081,9 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
         return ExtraQuantType::Q8_0_C;
     case GGML_TYPE_Q3_K:
         if (sym128_all) {
-            std::cout << "Using sym128_all for GGML_TYPE_Q3_K tensor: " << tensor->name << " with type " << tensor->type << std::endl;
             return ExtraQuantType::Q4_0_128;
         }
         if (asym64_all) {
-            std::cout << "Using asym64_all for GGML_TYPE_Q3_K tensor: " << tensor->name << " with type " << tensor->type << std::endl;
             return tensor->ne[0] % 64 == 0 ? ExtraQuantType::Q4_1_64 : ExtraQuantType::Q8_0_C;
         }
         return std::nullopt;
@@ -1094,14 +1092,11 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
     case GGML_TYPE_IQ4_XS:
     case GGML_TYPE_IQ4_NL:
         if (sym128_all) {
-            std::cout << tensor->type << ": ";
-            std::cout << "Using sym128_all for IQ tensor: " << tensor->name << " with type " << tensor->type << std::endl;
             return ExtraQuantType::Q4_0_128;
         }
         // With the lookup-table graph, the CPU and GPU plugins unpack these weights to f32: much more memory, slow
         // on CPU. Q4_1_64 stays compressed. Use GGML_OPENVINO_REQUANT_KQUANT=native to keep the lookup tables.
         if (!is_opt("native")) {
-            std::cout << "Using asym64_all for IQ tensor: " << tensor->name << " with type " << tensor->type << std::endl;
             return tensor->ne[0] % 64 == 0 ? ExtraQuantType::Q4_1_64 : ExtraQuantType::Q8_0_C;
         }
         return std::nullopt;
