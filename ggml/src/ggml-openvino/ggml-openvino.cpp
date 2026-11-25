@@ -67,6 +67,8 @@
 // - CPU repack buffer: tensor->extra stores tensor_traits with repacked data
 // =====================================================
 
+static bool ov_device_shares_system_memory(const std::string & device);
+
 namespace {
 // Buffer context that manages per-tensor allocations (no contiguous buffer for weights)
 struct ggml_backend_openvino_buffer_context {
@@ -121,7 +123,8 @@ struct ggml_backend_openvino_buffer_context {
         ov_buffer = std::make_shared<ov::Tensor>(ov::element::u8, ov::Shape{size}, data);
     }
 
-    ggml_backend_openvino_buffer_context(int device, size_t size, bool is_remote = false, bool lazy = false) :
+    ggml_backend_openvino_buffer_context(int device, size_t size, bool is_remote = false, bool lazy = false,
+                                         bool prefer_host_usm = false) :
         device(device),
         name(std::string(GGML_OPENVINO_NAME) + std::to_string(device)),
         id(next_buffer_id()),
@@ -138,8 +141,18 @@ struct ggml_backend_openvino_buffer_context {
             GGML_ASSERT(ggml_openvino_is_gpu());
             auto remote_context = ggml_openvino_get_remote_context(device_name);
             auto gpu_context = remote_context->as<ov::intel_gpu::ocl::ClContext>();
-            ov::intel_gpu::ocl::USMTensor usm_tensor =
-                gpu_context.create_usm_device_tensor(ov::element::u8, ov::Shape{size});
+            ov::intel_gpu::ocl::USMTensor usm_tensor;
+            if (prefer_host_usm) {
+                try {
+                    usm_tensor = gpu_context.create_usm_host_tensor(ov::element::u8, ov::Shape{size});
+                    GGML_LOG_DEBUG("%s: allocated %zu bytes of USM host memory for attention KV\n", __func__, size);
+                } catch (const ov::Exception & e) {
+                    GGML_LOG_DEBUG("%s: USM host KV allocation failed: %s\n", __func__, e.what());
+                }
+            }
+            if (!usm_tensor) {
+                usm_tensor = gpu_context.create_usm_device_tensor(ov::element::u8, ov::Shape{size});
+            }
             data = usm_tensor.get();
             ov_buffer = std::make_shared<ov::intel_gpu::ocl::USMTensor>(std::move(usm_tensor));
         } else {
@@ -416,12 +429,13 @@ static bool ggml_openvino_swap_buffer_context(ggml_backend_buffer_t buffer,
                                               ggml_backend_openvino_buffer_context *& ctx,
                                               ggml_tensor * tensor,
                                               bool is_remote,
-                                              bool lazy) {
+                                              bool lazy,
+                                              bool prefer_host_usm = false) {
     const int device = ctx->device;
     const size_t size = ctx->size;
     const size_t offset = (char *) tensor->data - (char *) ctx->data;
     delete ctx;
-    ctx = new ggml_backend_openvino_buffer_context(device, size, is_remote, lazy);
+    ctx = new ggml_backend_openvino_buffer_context(device, size, is_remote, lazy, prefer_host_usm);
     buffer->context = ctx;
     if (ctx->data == nullptr) {
         return false;
@@ -439,16 +453,20 @@ static enum ggml_status ggml_backend_openvino_buffer_init_tensor(ggml_backend_bu
     // buffer, so in host memory the plugin copies it to the device and back on every inference.
     const bool is_device_state = strncmp(tensor->name, "cache_", 6) == 0 ||
                                  strcmp(tensor->name, "layer_inp_dev") == 0 || strcmp(tensor->name, "h_nextn_dev") == 0;
+    const bool is_kv_tensor = strncmp(tensor->name, "cache_k_l", 9) == 0 || strncmp(tensor->name, "cache_v_l", 9) == 0;
     if (is_device_state && !ctx->is_remote && ggml_openvino_is_gpu() && !is_stateful_enabled()) {
         GGML_ASSERT(ctx->tensor_extras.empty());
-        if (!ggml_openvino_swap_buffer_context(buffer, ctx, tensor, true, false)) {
+        // Large device USM allocations slowed attention reads on Arc B390. Host USM preserves remote KV bindings.
+        const bool prefer_host_usm = is_kv_tensor && tensor->ne[2] == 1 && tensor->ne[3] == 1 && !ggml_openvino_is_static() &&
+                                     ggml_openvino_getenv_int("GGML_OPENVINO_ENABLE_KV_4D") > 0 &&
+                                     ov_device_shares_system_memory(ggml_openvino_get_available_devices()[ctx->device]);
+        if (!ggml_openvino_swap_buffer_context(buffer, ctx, tensor, true, false, prefer_host_usm)) {
             return GGML_STATUS_ALLOC_FAILED;
         }
     }
 
     // On-demand NPU KV: swap the eagerly committed buffer for demand-zero memory at its first KV tensor
     // and register every KV tensor; the NPU binds grown L0 storage instead.
-    const bool is_kv_tensor = strncmp(tensor->name, "cache_k_l", 9) == 0 || strncmp(tensor->name, "cache_v_l", 9) == 0;
     if (is_kv_tensor && tensor->view_src == nullptr && !ctx->is_remote && ggml_openvino_npu_kv_on_demand_enabled() &&
         tensor->ne[2] == 1 && tensor->ne[3] == 1 && tensor->nb[1] == ggml_row_size(tensor->type, tensor->ne[0])) {
         if (!ctx->kv_on_demand && ctx->tensor_extras.empty() && tensor->data == ctx->data) {

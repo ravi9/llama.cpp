@@ -85,7 +85,7 @@ These options are off by default. They are not validated for general use: some h
 | `GGML_OPENVINO_ROPE_F32_ANGLE` | GPU | Boolean | `0` | Keep the RoPE angle in f32 under the f16 hint, for long prompts. Validated on one model. On CPU, `test-backend-ops -o ROPE` fails with it. |
 | `GGML_OPENVINO_NATIVE_SOFTPLUS` | all | Boolean | `0` | Translate `SOFTPLUS` to the OpenVINO `SoftPlus` op instead of the default `relu(x) + log(1 + exp(-abs(x)))`. |
 | `GGML_OPENVINO_KV_SCATTER_ELEMENTS` | all | Boolean | `0` | Use `ScatterElementsUpdate` instead of `ScatterUpdate` for single-row KV writes in stateless execution. |
-| `GGML_OPENVINO_ENABLE_KV_4D` | GPU | Boolean | `0` | Bind the KV cache as `[1, ctx, n_heads_kv, head_size]`, so the GPU plugin can update and read it in place. Needs an OpenVINO build newer than 2026.4.1; do not use it with 2026.4.1. |
+| `GGML_OPENVINO_ENABLE_KV_4D` | GPU | Boolean | `0` | Bind the KV cache as `[1, ctx, n_heads_kv, head_size]`, so the GPU plugin can update and read it in place. Single-stream attention KV on integrated GPUs prefers host USM with device USM as a fallback. Requires an OpenVINO build newer than 2026.4.1. |
 | `GGML_OPENVINO_GPU_KV_ROUND_UP` | GPU | Boolean | `1` | Round the attended KV length to a window on the dynamic stateless GPU path. Set to `0` to use the unrounded attended length while keeping KV slicing enabled. |
 | `GGML_OPENVINO_MEMORY_OPTIMIZE` | all | Boolean | `0` | Turn on `GGML_OPENVINO_REDUCE_COMPILE_MEM` and, on GPU, `GGML_OPENVINO_RELEASE_WEIGHTS`, unless they are set. |
 | `GGML_OPENVINO_REDUCE_COMPILE_MEM` | all | Boolean | value of `GGML_OPENVINO_MEMORY_OPTIMIZE` | Create fewer weight nodes during compilation, to lower the host memory in use. |
