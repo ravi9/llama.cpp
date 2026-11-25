@@ -5,6 +5,7 @@
 #include "ggml-openvino/openvino/node_context.h"
 #include "ggml-openvino/openvino/utils.h"
 #include "input_model.h"
+#include "recurrent_replay_fusion.h"
 #ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
 #include "recurrent_cache_fusion.h"
 #endif
@@ -75,7 +76,7 @@ std::shared_ptr<ov::op::v0::Parameter> create_parameter(const std::string & name
 
 std::shared_ptr<ov::Node> create_extra_input(const std::string & name, const ModelExtraInputInfo & input_info) {
     if (input_info.is_parameter) {
-        ov::PartialShape shape(input_info.shape);
+        ov::PartialShape shape = input_info.parameter_shape.rank().is_static() ? input_info.parameter_shape : ov::PartialShape(input_info.shape);
         // One SET_ROWS emits min(tokens, snapshot capacity) windows on each batch.
         if (name.compare(0, 11, "rs_windows_") == 0) {
             shape[2] = ov::Dimension::dynamic();
@@ -306,6 +307,7 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
 #ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
     RecurrentCacheFusion recurrent_fusion(ggml_model_decoder, tensor_map);
 #endif
+    RecurrentReplayFusion replay_fusion(ggml_model_decoder, tensor_map);
     auto translate_node = [&](const std::shared_ptr<GgmlDecoder> & decoder, int node_idx) {
         auto operation_type = decoder->get_op_type(node_idx);
         if (operation_type == "GGML_OP_NONE") {
@@ -330,6 +332,7 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
 #ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
         converted_outputs = recurrent_fusion.translate(node_idx, node_context);
 #endif
+        if (converted_outputs.empty()) converted_outputs = replay_fusion.translate(node_idx, node_context);
         if (converted_outputs.empty()) {
             converted_outputs = it->second(node_context);
         }
@@ -391,6 +394,7 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
     }
     ggml_model_decoder->visit_subgraph(node_visitor);
 
+    for (const auto & updated : replay_fusion.updated_banks()) (*tensor_map)[updated.first] = updated.second;
     for (const auto & name : ggml_model_decoder->get_model_output_names()) {
 #ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
         if (recurrent_fusion.is_inplace_output(name)) {

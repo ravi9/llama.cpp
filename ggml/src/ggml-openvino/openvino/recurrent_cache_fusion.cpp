@@ -117,7 +117,7 @@ RecurrentCacheFusion::RecurrentCacheFusion(const std::shared_ptr<GgmlDecoder> & 
         } else {
             for (int j = i + 1; j < graph->n_nodes; ++j) {
                 const auto node = graph->nodes[j];
-                if (node->op != GGML_OP_GATED_DELTA_NET || !node->src[5] || node->src[5]->op != GGML_OP_RESHAPE) {
+                if (node->op != GGML_OP_GATED_DELTA_NET || node->op_params[1] != 0 || !node->src[5] || node->src[5]->op != GGML_OP_RESHAPE) {
                     continue;
                 }
                 const auto active = node->src[5]->src[0];

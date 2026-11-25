@@ -219,7 +219,7 @@ static size_t get_static_attention_size(const std::shared_ptr<GgmlOvDecoder> & g
 static uint64_t ggml_openvino_model_cache_extra_cfg(bool stateful, bool recurrent) {
     const bool manual_gqa_enabled = ggml_openvino_manual_gqa_enabled();
 
-    uint64_t extra_cfg = 15;  // Recurrent caches are writable inputs without cache Results.
+    uint64_t extra_cfg = 18;  // Convolution replay uses a shared graph and a dynamic history slice.
 #ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
     extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_FUSED_RECURRENCE") ? 0u : 1u);
 #else
@@ -765,7 +765,7 @@ ov::Tensor get_ov_input_tensor(const std::shared_ptr<GgmlOvDecoder> & ggml_decod
             for (const auto & row : ggml_decoder->get_compute_params().sampling_rows) {
                 *data++ = row.second;
             }
-        } else if (param_name.compare(0, 11, "rs_offsets_") == 0 || param_name.compare(0, 11, "rs_windows_") == 0) {
+        } else if (param_name.compare(0, 11, "rs_offsets_") == 0 || param_name.compare(0, 11, "rs_windows_") == 0 || param_name.compare(0, 10, "rs_replay_") == 0) {
             const auto & controls = ggml_decoder->get_compute_params();
             const auto & values = controls.recurrent_controls.at(param_name);
             std::copy(values.begin(), values.end(), input_tensor.data<int64_t>());

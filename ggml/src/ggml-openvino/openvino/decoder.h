@@ -26,6 +26,7 @@ struct ModelExtraInputInfo {
     // when set, the value is read from dimension shape_axis of this model input instead of a Parameter
     std::string shape_source;
     int64_t shape_axis = -1;
+    PartialShape parameter_shape = PartialShape::dynamic();
 };
 
 class GgmlDecoder : public DecoderBase {

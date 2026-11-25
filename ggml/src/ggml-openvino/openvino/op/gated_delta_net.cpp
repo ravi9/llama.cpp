@@ -1,6 +1,7 @@
 #include "gated_delta_net.hpp"
 
 #include "../node_context.h"
+#include "recurrent_replay_graph.hpp"
 #include "../op_table.h"
 #include "../utils.h"
 #ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
@@ -30,6 +31,7 @@
 #include <openvino/op/maximum.hpp>
 #include <openvino/op/minimum.hpp>
 #include <openvino/op/multiply.hpp>
+#include <openvino/op/normalize_l2.hpp>
 #include <openvino/op/parameter.hpp>
 #include <openvino/op/range.hpp>
 #include <openvino/op/reduce_mean.hpp>
@@ -575,6 +577,7 @@ static OutputVector translate_gdn(const NodeContext & context, const OutputVecto
 }
 
 OutputVector translate_gated_delta_net(const NodeContext & context) {
+    FRONT_END_OP_CONVERSION_CHECK(context.get_output_op_params()[1] == 0, "Replay requires a complete cache-bank fusion; functional replay translation is not implemented yet");
     return translate_gdn(context, nullptr);
 }
 
@@ -583,6 +586,32 @@ OutputVector translate_recurrent_gated_delta_net(const NodeContext & context, co
     return translate_gdn(context, &cache_inputs);
 }
 #endif
+
+OutputVector translate_recurrent_gated_delta_net_replay(const NodeContext & context, const OutputVector & banks) {
+    auto q = context.get_input(0), k = context.get_input(1);
+    const auto shape = context.get_input_shape(2);
+    auto v = process_view_input(context, 2, shape[2].get_length() * shape[3].get_length(), 3);
+    if (context.get_view_input_size(2)) {
+        v = std::make_shared<ov::op::v0::Squeeze>(v, ov::op::v0::Constant::create(ov::element::i64, {1}, {0}));
+        v = std::make_shared<ov::op::v1::Reshape>(v, ov::op::v0::Constant::create(ov::element::i64, {4},
+            std::vector<int64_t>{0, 0, shape[2].get_length(), shape[3].get_length()}), true);
+    }
+    if (context.get_op_case() == 1 && ggml_openvino_gdn_prescale_enabled()) {
+        q = std::make_shared<ov::op::v1::Multiply>(q,
+            ov::op::v0::Constant::create(ov::element::f32, {1}, {ggml_openvino_gdn_q_scale()}));
+    } else {
+        Output<Node> raw_q, raw_k;
+        float q_eps, k_eps;
+        if (match_gdn_l2_norm(q, raw_q, q_eps) && match_gdn_l2_norm(k, raw_k, k_eps)) {
+            auto axis = ov::op::v0::Constant::create(ov::element::i64, {1}, {-1});
+            q = std::make_shared<ov::op::v0::NormalizeL2>(raw_q, axis, q_eps, ov::op::EpsMode::ADD);
+            k = std::make_shared<ov::op::v0::NormalizeL2>(raw_k, axis, k_eps, ov::op::EpsMode::ADD);
+        }
+    }
+    return ov::recurrent_replay::build({
+        q, k, v, banks[0], context.get_input(3), context.get_input(4),
+        banks[1], banks[2], banks[3], banks[4], banks[5], banks[6]}, false);
+}
 
 static OutputVector translate_gated_delta_net_ref(const NodeContext & context) {
     num_inputs_check(context, 6, 6);
