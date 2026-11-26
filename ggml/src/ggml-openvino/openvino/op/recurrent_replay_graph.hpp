@@ -18,6 +18,8 @@ void disable_conversion(const std::shared_ptr<Node>& node, const element::Type& 
 }
 
 namespace ov::recurrent_replay {
+// OpenVINO's GPU RecurrentReplayFusion checks this emitted graph against its
+// reference replay graph. Keep the patterns in both repositories in sync.
 namespace ops = ov::opset13;
 using Value = ov::Output<ov::Node>;
 
