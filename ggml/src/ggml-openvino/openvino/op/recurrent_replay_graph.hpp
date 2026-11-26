@@ -4,8 +4,18 @@
 
 #include "openvino/opsets/opset13.hpp"
 #include "openvino/core/model.hpp"
+#include "openvino/core/visibility.hpp"
 #include <limits>
 #include <cmath>
+#include <unordered_set>
+
+namespace ov {
+// The runtime exports this transformation attribute even when its header is not installed.
+#ifndef OPENVINO_STATIC_LIBRARY
+OPENVINO_CORE_IMPORTS
+#endif
+void disable_conversion(const std::shared_ptr<Node>& node, const element::Type& to);
+}
 
 namespace ov::recurrent_replay {
 namespace ops = ov::opset13;
@@ -178,6 +188,39 @@ inline OutputVector gdn_body(const OutputVector& a) {
 }
 
 inline OutputVector build(const OutputVector& args, bool conv) {
-    return conv ? conv_body(args) : gdn_body(args);
+    auto outputs = conv ? conv_body(args) : gdn_body(args);
+    const auto bank_ports = conv ? std::vector<size_t>{0} : std::vector<size_t>{3, 6, 7, 8};
+    for (const auto port : bank_ports) {
+        auto bank = args[port];
+        while (ov::is_type<ops::Reshape>(bank.get_node())) {
+            ov::disable_conversion(bank.get_node_shared_ptr(), element::f16);
+            bank = bank.get_node()->input_value(0);
+        }
+        ov::disable_conversion(bank.get_node_shared_ptr(), element::f16);
+    }
+    // Keep the functional replay state in FP32 under the GPU's mixed-precision
+    // policy. Stop at the replay inputs to preserve the upstream precision policy.
+    std::unordered_set<const Node*> visited;
+    for (const auto& arg : args) {
+        visited.insert(arg.get_node());
+    }
+    auto pending = outputs;
+    while (!pending.empty()) {
+        const auto node = pending.back().get_node_shared_ptr();
+        pending.pop_back();
+        if (!visited.insert(node.get()).second) {
+            continue;
+        }
+        ov::disable_conversion(node, element::f16);
+        if (const auto loop = ov::as_type_ptr<ops::Loop>(node)) {
+            for (const auto& body_node : loop->get_function()->get_ordered_ops()) {
+                ov::disable_conversion(body_node, element::f16);
+            }
+        }
+        for (const auto& input : node->input_values()) {
+            pending.push_back(input);
+        }
+    }
+    return outputs;
 }
 } // namespace ov::recurrent_replay

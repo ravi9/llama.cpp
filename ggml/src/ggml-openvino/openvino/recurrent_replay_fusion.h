@@ -3,8 +3,12 @@
 #include "node_context.h"
 
 #include <set>
+#include <string_view>
 
 namespace ov::frontend::ggml {
+// Assign variables with this prefix opt a caller-owned remote bank into writable-input fusion.
+inline constexpr std::string_view replay_cache_state_prefix = "__ggml_replay_cache_";
+
 class RecurrentReplayFusion {
 public:
     RecurrentReplayFusion(const std::shared_ptr<GgmlDecoder> &, const std::shared_ptr<TensorMap> &);

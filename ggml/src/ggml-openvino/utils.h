@@ -101,6 +101,7 @@ struct decoder_runtime_ctx {
 
     std::shared_ptr<std::mutex> mutex;
     std::shared_ptr<GgmlOvDecoder> ptr;
+    std::vector<std::pair<std::string, ov::VariableState>> replay_writebacks;
     // Attention sizes and output count the cached prefill model was built with; decode calls overwrite the
     // decoder's.
     int prefill_attention_size = -1;

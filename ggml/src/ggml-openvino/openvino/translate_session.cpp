@@ -27,6 +27,7 @@
 #include <openvino/core/type.hpp>
 #include <openvino/core/type/element_type.hpp>
 #include <openvino/op/add.hpp>
+#include <openvino/op/assign.hpp>
 #include <openvino/op/broadcast.hpp>
 #include <openvino/op/concat.hpp>
 #include <openvino/op/constant.hpp>
@@ -394,6 +395,8 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
     }
     ggml_model_decoder->visit_subgraph(node_visitor);
 
+    ov::SinkVector sinks;
+    const auto actual_decoder = std::dynamic_pointer_cast<GgmlOvDecoder>(ggml_model_decoder);
     for (const auto & updated : replay_fusion.updated_banks()) (*tensor_map)[updated.first] = updated.second;
     for (const auto & name : ggml_model_decoder->get_model_output_names()) {
 #ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
@@ -404,6 +407,18 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
 #endif
         FRONT_END_GENERAL_CHECK(tensor_map->find(name) != tensor_map->end(),
                                 "Output name not found in tensor map: ", name);
+        if (const auto bank = replay_fusion.updated_banks().find(name);
+            bank != replay_fusion.updated_banks().end() && actual_decoder &&
+            ggml_openvino_buffer_is_remote(actual_decoder->get_model_outputs().at(name))) {
+            const auto & update = bank->second;
+            // Let the Assign input determine the state type. GPU precision conversion can rewrite
+            // declared variable types even when the precision-sensitive input stays in FP32.
+            auto variable = std::make_shared<ov::op::util::Variable>(ov::op::util::VariableInfo{
+                update.get_partial_shape(), element::dynamic, std::string(replay_cache_state_prefix) + name});
+            auto assign = std::make_shared<v6::Assign>(update, variable);
+            sinks.push_back(assign);
+            continue;
+        }
         auto result = std::make_shared<v0::Result>(tensor_map->at(name));
         result->set_friendly_name(name);
         results.push_back(result);
@@ -458,7 +473,7 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
     // if (auto diff = params.size() - used_params.size()) {
     //     GGML_LOG_INFO("%zu parameters are not used in the model.", diff);
     // }
-    resulting_model = std::make_shared<Model>(results, used_params);
+    resulting_model = std::make_shared<Model>(results, sinks, used_params);
 
     apply_transformations(resulting_model);
 
