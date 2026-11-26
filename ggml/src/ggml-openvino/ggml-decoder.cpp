@@ -1821,61 +1821,6 @@ void GgmlOvDecoder::add_extra_inputs() {
         }
     }
     m_compute_params.recurrent_controls.clear();
-#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
-    // Naive graphs have no full-model cache fusion and node cases are not initialized here.
-    if (!m_naive && !m_is_static && !m_is_stateful && !m_model_is_splitted && ggml_openvino_is_gpu() &&
-        !ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_FUSED_RECURRENCE")) {
-        for (int i = 0; i < m_cgraph->n_nodes; ++i) {
-            const auto node = m_cgraph->nodes[i];
-            const auto op_case = m_node_info_list[i].node_op_case;
-            if (node->op == GGML_OP_CPY && (op_case == 10 || op_case == 12)) {
-                m_model_extra_inputs["rs_update_" + get_tensor_ov_name(m_cgraph, node)] =
-                    {ov::element::i64, ov::Shape{1, 1, 1, 4}, 0, true, {}, -1};
-            }
-        }
-        for (const auto & [name, write] : m_compute_params.rs_writebacks) {
-            if (write.src_begin >= 0) {
-                auto & values = m_compute_params.recurrent_controls["rs_offsets_" + name];
-                values = {write.slot_begin, write.src_begin};
-                m_model_extra_inputs["rs_offsets_" + name] =
-                    {ov::element::i64, ov::Shape{1, 1, 1, 2}, 0, true, {}, -1};
-            }
-        }
-        for (int i = 0; i < m_cgraph->n_nodes; ++i) {
-            const auto concat = m_cgraph->nodes[i];
-            if (concat->op != GGML_OP_CONCAT || !concat->src[0] || concat->src[0]->op != GGML_OP_RESHAPE ||
-                !concat->src[0]->src[0] || concat->src[0]->src[0]->op != GGML_OP_VIEW ||
-                concat->src[0]->src[0]->src[0]->op != GGML_OP_GET_ROWS) {
-                continue;
-            }
-            std::vector<int64_t> values;
-            for (int j = i + 1; j < m_cgraph->n_nodes; ++j) {
-                const auto write = m_cgraph->nodes[j];
-                if ((is_conv_state_writeback(write) || is_conv_state_snapshot_writeback(write)) &&
-                    write->src[0]->src[0] == concat) {
-                    const auto it = m_compute_params.rs_writebacks.find(get_tensor_ov_name(m_cgraph, write));
-                    if (it == m_compute_params.rs_writebacks.end()) {
-                        values.clear();
-                        break;
-                    }
-                    const auto & wb = it->second;
-                    const int64_t count = wb.window_count >= 0 ? wb.window_count : 1;
-                    for (int64_t w = 0; w < count; ++w) {
-                        values.push_back(wb.src_begin + w);
-                        values.push_back(wb.slot_begin + (count - 1 - w) *
-                                                          (wb.window_count >= 0 ? wb.snapshot_stride : 0));
-                    }
-                    break;
-                }
-            }
-            if (!values.empty()) {
-                const auto name = "rs_windows_" + get_tensor_ov_name(m_cgraph, concat);
-                m_model_extra_inputs[name] = {ov::element::i64, ov::Shape{1, 1, values.size() / 2, 2}, 0, true, {}, -1};
-                m_compute_params.recurrent_controls[name] = std::move(values);
-            }
-        }
-    }
-#endif
     if (!m_naive && !m_is_static && !m_is_stateful && !m_model_is_splitted && ggml_openvino_is_gpu() &&
         !ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_FUSED_RECURRENCE")) {
         for (int i = 0; i < m_cgraph->n_nodes; ++i) {

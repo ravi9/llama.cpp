@@ -4,9 +4,6 @@
 #include "recurrent_replay_graph.hpp"
 #include "../op_table.h"
 #include "../utils.h"
-#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
-#include "recurrent_cache_update.hpp"
-#endif
 #include "ggml-openvino/ggml-openvino-extra.h"
 
 #include <cmath>
@@ -404,7 +401,9 @@ static OutputVector translate_gdn_snapshots(const Output<Node> & q,
     return {attention, states};
 }
 
-static OutputVector translate_gdn(const NodeContext & context, const OutputVector * cache_inputs) {
+OutputVector translate_gated_delta_net(const NodeContext & context) {
+    FRONT_END_OP_CONVERSION_CHECK(context.get_output_op_params()[1] == 0,
+                                  "GATED_DELTA_NET replay requires a complete recurrent cache group");
     auto v_shape = context.get_input_shape(2).to_shape();  // [B, T, H_v, S_v]
     auto q_shape = context.get_input_shape(0).to_shape();  // [B, T, H_k, S_k]
 
@@ -413,7 +412,7 @@ static OutputVector translate_gdn(const NodeContext & context, const OutputVecto
     const bool kda = context.get_input_shape(3)[3] != 1;
     if (kda && !gdn_per_key_gate_supported()) {
         // the reference loop reads and writes the state in the ggml layout, one state per call
-        FRONT_END_OP_CONVERSION_CHECK(!cache_inputs && context.get_output_op_params()[0] == 1 &&
+        FRONT_END_OP_CONVERSION_CHECK(context.get_output_op_params()[0] == 1 &&
                                           !ggml_openvino_gdn_native_state_enabled(),
                                       "GATED_DELTA_NET with a per-key gate needs an OpenVINO GatedDeltaNet with a rank-4 "
                                       "gate for recurrent caches, state snapshots or the native state layout");
@@ -481,7 +480,7 @@ static OutputVector translate_gdn(const NodeContext & context, const OutputVecto
     // resets and slot copies move whole states, and supports_op aborts instead of falling back to CPU.
     const bool native_state = ggml_openvino_gdn_native_state_enabled();
     auto state_perm = ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{0, 1, 3, 2});
-    if (!native_state && !cache_inputs && snapshot_count == 1) {
+    if (!native_state && snapshot_count == 1) {
         state = std::make_shared<ov::op::v1::Transpose>(state, state_perm);
     }
 
@@ -519,22 +518,6 @@ static OutputVector translate_gdn(const NodeContext & context, const OutputVecto
     // std::cout << "GatedDeltaNet input shapes: q=" << q.get_partial_shape() << ", k=" << k.get_partial_shape()
     //           << ", v=" << v.get_partial_shape() << ", g=" << g.get_partial_shape()
     //           << ", beta=" << beta.get_partial_shape() << ", state=" << state.get_partial_shape() << std::endl;
-
-#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
-    if (cache_inputs) {
-        OutputVector args{q, k, v, (*cache_inputs)[0], g, beta};
-        args.insert(args.end(), cache_inputs->begin() + 1, cache_inputs->end());
-        auto fused = std::make_shared<ov::op::internal::RecurrentGatedDeltaNetUpdate>(
-            args, fuse_qk_l2norm, q_eps, k_eps, snapshot_count);
-        fused->set_friendly_name(context.get_name() + "/RecurrentGatedDeltaNetUpdate");
-        // The matched state VIEW is consumed only by the overridden full-cache
-        // writeback. Route that cache directly instead of materializing snapshots.
-        if (context.get_output_names().size() == 3) {
-            return {fused->output(0), fused->output(0), (*cache_inputs)[0]};
-        }
-        return {fused->output(0), (*cache_inputs)[0]};
-    }
-#endif
 
     Output<Node> attn_4d, states;
     if (snapshot_count > 1) {
@@ -575,17 +558,6 @@ static OutputVector translate_gdn(const NodeContext & context, const OutputVecto
     }
     return rename_outputs_with_suffix({res}, context.get_name());
 }
-
-OutputVector translate_gated_delta_net(const NodeContext & context) {
-    FRONT_END_OP_CONVERSION_CHECK(context.get_output_op_params()[1] == 0, "Replay requires a complete cache-bank fusion; functional replay translation is not implemented yet");
-    return translate_gdn(context, nullptr);
-}
-
-#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
-OutputVector translate_recurrent_gated_delta_net(const NodeContext & context, const OutputVector & cache_inputs) {
-    return translate_gdn(context, &cache_inputs);
-}
-#endif
 
 OutputVector translate_recurrent_gated_delta_net_replay(const NodeContext & context, const OutputVector & banks) {
     auto q = context.get_input(0), k = context.get_input(1);

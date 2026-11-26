@@ -221,12 +221,8 @@ static size_t get_static_attention_size(const std::shared_ptr<GgmlOvDecoder> & g
 static uint64_t ggml_openvino_model_cache_extra_cfg(bool stateful, bool recurrent) {
     const bool manual_gqa_enabled = ggml_openvino_manual_gqa_enabled();
 
-    uint64_t extra_cfg = 18;  // Convolution replay uses a shared graph and a dynamic history slice.
-#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
-    extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_FUSED_RECURRENCE") ? 0u : 1u);
-#else
-    extra_cfg = extra_cfg * 131;
-#endif
+    // Preserve the fingerprint for graphs compiled without the old native cache update ops.
+    uint64_t extra_cfg = 18 * 131;
     extra_cfg = extra_cfg * 131 + (stateful ? (recurrent ? 2u : 1u) : 0u);
     extra_cfg = extra_cfg * 131 + (ggml_openvino_reduce_compile_mem_enabled() ? 1u : 0u);
     extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_ENABLE_KV_4D") > 0 ? 1u : 0u);
@@ -775,19 +771,10 @@ ov::Tensor get_ov_input_tensor(const std::shared_ptr<GgmlOvDecoder> & ggml_decod
             for (const auto & row : ggml_decoder->get_compute_params().sampling_rows) {
                 *data++ = row.second;
             }
-        } else if (param_name.compare(0, 11, "rs_offsets_") == 0 || param_name.compare(0, 11, "rs_windows_") == 0 || param_name.compare(0, 10, "rs_replay_") == 0) {
+        } else if (param_name.compare(0, 10, "rs_replay_") == 0) {
             const auto & controls = ggml_decoder->get_compute_params();
             const auto & values = controls.recurrent_controls.at(param_name);
             std::copy(values.begin(), values.end(), input_tensor.data<int64_t>());
-        } else if (param_name.compare(0, 10, "rs_update_") == 0) {
-            const auto & controls = ggml_decoder->get_compute_params();
-            const auto & write = controls.rs_writebacks.at(param_name.substr(10));
-            auto data = input_tensor.data<int64_t>();
-            data[0] = write.slot_begin;
-            data[1] = write.seq_count >= 0 ? write.seq_count : controls.s_copy_active_slot_len;
-            data[2] = write.snapshot_stride >= 0 ? write.snapshot_stride : data[1];
-            // Direct GDN states contain no attention prefix.
-            data[3] = 0;
         } else {
             if (extra_input->second.type == ov::element::i64) {
                 *input_tensor.data<int64_t>() = extra_input->second.value;

@@ -60,7 +60,7 @@ Each variable turns off an optimization that is on by default, or sets its stren
 | `GGML_OPENVINO_DISABLE_SHAPE_FROM_MASK` | CPU, GPU | Boolean | `0` | By default the model reads the sequence count and the attended KV length from the shape of the KQ mask, so the GPU plugin can select its fused attention kernel. `1` passes them as separate inputs. |
 | `GGML_OPENVINO_DISABLE_KV_STATE_RELAYOUT` | CPU, GPU | Boolean | `0` | Stateful execution only. By default the sequence axis of the KV state is moved so that new tokens are appended in place. `1` keeps the original layout. |
 | `GGML_OPENVINO_DISABLE_REMOTE_OUTPUTS` | GPU | Boolean | `0` | By default an output tensor in a GPU buffer is bound directly to the infer request when its shape and type match. `1` turns this off. |
-| `GGML_OPENVINO_DISABLE_FUSED_RECURRENCE` | GPU | Boolean | `0` | Stateless execution only, with an OpenVINO build newer than 2026.4.1 (2026.4.1 does not build the fusion). By default the recurrent-state cache updates (Qwen3.5, LFM2) are fused into the OpenVINO model. `1` keeps the separate copies. |
+| `GGML_OPENVINO_DISABLE_FUSED_RECURRENCE` | GPU | Boolean | `0` | `1` disables the OpenVINO backend's recurrent replay translation, so replay ops require another eligible GGML backend. For an unfused OpenVINO replay graph, leave this at `0` and use a GPU plugin without the replay fusion pass. |
 | `GGML_OPENVINO_DISABLE_ELTWISE_RANK_ALIGN` | GPU | Boolean | `0` | By default the operands of an element-wise op get the same rank, which works around a GPU plugin defect when the op is fused into RMS norm (gemma-4 in stateful execution gave wrong output). `1` turns the workaround off. |
 
 ```bash
