@@ -3,9 +3,7 @@
 #include "../utils.h"
 #include "ggml.h"
 
-#ifdef GGML_OPENVINO_HAS_PRECISION_CONTROL
-#    include "../precision_control.hpp"
-#endif
+#include "../precision_control.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -56,15 +54,11 @@ OutputVector translate_mulmat(const NodeContext & context) {
     auto make_matmul = [&](const ov::Output<ov::Node> & a, const ov::Output<ov::Node> & b) {
         auto node = std::make_shared<ov::op::v0::MatMul>(a, b, false, transpose_b);
         if (preserve_f32) {
-#ifdef GGML_OPENVINO_HAS_PRECISION_CONTROL
             // Keep this MatMul and its input layout/conversion paths in F32; other branches keep their precision.
             ov::disable_conversion(node, ov::element::f16);
             ov::disable_conversion(node, ov::element::bf16);
             ov::mark_as_precision_sensitive(node->input(0));
             ov::mark_as_precision_sensitive(node->input(1));
-#else
-            FRONT_END_CHECK_IMPLEMENTED(false, "F32 MatMul input precision requires OpenVINO node precision control");
-#endif
         }
         return node;
     };
