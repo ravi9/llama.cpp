@@ -92,4 +92,6 @@ projectors. Four-slot serving was validated with unified and split KV.
 Qwen3.5 reuses its vision graph across image resolutions; Gemma4 uses
 resolution-specific encoder graphs.
 
-Gemma4 audio is not enabled. Static/NPU multimodal execution is untested.
+Gemma4 audio is not enabled: preprocessing and Conformer still need dynamic length/block handling, runtime padding and view/state offsets, and cross-length compiled-model reuse. The small weightless preprocessing graph currently runs uncached because of the naive path's node-count heuristic.
+
+Static/NPU multimodal execution is untested.
