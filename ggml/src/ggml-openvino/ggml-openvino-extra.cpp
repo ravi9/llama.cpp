@@ -174,6 +174,7 @@ constexpr env_var env_vars[] = {
     {"GGML_OPENVINO_KV_SCATTER_ELEMENTS", env_type::BOOL},
     {"GGML_OPENVINO_MANUAL_GQA_ATTN", env_type::BOOL},
     {"GGML_OPENVINO_DISABLE_ELTWISE_RANK_ALIGN", env_type::BOOL},
+    {"GGML_OPENVINO_DISABLE_SCALE_REORDER", env_type::BOOL},
     {"GGML_OPENVINO_MOE_OP", env_type::BOOL},
     {"GGML_OPENVINO_EXACT_ZERO_POINT", env_type::BOOL},
     {"GGML_OPENVINO_MEMORY_OPTIMIZE", env_type::BOOL},

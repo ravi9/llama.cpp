@@ -7,6 +7,13 @@ find_package(OpenCL REQUIRED)
 
 message(STATUS "Found OpenVINO: ${OpenVINO_DIR} (found version \"${OpenVINO_VERSION}\")")
 
+# GGML_OPENVINO_GGUF_FRONTEND=ON builds the backend from ../ggml-openvino-ggml-frontend instead, which translates with the
+# OpenVINO GGUF frontend. Everything below this block is the default in-tree translator build.
+if (GGML_OPENVINO_GGUF_FRONTEND)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/../ggml-openvino-ggml-frontend/CMakeLists.cmake)
+    return()
+endif()
+
 file(GLOB_RECURSE GGML_HEADERS_OPENVINO "*.h" "*.hpp")
 file(GLOB_RECURSE GGML_SOURCES_OPENVINO "*.cpp")
 

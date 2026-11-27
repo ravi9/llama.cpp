@@ -284,6 +284,9 @@ cmake -B build/ReleaseOV -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_OPENVINO=ON
 cmake --build build/ReleaseOV --parallel
 ```
 
+> [!NOTE]
+> To translate with the OpenVINO GGUF frontend instead of the default in-tree translator, add `-DGGML_OPENVINO_GGUF_FRONTEND=ON`; see [ggml/src/ggml-openvino-ggml-frontend/README.md](../../ggml/src/ggml-openvino-ggml-frontend/README.md).
+
 <details>
 <summary><b>Build on Windows</b></summary>
 

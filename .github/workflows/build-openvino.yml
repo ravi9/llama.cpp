@@ -19,7 +19,8 @@ on:
     types: [opened, synchronize, reopened]
     paths: [
       '.github/workflows/build-openvino.yml',
-      'ggml/src/ggml-openvino/**'
+      'ggml/src/ggml-openvino/**',
+      'ggml/src/ggml-openvino-ggml-frontend/**'
     ]
 
 cache-mode: none
