@@ -1,6 +1,6 @@
 ARG OPENVINO_VERSION_MAJOR=2026.4.1
 ARG OPENVINO_VERSION_FULL=2026.4.1.22982.07f9c262b05
-ARG UBUNTU_VERSION=24.04
+ARG UBUNTU_VERSION=26.04
 
 # Intel GPU driver versions. https://github.com/intel/compute-runtime/releases
 ARG IGC_VERSION=v2.42.6
@@ -12,7 +12,6 @@ ARG IGDGMM_VERSION=22.10.2
 # Intel NPU driver versions. https://github.com/intel/linux-npu-driver/releases
 ARG NPU_DRIVER_VERSION=v1.38.0
 ARG NPU_DRIVER_FULL=v1.38.0.20260910-34487311128
-ARG LIBZE1_VERSION=1.32.0-1~24.04~ppa1
 
 # Optional proxy build arguments
 ARG http_proxy=
@@ -66,17 +65,17 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # OpenVINO toolkit and GPU/NPU drivers are cached via BuildKit cache mounts to avoid re-downloading on rebuilds.
-# Install OpenVINO for Ubuntu 24.04.
+# Install OpenVINO for Ubuntu 26.04.
 ARG OPENVINO_VERSION_MAJOR
 ARG OPENVINO_VERSION_FULL
 RUN --mount=type=cache,target=/var/cache/openvino,sharing=locked \
     mkdir -p /opt/intel && \
-    TGZ=/var/cache/openvino/openvino_toolkit_ubuntu24_${OPENVINO_VERSION_FULL}_x86_64.tgz && \
+    TGZ=/var/cache/openvino/openvino_toolkit_ubuntu26_${OPENVINO_VERSION_FULL}_x86_64.tgz && \
     if [ ! -f "$TGZ" ]; then \
-        wget -O "$TGZ" https://storage.openvinotoolkit.org/repositories/openvino/packages/${OPENVINO_VERSION_MAJOR}/linux/openvino_toolkit_ubuntu24_${OPENVINO_VERSION_FULL}_x86_64.tgz; \
+        wget -O "$TGZ" https://storage.openvinotoolkit.org/repositories/openvino/packages/${OPENVINO_VERSION_MAJOR}/linux/openvino_toolkit_ubuntu26_${OPENVINO_VERSION_FULL}_x86_64.tgz; \
     fi && \
     tar -xf "$TGZ" -C /opt/intel/ && \
-    mv /opt/intel/openvino_toolkit_ubuntu24_${OPENVINO_VERSION_FULL}_x86_64 /opt/intel/openvino_${OPENVINO_VERSION_MAJOR} && \
+    mv /opt/intel/openvino_toolkit_ubuntu26_${OPENVINO_VERSION_FULL}_x86_64 /opt/intel/openvino_${OPENVINO_VERSION_MAJOR} && \
     cd /opt/intel/openvino_${OPENVINO_VERSION_MAJOR} && \
     echo "Y" | ./install_dependencies/install_openvino_dependencies.sh && \
     cd - && \
@@ -169,20 +168,15 @@ RUN --mount=type=cache,target=/var/cache/intel-gpu,sharing=locked \
 # Install NPU drivers
 ARG NPU_DRIVER_VERSION
 ARG NPU_DRIVER_FULL
-ARG LIBZE1_VERSION
 RUN --mount=type=cache,target=/var/cache/intel-npu,sharing=locked \
     set -eux; \
-    TGZ=/var/cache/intel-npu/linux-npu-driver-${NPU_DRIVER_FULL}-ubuntu2404.tar.gz; \
+    TGZ=/var/cache/intel-npu/linux-npu-driver-${NPU_DRIVER_FULL}-ubuntu2604.tar.gz; \
     if [ ! -f "$TGZ" ]; then \
-        wget -q -O "$TGZ" https://github.com/intel/linux-npu-driver/releases/download/${NPU_DRIVER_VERSION}/linux-npu-driver-${NPU_DRIVER_FULL}-ubuntu2404.tar.gz; \
+        wget -q -O "$TGZ" https://github.com/intel/linux-npu-driver/releases/download/${NPU_DRIVER_VERSION}/linux-npu-driver-${NPU_DRIVER_FULL}-ubuntu2604.tar.gz; \
     fi; \
-    DEB=/var/cache/intel-npu/libze1_${LIBZE1_VERSION}_amd64.deb; \
-    if [ ! -f "$DEB" ]; then \
-        wget -q -O "$DEB" https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260830T100000Z/pool/main/l/level-zero-loader/libze1_${LIBZE1_VERSION}_amd64.deb; \
-    fi; \
-    mkdir /tmp/npu/ && cd /tmp/npu/ && tar -xf "$TGZ" && cp "$DEB" .; \
+    mkdir /tmp/npu/ && cd /tmp/npu/ && tar -xf "$TGZ"; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ./*.deb; \
+    apt-get install -y --no-install-recommends ./*.deb libze1; \
     rm -rf /tmp/npu/ /var/lib/apt/lists/*
 
 COPY --from=build /app/lib/ /app/
