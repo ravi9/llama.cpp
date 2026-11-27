@@ -27,6 +27,10 @@ The structural replay graph gathers history using the retained-token count, conc
 
 ## Replay graph contract
 
+Qwen selects the recurrent graph when the target context is created. `n_rs_seq=0` selects the ordinary graph. With `--spec-type draft-mtp` and a positive draft limit, `n_rs_seq` is the draft limit and `rs_replay` selects the replay graph even for a fresh prefill. Both forms use `GGML_OP_GATED_DELTA_NET`. The replay form sets `op_params[1]` to the pending-token capacity and adds inputs for pending K, V, gate/beta, and the per-sequence replay count.
+
+A fresh prompt supplies a replay count of zero. Prefill microbatches longer than `n_rs_seq + 1` tokens per sequence commit their final state. The unfused OpenVINO graph processes current tokens in a `Loop` and uses a bounded unrolled recurrence for the retained prefix.
+
 The backend emits a standard-op graph for each complete dynamic stateless replay group. The computation feeds later layers and the updated banks feed standard `Assign` sinks. Fusion requires each bank to be a direct FP32 `Parameter` of shape `[1, 1, slots, features]` backed by caller-owned writable GPU USM. The backend opts each bank into in-place fusion by giving its sink the variable ID `__ggml_replay_cache_<Parameter friendly name>`.
 
 The GPU plugin requires the transformed model to preserve its `Result` count. Sinks express writeback separately from that output interface. The pass can replace the computation and remove its matched sinks and variables while keeping the Results. The internal op then writes through the original input binding, which avoids the GPU runtime changes that would be needed to alias a cache output to its input.
