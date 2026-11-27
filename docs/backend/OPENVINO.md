@@ -1036,6 +1036,7 @@ build\ReleaseOV\bin\llama-simple.exe -m "C:\models\Llama-3.2-1B-Instruct-Q4_K_M.
 - The first load of a model on the NPU compiles it for the device, which can take minutes for large models.
   - **Workaround:** Use the [compiled model cache](#compiled-model-cache).
 - MoE models with a softmax router and SwiGLU experts (for example Qwen3.6-35B-A3B) run on the NPU through the MoE support of NPUW: only the routed experts run for each token, with the router on the host. Tested with `Qwen3.6-35B-A3B-Q4_0` on Panther Lake (Windows) and Lunar Lake (Windows, Ubuntu) systems with 32 GB.
+  - Requires an OpenVINO build newer than 2026.4.1: a nightly build, or a build from the master branch after 2026-10-19. These models depend on two NPUW changes that 2026.4.1 does not have, [#38123](https://github.com/openvinotoolkit/openvino/pull/38123) (MoE mixing scores) and [#38124](https://github.com/openvinotoolkit/openvino/pull/38124) (batched MoE matching). With 2026.4.1 the model runs without an error, but the output is wrong: on `Qwen3.6-35B-A3B-Q4_0` the perplexity is 4.6 times that of the CPU, against 1.05 times with a master build.
   - A 35B MoE model needs nearly all of a 32 GB system: the backend and NPUW each hold a copy of the weights (about 18 GB each), and the NPU can address 18 GB of the shared memory. Use a small context and these settings:
 
     ```bash
@@ -1057,6 +1058,7 @@ build\ReleaseOV\bin\llama-simple.exe -m "C:\models\Llama-3.2-1B-Instruct-Q4_K_M.
     - `NPUW_FUNCALL_ASYNC=NO` and `COMPILATION_NUM_THREADS=1` lower the memory peak. `GGML_OPENVINO_COMPILATION_NUM_THREADS=1` is an older name for the second one.
     - The backend sets `NPUW_MOE_POOL_SIZE=0` and `NPUW_MOE_TOKEN_CHUNK_SIZE=16` itself for MoE models (see the [developer documentation](../../ggml/src/ggml-openvino/dev_doc/OpenVINO-ENV-VARS.md#npu-plugin-properties)). Without them the load can hang on a 32 GB system.
     - The NPU compiler type can stay unset: models with `GATED_DELTA_NET` layers, such as Qwen3.6, then compile with the compiler in OpenVINO. `NPU_COMPILER_TYPE=PREFER_PLUGIN` gives the same result.
+    - Linux: the NPU reports almost all of the system memory, so `--fit` keeps every weight in the backend, and a 32 GB system swaps heavily. Pass `--fit-target 16384`: `--fit` then leaves part of the expert weights in the memory-mapped model file, as it does on Windows, where the NPU reports 16 GB. The graph still runs on the NPU alone.
   - `llama-perplexity` with these models: use a `-c` of at most twice `GGML_OPENVINO_PREFILL_CHUNK_SIZE` (for example `-c 256` with a chunk size of 128). The output rows of the last layer must not exceed the chunk size.
 
 > [!NOTE]
