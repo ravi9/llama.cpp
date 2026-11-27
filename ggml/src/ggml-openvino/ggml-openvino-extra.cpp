@@ -193,6 +193,7 @@ constexpr env_var env_vars[] = {
     {"GGML_OPENVINO_GDN_DECOMPOSE", env_type::BOOL},
     {"GGML_OPENVINO_NPU_L0_HOST_TENSORS", env_type::BOOL},
     {"GGML_OPENVINO_KV_SLICE", env_type::INT},
+    {"GGML_OPENVINO_GPU_KV_ROUND_UP", env_type::BOOL},
     {"GGML_OPENVINO_NPU_HFA_PREFILL", env_type::BOOL},
     {"GGML_OPENVINO_NPU_DECODE_UNFOLD", env_type::BOOL},
     {"GGML_OPENVINO_SELF_CONTAINED_MMAP", env_type::BOOL},

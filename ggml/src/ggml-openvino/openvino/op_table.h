@@ -54,9 +54,7 @@ GGML_OP_CONVERTER(translate_ssm_scan);
 GGML_OP_CONVERTER(translate_gated_delta_net);
 // The device runs GatedDeltaNet with a gate per key dimension; otherwise the translator falls back to its reference loop
 bool gdn_per_key_gate_supported();
-#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
-OutputVector translate_recurrent_gated_delta_net(const NodeContext & context, const OutputVector & cache_inputs);
-#endif
+OutputVector translate_recurrent_gated_delta_net_replay(const NodeContext & context, const OutputVector & banks);
 GGML_OP_CONVERTER(translate_repeat);
 GGML_OP_CONVERTER(translate_cumsum);
 GGML_OP_CONVERTER(translate_set);

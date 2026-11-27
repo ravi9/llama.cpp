@@ -563,7 +563,8 @@ public:
     static bool is_recurrent_cache(const ggml_tensor * tensor) {
         return tensor != nullptr && (strncmp(tensor->name, "cache_r_l", strlen("cache_r_l")) == 0 ||
                                      strncmp(tensor->name, "cache_s_l", strlen("cache_s_l")) == 0 ||
-                                     strncmp(tensor->name, "cache_ple_r_l", strlen("cache_ple_r_l")) == 0);
+                                     strncmp(tensor->name, "cache_ple_r_l", strlen("cache_ple_r_l")) == 0 ||
+                                     strncmp(tensor->name, "cache_sp", strlen("cache_sp")) == 0);
     }
 
     static bool is_recurrent_cache_reset(const ggml_tensor * node) {

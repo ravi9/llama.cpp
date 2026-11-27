@@ -125,6 +125,7 @@ struct decoder_runtime_ctx {
 
     std::shared_ptr<std::mutex> mutex;
     std::shared_ptr<GgmlOvDecoder> ptr;
+    std::vector<std::pair<std::string, ov::VariableState>> replay_writebacks;
 
     // Static path: the compiled models of this graph with their requests (ov_graph_compute_static).
     std::map<ov_static_variant_key, ov_static_variant> variants;

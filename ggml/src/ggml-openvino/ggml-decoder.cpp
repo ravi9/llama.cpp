@@ -485,6 +485,9 @@ int GgmlOvDecoder::compute_op_case(const ggml_tensor * node) const {
                         seq = node;
                     }
                     recurrent_sequence = seq == node;
+                } else if (concat->op == GGML_OP_CONT && concat->src[0]->op == GGML_OP_TRANSPOSE) {
+                    const auto * cols = concat->src[0]->src[0];
+                    recurrent_sequence = cols->op == GGML_OP_CONCAT && cols->op_params[0] == 1 && cols->src[1] == node;
                 }
             } else if (consumer->op == GGML_OP_UNARY && ggml_get_unary_op(consumer) == GGML_UNARY_OP_SOFTPLUS) {
                 const auto * biased = consumer->src[0];
@@ -1372,7 +1375,7 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
             const bool is_extra_view = node->src[0]->op == GGML_OP_VIEW &&
                                        node->src[0]->src[0]->op == GGML_OP_GET_ROWS;
             const bool is_extra = node->src[0]->op == GGML_OP_GET_ROWS || is_extra_view;
-            const bool is_gdn_rollback = is_gdn && is_same_shape(node->src[0], node->src[1]);
+            const bool is_gdn_rollback = is_gdn && node->src[0]->src[0]->op_params[1] == 0 && is_same_shape(node->src[0], node->src[1]);
 
             const ggml_tensor * dest_view = node->src[1];
             const ggml_tensor * cache = node->view_src;
@@ -1454,7 +1457,8 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
     // The GPU plugin keeps device memory for each KV length it sees, and llama.cpp grows the KV length in steps of
     // 256. Round it up (ggml_openvino_gpu_kv_window), so that a long context uses a few lengths and not one per step.
     // The KQ mask input is padded to this length with -inf (convert_ggml_input_to_ov).
-    if (!is_static && ggml_openvino_is_gpu() && !ggml_openvino_getenv_int("GGML_OPENVINO_STATEFUL_EXECUTION") &&
+    if (!is_static && ggml_openvino_is_gpu() && ggml_openvino_getenv_int("GGML_OPENVINO_GPU_KV_ROUND_UP", 1) &&
+        !ggml_openvino_getenv_int("GGML_OPENVINO_STATEFUL_EXECUTION") &&
         !compute_params.mask_name.empty() && compute_params.attention_size > 0 && model_params.ctx_per_seq > 0) {
         compute_params.attention_size = ggml_openvino_gpu_kv_window(compute_params.attention_size,
                                                                     model_params.ctx_per_seq, compute_params.input_len);
@@ -1817,62 +1821,51 @@ void GgmlOvDecoder::add_extra_inputs() {
             create_1d_input("rs_window_count_" + node_name, writeback.window_count);
         }
     }
-#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
     m_compute_params.recurrent_controls.clear();
-    // Naive graphs have no full-model cache fusion and node cases are not initialized here.
     if (!m_naive && !m_is_static && !m_is_stateful && !m_model_is_splitted && ggml_openvino_is_gpu() &&
         !ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_FUSED_RECURRENCE")) {
         for (int i = 0; i < m_cgraph->n_nodes; ++i) {
-            const auto node = m_cgraph->nodes[i];
-            const auto op_case = m_node_info_list[i].node_op_case;
-            if (node->op == GGML_OP_CPY && (op_case == 10 || op_case == 12)) {
-                m_model_extra_inputs["rs_update_" + get_tensor_ov_name(m_cgraph, node)] =
-                    {ov::element::i64, ov::Shape{1, 1, 1, 4}, 0, true, {}, -1};
-            }
-        }
-        for (const auto & [name, write] : m_compute_params.rs_writebacks) {
-            if (write.src_begin >= 0) {
-                auto & values = m_compute_params.recurrent_controls["rs_offsets_" + name];
-                values = {write.slot_begin, write.src_begin};
-                m_model_extra_inputs["rs_offsets_" + name] =
-                    {ov::element::i64, ov::Shape{1, 1, 1, 2}, 0, true, {}, -1};
-            }
-        }
-        for (int i = 0; i < m_cgraph->n_nodes; ++i) {
-            const auto concat = m_cgraph->nodes[i];
-            if (concat->op != GGML_OP_CONCAT || !concat->src[0] || concat->src[0]->op != GGML_OP_RESHAPE ||
-                !concat->src[0]->src[0] || concat->src[0]->src[0]->op != GGML_OP_VIEW ||
-                concat->src[0]->src[0]->src[0]->op != GGML_OP_GET_ROWS) {
-                continue;
-            }
-            std::vector<int64_t> values;
-            for (int j = i + 1; j < m_cgraph->n_nodes; ++j) {
-                const auto write = m_cgraph->nodes[j];
-                if ((is_conv_state_writeback(write) || is_conv_state_snapshot_writeback(write)) &&
-                    write->src[0]->src[0] == concat) {
-                    const auto it = m_compute_params.rs_writebacks.find(get_tensor_ov_name(m_cgraph, write));
-                    if (it == m_compute_params.rs_writebacks.end()) {
-                        values.clear();
-                        break;
-                    }
-                    const auto & wb = it->second;
-                    const int64_t count = wb.window_count >= 0 ? wb.window_count : 1;
-                    for (int64_t w = 0; w < count; ++w) {
-                        values.push_back(wb.src_begin + w);
-                        values.push_back(wb.slot_begin + (count - 1 - w) *
-                                                          (wb.window_count >= 0 ? wb.snapshot_stride : 0));
-                    }
-                    break;
+            const auto gdn = m_cgraph->nodes[i];
+            if (gdn->op != GGML_OP_GATED_DELTA_NET || gdn->op_params[1] <= 0) continue;
+            const auto B = gdn->src[2]->ne[3];
+            const ggml_tensor * rows = gdn->src[5];
+            while (rows && (rows->op == GGML_OP_VIEW || rows->op == GGML_OP_RESHAPE)) rows = rows->src[0];
+            if (!rows || rows->op != GGML_OP_GET_ROWS) continue;
+            rows = rows->src[1];
+            while (rows && rows->op == GGML_OP_VIEW) rows = rows->src[0];
+            if (!rows || rows->type != GGML_TYPE_I32 || !rows->data || !gdn->src[9]->data) continue;
+            const ggml_tensor * root = gdn->src[5];
+            while (root && (root->op == GGML_OP_VIEW || root->op == GGML_OP_RESHAPE || root->op == GGML_OP_GET_ROWS)) root = root->src[0];
+            int64_t head = -1, reset_begin = 0, reset_count = 0;
+            for (int j = 0; j < m_cgraph->n_nodes; ++j) {
+                const auto t = m_cgraph->nodes[j];
+                if (t->view_src != root) continue;
+                if (t->op == GGML_OP_CPY && t->src[0]->op == GGML_OP_VIEW && t->src[0]->src[0] == gdn)
+                    head = t->src[1]->view_offs / root->nb[1];
+                if (is_recurrent_cache_reset(t)) {
+                    reset_begin = t->src[0]->view_offs / root->nb[1];
+                    reset_count = ggml_nelements(t->src[0]) / root->ne[0];
                 }
             }
-            if (!values.empty()) {
-                const auto name = "rs_windows_" + get_tensor_ov_name(m_cgraph, concat);
-                m_model_extra_inputs[name] = {ov::element::i64, ov::Shape{1, 1, values.size() / 2, 2}, 0, true, {}, -1};
-                m_compute_params.recurrent_controls[name] = std::move(values);
+            if (head < 0) continue;
+            auto & map = m_compute_params.recurrent_controls["rs_replay_rows"];
+            auto & control = m_compute_params.recurrent_controls["rs_replay_control"];
+            auto & resets = m_compute_params.recurrent_controls["rs_replay_reset"];
+            map.clear(); control.clear(); resets.clear();
+            const auto * copy = static_cast<const int32_t *>(rows->data);
+            for (int64_t j = 0; j < ggml_nelements(rows); ++j) {
+                if (j < B || head + j != copy[j]) { map.push_back(head + j); map.push_back(copy[j]); }
             }
+            const auto * counts = static_cast<const int32_t *>(gdn->src[9]->data);
+            for (int64_t j = 0; j < B; ++j) control.push_back(counts[j]);
+            control.push_back(gdn->op_params[2]);
+            for (int64_t j = 0; j < reset_count; ++j) resets.push_back(reset_begin + j);
+            m_model_extra_inputs["rs_replay_rows"] = {ov::element::i64, ov::Shape{1, 1, map.size() / 2, 2}, 0, true, {}, -1, ov::PartialShape{1, 1, -1, 2}};
+            m_model_extra_inputs["rs_replay_control"] = {ov::element::i64, ov::Shape{1, 1, 1, control.size()}, 0, true, {}, -1, ov::PartialShape{1, 1, 1, -1}};
+            m_model_extra_inputs["rs_replay_reset"] = {ov::element::i64, ov::Shape{1, 1, 1, resets.size()}, 0, true, {}, -1, ov::PartialShape{1, 1, 1, -1}};
+            break;
         }
     }
-#endif
     if (!m_is_static && !m_compute_params.sampling_rows.empty()) {
         m_model_extra_inputs["sampling_rows"] =
             {ov::element::i64, ov::Shape{m_compute_params.sampling_rows.size()}, 0, true, {}, -1};

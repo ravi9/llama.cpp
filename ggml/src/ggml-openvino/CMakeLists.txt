@@ -27,21 +27,3 @@ endif()
 if (WIN32)
     target_link_libraries(ggml-openvino PRIVATE psapi)
 endif()
-
-# Released runtimes retain the ordinary cache translators.
-include(CheckCXXSourceCompiles)
-include(CMakePushCheckState)
-unset(GGML_OPENVINO_HAS_CACHE_UPDATE CACHE)
-cmake_push_check_state(RESET)
-set(CMAKE_REQUIRED_LIBRARIES openvino::runtime)
-set(CMAKE_REQUIRED_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/openvino/op")
-check_cxx_source_compiles("#include <recurrent_cache_update.hpp>
-int main() {
-    auto conv = std::make_shared<ov::op::internal::RecurrentConvCacheUpdate>(ov::OutputVector{}, 3);
-    auto gdn = std::make_shared<ov::op::internal::RecurrentGatedDeltaNetUpdate>(ov::OutputVector{});
-}"
-    GGML_OPENVINO_HAS_CACHE_UPDATE)
-cmake_pop_check_state()
-if(GGML_OPENVINO_HAS_CACHE_UPDATE)
-    target_compile_definitions(ggml-openvino PRIVATE GGML_OPENVINO_HAS_CACHE_UPDATE=1)
-endif()

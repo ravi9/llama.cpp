@@ -1,21 +1,10 @@
 # Qwen MTP
 
-The default Qwen3.5/Qwen3.6 GPU path is dynamic stateless execution with in-place fused recurrent ops and stable MTP sampling. Build against the matching OpenVINO runtime/GPU plugin with independent `RecurrentConvCacheUpdate` and `RecurrentGatedDeltaNetUpdate` ops. The native Update ops return computation results and update writable cache inputs in place, including rollback snapshots where required. No recurrent/sampling opt-in flag is needed on supported graphs. See the [development documentation index](dev_doc/README.md) for the implementation and the MTP sampling graph.
+The OpenVINO backend translates Qwen recurrent replay for complete dynamic stateless GPU graphs and supports stable MTP sampling. See the [development documentation index](dev_doc/README.md) for the implementation and the MTP sampling graph.
 
-Use `--spec-type draft-mtp --spec-draft-n-max 2` with a GGUF that contains MTP weights. Parallel execution uses `-np` and `--kv-unified`. CPU snapshot execution, NPU execution, and forced static MTP are not supported.
+Use `--spec-type draft-mtp --spec-draft-n-max 2` with a GGUF that contains MTP weights. Parallel execution uses `-np` and `--kv-unified`. OpenVINO replay requires dynamic stateless GPU execution.
 
-Stateless recurrent execution uses the same reset, reorder, and partial cache-writeback paths at every slot capacity, including one slot without MTP.
-
-The matched stateless GPU path uses `RecurrentConvCacheUpdate` and
-`RecurrentGatedDeltaNetUpdate`. Each cache is a writable Parameter backed by one
-stable caller-owned USM allocation. The ops return only convolution or attention;
-there are no recurrent cache Results. Required source rows are staged before
-writes, preserving resets, cyclic reorders and rollback. Cache readers must be
-exclusive, including Reshape aliases.
-`GGML_OPENVINO_DISABLE_FUSED_RECURRENCE=1` retains the ordinary cache decomposition.
-Unmatched snapshot GDN uses ordinary GDN token prefixes with functional writeback.
-Build both repos against the matching single-output op spec. Translation revision
-15 requires regenerating compiled-model blobs once without cache-only mode.
+The backend emits standard OpenVINO ops and `Assign` sinks for replay cache writeback. A GPU plugin with recurrent replay fusion replaces each matched group with an internal op that writes directly to the caller-owned GPU cache. If an `Assign` sink remains, the backend copies its state back to the GGML cache after inference. See the [replay graph contract](dev_doc/OPENVINO-RECURRENT-CACHE.md#replay-graph-contract).
 
 Cache-only MTP serving still requires the separate OpenVINO dynamic output-binding fix (PR #39354). Removing recurrent cache Results does not eliminate that independent trigger in imported MTP graphs.
 
@@ -31,7 +20,7 @@ The recommended Qwen3.6-35B-A3B Q4_K_M setup uses GPU with `GGML_OPENVINO_REQUAN
 
 `q4_asym64_all` converts Q4_K/Q5_K/Q6_K/Q8_0/Q5_1 weights, including dense Q8_0 projections, to asymmetric INT4 with group size 64. `token_embd.weight` and `output.weight` retain symmetric channel-wise INT8. Q8_0/Q5_1 rows whose width is not divisible by 64 also use channel-wise INT8. This follows the primary/backup precision scheme of NNCF `INT4_ASYM`, `ratio=1.0`, `group_size=64`, `backup_mode=INT8_SYM` for these supported source types; it requantizes GGUF values rather than the original floating-point model and leaves floating-point weights unchanged. Earlier versions kept dense Q8_0 at INT8/group-32. Repopulate compiled-model caches without cache-only mode after this change; the cache fingerprint invalidates the old precision policy.
 
-See the [implementation guide](dev_doc/OPENVINO-RECURRENT-CACHE.md) for buffer ownership and rollback.
+See the [implementation guide](dev_doc/OPENVINO-RECURRENT-CACHE.md) for buffer ownership and replay.
 
 # Compiled model cache
 

@@ -10,6 +10,7 @@
 #include "model-cache.h"
 #include "openvino/frontend.h"
 #include "openvino/input_model.h"
+#include "openvino/recurrent_replay_fusion.h"
 
 #include <algorithm>
 #include <atomic>
@@ -22,6 +23,7 @@
 #include <functional>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <openvino/core/any.hpp>
 #include <openvino/core/graph_util.hpp>
@@ -216,12 +218,8 @@ static size_t get_static_attention_size(const std::shared_ptr<GgmlOvDecoder> & g
 static uint64_t ggml_openvino_model_cache_extra_cfg(bool stateful, bool recurrent) {
     const bool manual_gqa_enabled = ggml_openvino_manual_gqa_enabled();
 
-    uint64_t extra_cfg = 15;  // Recurrent caches are writable inputs without cache Results.
-#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
-    extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_FUSED_RECURRENCE") ? 0u : 1u);
-#else
-    extra_cfg = extra_cfg * 131;
-#endif
+    // Preserve the fingerprint for graphs compiled without the old native cache update ops.
+    uint64_t extra_cfg = 18 * 131;
     extra_cfg = extra_cfg * 131 + (stateful ? (recurrent ? 2u : 1u) : 0u);
     extra_cfg = extra_cfg * 131 + (ggml_openvino_reduce_compile_mem_enabled() ? 1u : 0u);
     extra_cfg = extra_cfg * 131 + (ggml_openvino_getenv_int("GGML_OPENVINO_ENABLE_KV_4D") > 0 ? 1u : 0u);
@@ -368,9 +366,17 @@ static std::string dynamic_graph_signature(const ggml_cgraph * graph,
     for (const auto & [name, input] : decoder.get_model_extra_inputs()) {
         append_string(name);
         append_string(input.type.get_type_name());
-        append(input.shape.size());
-        for (auto dim : input.shape) {
-            append(dim);
+        // Replay control lengths change with the batch. The compiled graph uses the declared Parameter shape.
+        if (input.is_parameter && input.parameter_shape.rank().is_static() && input.parameter_shape.is_dynamic()) {
+            append(std::numeric_limits<size_t>::max());
+            append_string(input.parameter_shape.to_string());
+        } else {
+            const auto shape = input.is_parameter && input.parameter_shape.is_static() ?
+                                   input.parameter_shape.to_shape() : input.shape;
+            append(shape.size());
+            for (const auto dim : shape) {
+                append(dim);
+            }
         }
         append(input.is_parameter);
         if (!input.is_parameter) {
@@ -766,19 +772,10 @@ ov::Tensor get_ov_input_tensor(const std::shared_ptr<GgmlOvDecoder> & ggml_decod
             for (const auto & row : ggml_decoder->get_compute_params().sampling_rows) {
                 *data++ = row.second;
             }
-        } else if (param_name.compare(0, 11, "rs_offsets_") == 0 || param_name.compare(0, 11, "rs_windows_") == 0) {
+        } else if (param_name.compare(0, 10, "rs_replay_") == 0) {
             const auto & controls = ggml_decoder->get_compute_params();
             const auto & values = controls.recurrent_controls.at(param_name);
             std::copy(values.begin(), values.end(), input_tensor.data<int64_t>());
-        } else if (param_name.compare(0, 10, "rs_update_") == 0) {
-            const auto & controls = ggml_decoder->get_compute_params();
-            const auto & write = controls.rs_writebacks.at(param_name.substr(10));
-            auto data = input_tensor.data<int64_t>();
-            data[0] = write.slot_begin;
-            data[1] = write.seq_count >= 0 ? write.seq_count : controls.s_copy_active_slot_len;
-            data[2] = write.snapshot_stride >= 0 ? write.snapshot_stride : data[1];
-            // Direct GDN states contain no attention prefix.
-            data[3] = 0;
         } else {
             if (extra_input->second.type == ov::element::i64) {
                 *input_tensor.data<int64_t>() = extra_input->second.value;
@@ -1487,8 +1484,12 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::share
             uint64_t exact_fp = 0;
             std::string blob_path, manifest_path;
             if (!model_cache_dir.empty() && !model_is_splitted) {
-                const uint64_t extra_cfg =
+                uint64_t extra_cfg =
                     ggml_openvino_model_cache_extra_cfg(r_ctx->stateful, stateful_recurrent);
+                if (ggml_decoder->get_model_extra_inputs().count("rs_replay_rows")) {
+                    // The writable-input replay interface replaces bank Results with Assign sinks.
+                    extra_cfg = extra_cfg * 131 + 1;
+                }
                 model_fp =
                     ggml_openvino_model_fingerprint(cgraph, device, /*fa=*/true, m_params.rope_params, 16, extra_cfg,
                                                     dynamic_graph_signature(cgraph, *ggml_decoder, m_params));
@@ -1729,6 +1730,16 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::share
                 shared_model = compiled_model;
             }  // end non-imported (compile) path
 
+            entry->replay_writebacks.clear();
+            if (ggml_decoder->get_model_extra_inputs().count("rs_replay_rows")) {
+                constexpr auto prefix = ov::frontend::ggml::replay_cache_state_prefix;
+                for (auto state : infer_request->query_state()) {
+                    const auto name = state.get_name();
+                    if (name.compare(0, prefix.size(), prefix) == 0) {
+                        entry->replay_writebacks.emplace_back(name.substr(prefix.size()), std::move(state));
+                    }
+                }
+            }
             entry->ptr = ggml_decoder;
             if (!shared_key.empty() && shared_it == shared_cache->graphs.end()) {
                 ov_compiled_graph graph;
@@ -1903,6 +1914,14 @@ enum ggml_status ov_graph_compute_dynamic(ggml_cgraph * cgraph, const std::share
                 }
             }
             throw;
+        }
+        for (const auto & [name, state] : entry->replay_writebacks) {
+            const auto bank = ggml_decoder->get_model_outputs().at(name);
+            const auto updated = state.get_state();
+            OPENVINO_ASSERT(updated.get_element_type() == GgmlOvDecoder::get_ov_type(bank) &&
+                                updated.get_shape() == GgmlOvDecoder::get_shape(bank),
+                            "Invalid replay cache writeback for ", name);
+            ggml_backend_tensor_set(bank, updated.data(), 0, ggml_nbytes(bank));
         }
         infer_end_time = ggml_time_us();
         for (const auto & out : staged_outputs) {

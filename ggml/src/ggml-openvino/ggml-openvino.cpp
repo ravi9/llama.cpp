@@ -1634,6 +1634,25 @@ static bool tensor_view_fits_src_buffer(const ggml_tensor * tensor) {
     return tensor_nbytes <= src_nbytes - tensor->view_offs;
 }
 
+static bool supports_replay_cache_banks() {
+    return ggml_openvino_is_gpu() && !ggml_openvino_is_static() && !is_stateful_enabled() &&
+           !ggml_openvino_getenv_int("GGML_OPENVINO_DISABLE_FUSED_RECURRENCE");
+}
+
+static bool is_replay_input_store(const ggml_tensor * op) {
+    if (op->op != GGML_OP_CPY || !op->view_src || strncmp(op->view_src->name, "cache_sp", 8) != 0 ||
+        op->type != GGML_TYPE_F32 || op->src[0]->op != GGML_OP_VIEW || op->src[1]->op != GGML_OP_VIEW ||
+        !supports_replay_cache_banks()) {
+        return false;
+    }
+    const auto dst = op->src[1];
+    const auto base = dst->src[0];
+    // Pending prefixes keep the full bank row stride; the complete replay fusion owns this store.
+    return base && base->op == GGML_OP_RESHAPE && base->src[0] == op->view_src &&
+           dst->ne[0] <= base->ne[0] && dst->ne[1] == base->ne[1] && dst->ne[2] <= base->ne[2] &&
+           dst->nb[0] == base->nb[0] && dst->nb[1] == base->nb[1] && dst->nb[2] == base->nb[2] && dst->nb[3] == base->nb[3];
+}
+
 static bool cpy_output_view_is_supported(const ggml_tensor * op) {
     if (op->view_src == nullptr) {
         return true;
@@ -1644,7 +1663,7 @@ static bool cpy_output_view_is_supported(const ggml_tensor * op) {
     }
 
     return ggml_nbytes(op) == 0 || ggml_is_contiguous(op) || GgmlOvDecoder::is_conv_state_writeback(op) ||
-           GgmlOvDecoder::is_gdn_snapshot_writeback(op) || GgmlOvDecoder::is_ssm_state_writeback(op);
+           GgmlOvDecoder::is_gdn_snapshot_writeback(op) || GgmlOvDecoder::is_ssm_state_writeback(op) || is_replay_input_store(op);
 }
 
 // SET_ROWS writes whole rows of a contiguous destination. Other destination views (e.g. a permuted view of a
@@ -2090,7 +2109,15 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
             return {false, reason};
         }
         if (((const int32_t *) op->op_params)[1] != 0) {
-            return {false, "GATED_DELTA_NET with replay of pending tokens is not supported"};
+            bool banks = true;
+            for (int port : {5, 6, 7, 8}) {
+                const auto * source = op->src[port];
+                while (source && (source->op == GGML_OP_VIEW || source->op == GGML_OP_RESHAPE || source->op == GGML_OP_GET_ROWS)) source = source->src[0];
+                banks &= GgmlOvDecoder::is_recurrent_cache(source);
+            }
+            if (!banks || !supports_replay_cache_banks()) {
+                return {false, "GATED_DELTA_NET replay requires the dynamic stateless GPU cache-bank translation"};
+            }
         }
         break;
     }

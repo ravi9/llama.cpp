@@ -5,9 +5,7 @@
 #include "ggml-openvino/openvino/node_context.h"
 #include "ggml-openvino/openvino/utils.h"
 #include "input_model.h"
-#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
-#include "recurrent_cache_fusion.h"
-#endif
+#include "recurrent_replay_fusion.h"
 #include "pass/mark_decompression_convert_constant_folding.h"
 #include "pass/mark_dequantization_subgraph.h"
 #include "pass_registry/pipeline.h"
@@ -24,6 +22,7 @@
 #include <openvino/core/type.hpp>
 #include <openvino/core/type/element_type.hpp>
 #include <openvino/op/add.hpp>
+#include <openvino/op/assign.hpp>
 #include <openvino/op/broadcast.hpp>
 #include <openvino/op/concat.hpp>
 #include <openvino/op/constant.hpp>
@@ -74,11 +73,8 @@ std::shared_ptr<ov::op::v0::Parameter> create_parameter(const std::string & name
 
 std::shared_ptr<ov::Node> create_extra_input(const std::string & name, const ModelExtraInputInfo & input_info) {
     if (input_info.is_parameter) {
-        ov::PartialShape shape(input_info.shape);
-        // One SET_ROWS emits min(tokens, snapshot capacity) windows on each batch.
-        if (name.compare(0, 11, "rs_windows_") == 0) {
-            shape[2] = ov::Dimension::dynamic();
-        }
+        const auto shape = input_info.parameter_shape.rank().is_static() ? input_info.parameter_shape :
+                                                                          ov::PartialShape(input_info.shape);
         auto param_node = std::make_shared<ov::op::v0::Parameter>(input_info.type, shape);
         param_node->set_friendly_name(name);
         param_node->output(0).get_tensor().set_names({name});
@@ -302,9 +298,7 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
         }
     }
 
-#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
-    RecurrentCacheFusion recurrent_fusion(ggml_model_decoder, tensor_map);
-#endif
+    RecurrentReplayFusion replay_fusion(ggml_model_decoder, tensor_map);
     auto translate_node = [&](const std::shared_ptr<GgmlDecoder> & decoder, int node_idx) {
         auto operation_type = decoder->get_op_type(node_idx);
         if (operation_type == "GGML_OP_NONE") {
@@ -325,10 +319,7 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
         FRONT_END_OP_CONVERSION_CHECK(it != m_translator_map.end(), "Translation for operation type ", operation_type,
                                       " is not implemented.");
         NodeContext node_context(decoder, tensor_map, node_idx);
-        ov::OutputVector converted_outputs;
-#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
-        converted_outputs = recurrent_fusion.translate(node_idx, node_context);
-#endif
+        auto converted_outputs = replay_fusion.translate(node_idx, node_context);
         if (converted_outputs.empty()) {
             converted_outputs = it->second(node_context);
         }
@@ -390,15 +381,24 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
     }
     ggml_model_decoder->visit_subgraph(node_visitor);
 
+    ov::SinkVector sinks;
+    const auto actual_decoder = std::dynamic_pointer_cast<GgmlOvDecoder>(ggml_model_decoder);
+    for (const auto & updated : replay_fusion.updated_banks()) (*tensor_map)[updated.first] = updated.second;
     for (const auto & name : ggml_model_decoder->get_model_output_names()) {
-#ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
-        if (recurrent_fusion.is_inplace_output(name)) {
-            // The fused kernel updates the bound cache input; no cache Result is needed.
-            continue;
-        }
-#endif
         FRONT_END_GENERAL_CHECK(tensor_map->find(name) != tensor_map->end(),
                                 "Output name not found in tensor map: ", name);
+        if (const auto bank = replay_fusion.updated_banks().find(name);
+            bank != replay_fusion.updated_banks().end() && actual_decoder &&
+            ggml_openvino_buffer_is_remote(actual_decoder->get_model_outputs().at(name))) {
+            const auto & update = bank->second;
+            // Let the Assign input determine the state type. GPU precision conversion can rewrite
+            // declared variable types even when the precision-sensitive input stays in FP32.
+            auto variable = std::make_shared<ov::op::util::Variable>(ov::op::util::VariableInfo{
+                update.get_partial_shape(), element::dynamic, std::string(replay_cache_state_prefix) + name});
+            auto assign = std::make_shared<v6::Assign>(update, variable);
+            sinks.push_back(assign);
+            continue;
+        }
         auto result = std::make_shared<v0::Result>(tensor_map->at(name));
         result->set_friendly_name(name);
         results.push_back(result);
@@ -450,7 +450,7 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
             used_params.push_back(param);
         }
     }
-    resulting_model = std::make_shared<Model>(results, used_params);
+    resulting_model = std::make_shared<Model>(results, sinks, used_params);
 
     apply_transformations(resulting_model);
 
