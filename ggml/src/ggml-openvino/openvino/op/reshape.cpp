@@ -19,12 +19,15 @@ namespace op {
 
 OutputVector translate_reshape(const NodeContext & context) {
     num_inputs_check(context, 1, 1);
-    if (context.get_input(0).get_partial_shape().is_static() &&
+    const int op_case = context.get_op_case();
+    // The activations of a MUL_MAT_ID (case 1) are reshaped even with the same ggml shape: in a one-token graph
+    // [n_embd, 1] -> [n_embd, 1, 1] keeps the shape, but the tokens that a static graph pads must still move from dim 1
+    // to dim 2.
+    if (op_case != 1 && context.get_input(0).get_partial_shape().is_static() &&
         context.get_input_shape(0) == context.get_output_shape()) {
         return {context.get_input(0)};
     }
 
-    const int op_case = context.get_op_case();
     const auto output_shape = context.get_output_shape().to_shape();
     std::vector<int64_t> shape(output_shape.begin(), output_shape.end());
     std::shared_ptr<ov::Node> new_shape_node;
