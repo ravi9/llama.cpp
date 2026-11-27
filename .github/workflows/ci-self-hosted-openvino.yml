@@ -49,7 +49,7 @@ env:
 
 jobs:
   gpu-openvino-low-perf:
-    runs-on: [self-hosted, Linux, Intel, OpenVINO]
+    runs-on: [self-hosted, Linux, OpenVINO, PTL]
 
     env:
       # Sync versions in build-openvino.yml, ci-self-hosted-openvino.yml, release.yml, release-publish.yml, build-cache.yml, .devops/openvino.Dockerfile, docs/backend/OPENVINO.md
@@ -67,6 +67,7 @@ jobs:
           path: ./openvino_toolkit
           version_major: ${{ env.OPENVINO_VERSION_MAJOR }}
           version_full: ${{ env.OPENVINO_VERSION_FULL }}
+          ubuntu_version: "26"
 
       - name: Install OpenVINO dependencies
         run: |
