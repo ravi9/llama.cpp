@@ -19,6 +19,11 @@ namespace op {
 
 OutputVector translate_reshape(const NodeContext & context) {
     num_inputs_check(context, 1, 1);
+    if (context.has_input("vision_shape_" + context.get_name())) {
+        auto target = vision_reshape_target(context);
+        auto res = std::make_shared<ov::op::v1::Reshape>(context.get_input(0), target, false);
+        return rename_outputs_with_suffix({res}, context.get_name());
+    }
     if (context.get_input(0).get_partial_shape().is_static() &&
         context.get_input_shape(0) == context.get_output_shape()) {
         return {context.get_input(0)};

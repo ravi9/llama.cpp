@@ -16,6 +16,17 @@ namespace op {
 OutputVector translate_view(const NodeContext & context) {
     num_inputs_check(context, 1, 1);
 
+    if (context.get_op_case() == 5) {
+        const auto shape = context.get_output_shape();
+        // Keep the output gate grouped like GDN: [active sequences, tokens per sequence, heads, width].
+        auto target = std::make_shared<ov::op::v0::Concat>(ov::OutputVector{
+            context.get_input("s_copy_active_slot_len"),
+            ov::op::v0::Constant::create(ov::element::i64, {3},
+                std::vector<int64_t>{-1, shape[2].get_length(), shape[3].get_length()})}, 0);
+        return rename_outputs_with_suffix({std::make_shared<ov::op::v1::Reshape>(context.get_input(0), target, false)},
+                                          context.get_name());
+    }
+
     if (context.get_op_case() == 3) {
         auto row = context.get_input("sampling_row_" + context.get_name());
         auto selected = std::make_shared<ov::op::v8::Gather>(context.get_input(0), row,

@@ -1,6 +1,7 @@
 #include "ggml-decoder.h"
 #include "ggml-impl.h"
 #include "ggml-openvino-extra.h"
+#include "ggml-openvino.h"
 #include "model-cache.h"
 
 #include <cstddef>
@@ -23,24 +24,50 @@
 // graph during inference, where the same few graphs repeat for the whole session. The list of
 // external input names below tells those apart more precisely, but it walks every node and every
 // src slot, so it is built only when GGML_OPENVINO_FULL_GRAPH_KEY is set. Sampler row names are
-// always included to distinguish sampler configurations, even when active subsets share the packed input. Op tests run
-// many small graphs that can share a node count and end names, and need the full key.
+// always included, along with weight allocation generations. Static or unqualified image graphs
+// also include input shapes. Op tests run many small graphs that can share a node count and end
+// names, and need the full key.
 struct graph_key {
     int n_nodes;
     int n_leaves;
     std::string first_node_name;
     std::string last_node_name;
-    // External source descriptors "<src_name>:<src_idx>:<op_type>" and sampler row Parameter names.
+    // External source descriptors, sampler row names and image shapes.
     std::vector<std::string> input_srcs;
+    // Process-local identities used only by the private cache key.
+    std::vector<size_t> weight_buffer_ids;
 
-    graph_key(const ggml_cgraph * cgraph, bool include_inputs = false) : n_nodes(cgraph->n_nodes), n_leaves(cgraph->n_leafs) {
+    graph_key(const ggml_cgraph * cgraph, bool include_inputs = false, bool dynamic_vision = false) :
+        n_nodes(cgraph->n_nodes), n_leaves(cgraph->n_leafs) {
         if (n_nodes > 0) {
             first_node_name = cgraph->nodes[0]->name;
             last_node_name = cgraph->nodes[n_nodes - 1]->name;
         }
 
+        std::unordered_set<ggml_backend_buffer_t> weight_buffers;
         for (int i = 0; i < n_nodes; ++i) {
             const auto * node = cgraph->nodes[i];
+            if (node->op == GGML_OP_MUL_MAT && ggml_prec_get_src(node, 1) == GGML_PREC_F32) {
+                // Node precision guards are part of the compiled graph, including in the dynamic disk cache.
+                input_srcs.push_back("f32_matmul_" + std::to_string(i));
+            }
+            // A later model load may use the same graph names and shapes but new
+            // weights. Allocation generations survive pointer reuse, whereas
+            // the lightweight topology key alone would select stale Constants.
+            for (const auto * src : node->src) {
+                if (!src) {
+                    continue;
+                }
+                const auto * root = src->view_src ? src->view_src : src;
+                const auto buffer = root->buffer;
+                if (buffer && buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS &&
+                    weight_buffers.insert(buffer).second) {
+                    const auto id = ggml_backend_openvino_buffer_get_ctx_id(buffer);
+                    if (id != 0) {
+                        weight_buffer_ids.push_back(id);
+                    }
+                }
+            }
             if (GgmlOvDecoder::is_sampling_view(node)) {
                 input_srcs.push_back("sampling_row_" + std::string(node->name) + "#n" + std::to_string(i));
             }
@@ -48,6 +75,24 @@ struct graph_key {
             // e.g. llama_set_embeddings_layer_inp() for a DFlash/DSpark drafter, changes only the flags.
             if (node->flags & GGML_TENSOR_FLAG_OUTPUT) {
                 input_srcs.push_back("output_" + std::string(node->name) + "#n" + std::to_string(i));
+            }
+            // Qualified vision graphs reuse a fixed model configuration; only spatial sizes vary.
+            // Static or unqualified image graphs keep their full input shape in the key.
+            if (!dynamic_vision && (node->op == GGML_OP_CONV_2D || node->op == GGML_OP_CONV_2D_DW ||
+                 node->op == GGML_OP_IM2COL) && node->src[1] != nullptr) {
+                const auto * input = node->src[1];
+                const auto * root = input->view_src ? input->view_src : input;
+                // Gemma4 normalizes image pixels with SCALE before patch extraction.
+                while (root->op == GGML_OP_SCALE && root->src[0]) {
+                    root = root->src[0]->view_src ? root->src[0]->view_src : root->src[0];
+                }
+                if (root->flags & GGML_TENSOR_FLAG_INPUT) {
+                    std::string shape = "image_input_" + std::to_string(i) + ":" + root->name;
+                    for (int dim = 0; dim < GGML_MAX_DIMS; ++dim) {
+                        shape += ":" + std::to_string(root->ne[dim]);
+                    }
+                    input_srcs.push_back(std::move(shape));
+                }
             }
         }
 
@@ -78,7 +123,8 @@ struct graph_key {
     bool operator==(const graph_key & other) const {
         return n_nodes == other.n_nodes && n_leaves == other.n_leaves &&
                first_node_name == other.first_node_name &&
-               last_node_name == other.last_node_name && input_srcs == other.input_srcs;
+               last_node_name == other.last_node_name && input_srcs == other.input_srcs &&
+               weight_buffer_ids == other.weight_buffer_ids;
     }
 };
 
@@ -92,6 +138,9 @@ struct graph_key_hash {
         }
         for (const auto & s : key.input_srcs) {
             hash ^= std::hash<std::string>{}(s) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        }
+        for (const auto id : key.weight_buffer_ids) {
+            hash ^= std::hash<size_t>{}(id) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
         }
         return hash;
     }

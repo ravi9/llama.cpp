@@ -1542,11 +1542,19 @@ static bool is_supported_flash_attn_pattern(const ggml_tensor * op) {
     //   PERMUTE -> RESHAPE -> base (view_src==nullptr)  (whisper Q)
     //   VIEW -> base (view_src==nullptr)                (whisper K/V from kv_pad)
     //   PERMUTE -> VIEW -> RESHAPE -> base              (Q of a layer without RoPE, e.g. SmolLM3)
+    //   PERMUTE -> ROPE (view_src==nullptr)              (cacheless vision Q/K)
+    //   PERMUTE -> RMS_NORM (view_src==nullptr)          (Gemma4 vision V)
     for (int i = 0; i < 3; i++) {
         const ggml_tensor * src = op->src[i];
         if (src->op == GGML_OP_PERMUTE) {
             if (src->src[0] == nullptr) {
                 return false;
+            }
+            if (src->src[0]->op == GGML_OP_ROPE && src->src[0]->view_src == nullptr) {
+                continue;
+            }
+            if (i == 2 && src->src[0]->op == GGML_OP_RMS_NORM && src->src[0]->view_src == nullptr) {
+                continue;
             }
             // MLA: Q = PERMUTE -> CONCAT(q_nope_absorbed, q_pe); V = PERMUTE -> VIEW -> VIEW -> K cache
             // (V is the first kv_lora_rank values of each K cache row)
@@ -1585,6 +1593,13 @@ static bool is_supported_flash_attn_pattern(const ggml_tensor * op) {
 
 static bool is_gemma3n_flash_attn_pattern(const ggml_tensor * op) {
     if (!is_supported_flash_attn_pattern(op)) {
+        return false;
+    }
+
+    // Gemma4 vision rotates the two head halves with consecutive spatial RoPEs.
+    const auto * q = op->src[0];
+    if (q->op == GGML_OP_PERMUTE && q->src[0]->op == GGML_OP_ROPE &&
+        q->src[0]->src[0] && q->src[0]->src[0]->op == GGML_OP_ROPE) {
         return false;
     }
 
@@ -1992,8 +2007,11 @@ static ggml_openvino_op_support is_op_supported_case(const ggml_tensor * op) {
         break;
     }
     case GGML_OP_MUL_MAT: {
-        if (ggml_prec_get_src(op, 1) == GGML_PREC_BF16 || ggml_prec_get_src(op, 1) == GGML_PREC_F32) {
-            return {false, "MUL_MAT with a BF16 or F32 src1 precision is not supported"};
+        if (ggml_prec_get_src(op, 1) == GGML_PREC_BF16) {
+            return {false, "MUL_MAT with a BF16 src1 precision is not supported"};
+        }
+        if (ggml_prec_get_src(op, 1) == GGML_PREC_F32 && ggml_openvino_is_npu()) {
+            return {false, "MUL_MAT with F32 src1 precision requires CPU or GPU"};
         }
         if (ggml_openvino_is_gpu() && op->src[0] != nullptr && op->src[1] != nullptr &&
             ggml_is_quantized(op->src[0]->type) && strcmp(op->src[0]->name, "a") == 0 &&

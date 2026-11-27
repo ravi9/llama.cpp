@@ -13,6 +13,8 @@
 #include <openvino/op/pad.hpp>
 #include <openvino/op/reshape.hpp>
 #include <openvino/op/slice.hpp>
+#include <openvino/op/shape_of.hpp>
+#include <openvino/op/gather.hpp>
 #include <openvino/op/transpose.hpp>
 #include <openvino/op/util/attr_types.hpp>
 
@@ -78,14 +80,13 @@ OutputVector translate_im2col(const NodeContext & context) {
     auto t1 = std::make_shared<ov::op::v1::Transpose>(patches, perm1);
 
     // [N, OH, OW, KH*KW*IC] → [N, OH, OW, KH*KW, IC]
-    const ov::Shape out_shape = t1->get_output_shape(0);
-    const size_t N = out_shape[0];
-    const size_t OH = out_shape[1];
-    const size_t OW = out_shape[2];
-    auto reshape1_shape = ov::op::v0::Constant::create(
-        ov::element::i64, ov::Shape{5},
-        std::vector<int64_t>{static_cast<int64_t>(N), static_cast<int64_t>(OH), static_cast<int64_t>(OW),
-                             static_cast<int64_t>(KH * KW), static_cast<int64_t>(IC)});
+    auto spatial_shape = std::make_shared<ov::op::v8::Gather>(
+        std::make_shared<ov::op::v3::ShapeOf>(t1, ov::element::i64),
+        ov::op::v0::Constant::create(ov::element::i64, {3}, {0, 1, 2}),
+        ov::op::v0::Constant::create(ov::element::i64, {}, {0}));
+    auto reshape1_shape = std::make_shared<ov::op::v0::Concat>(ov::OutputVector{spatial_shape,
+        ov::op::v0::Constant::create(ov::element::i64, {2},
+            std::vector<int64_t>{int64_t(KH * KW), int64_t(IC)})}, 0);
     auto r1 = std::make_shared<ov::op::v1::Reshape>(t1, reshape1_shape, false);
 
     // [N, OH, OW, KH*KW, IC] → [N, OH, OW, IC, KH*KW]
@@ -93,13 +94,13 @@ OutputVector translate_im2col(const NodeContext & context) {
     auto t2 = std::make_shared<ov::op::v1::Transpose>(r1, perm2);
 
     // flatten back to [N, OH, OW, IC*KH*KW]
-    auto r2_shape = ov::op::v0::Constant::create(
-        ov::element::i64, ov::Shape{4},
-        std::vector<int64_t>{static_cast<int64_t>(N), static_cast<int64_t>(OH), static_cast<int64_t>(OW),
-                             static_cast<int64_t>(IC * KH * KW)});
+    auto r2_shape = std::make_shared<ov::op::v0::Concat>(ov::OutputVector{spatial_shape,
+        ov::op::v0::Constant::create(ov::element::i64, {1}, {int64_t(IC * KH * KW)})}, 0);
     res = std::make_shared<ov::op::v1::Reshape>(t2, r2_shape, false);
 
     if (!is_2D) {
+        const auto out_shape = t1->get_output_shape(0);
+        const size_t N = out_shape[0], OW = out_shape[2];
         // [N, 1, OW, IC * KW] -> [1, N, OW, IC * KW]
         auto final_reshape_shape = ov::op::v0::Constant::create(
             ov::element::i64, ov::Shape{4},

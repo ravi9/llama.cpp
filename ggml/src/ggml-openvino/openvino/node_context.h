@@ -46,6 +46,7 @@ public:
     std::string get_output_name() const { return m_output_names[0]; }
 
     PartialShape get_output_shape() const { return m_decoder->get_output_shape(m_node_idx); }
+    std::vector<int64_t> get_vision_reshape_pattern() const { return m_decoder->get_vision_reshape_pattern(m_node_idx); }
 
     int32_t * get_input_op_params(size_t index) const {
         return m_decoder->get_input_op_params(m_node_idx, m_input_names[index]);
@@ -120,9 +121,9 @@ public:
                 auto base_it = m_tensor_map->find(base_name);
                 // A multi-output translator can publish a VIEW directly without materializing
                 // its packed parent (GatedDeltaNet attention/state). In that case the VIEW is the
-                // authoritative value. The node comparison retains the existing resolved-VIEW path.
+                // authoritative value. Compare output ports as well as nodes for resolved Split views.
                 if (base_it == m_tensor_map->end() ||
-                    view_it->second.get_node_shared_ptr() != base_it->second.get_node_shared_ptr()) {
+                    view_it->second != base_it->second) {
                     return view_it->second;
                 }
                 return base_it->second;

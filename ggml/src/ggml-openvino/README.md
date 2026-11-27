@@ -84,3 +84,14 @@ On the static path (NPU, or any device with `GGML_OPENVINO_FORCE_STATIC=1`), mod
 # NPU host gather
 
 `GGML_OPENVINO_NPU_HOST_GATHER=1` (NPU, opt-in) gathers the rows of large host-resident embedding tables (at least 64 MiB, raw GGUF data) on the host. The static graph gets the gathered rows through an `ggml_host_rows_<node>` input instead of an OpenVINO Gather over the table. NPUW otherwise lifts the table to a function input, and gathering from an input that large costs about as much as streaming the whole table every call (21.6 ms of Gemma 4 E2B decode). A table used only for such lookups (the Gemma 3n/4 per-layer embedding table) is not converted or bound to the NPU at all.
+
+## Multimodal
+
+Qwen3.5 and Gemma4 E2B image input work on OpenVINO CPU and GPU with their matching
+projectors. Four-slot serving was validated with unified and split KV.
+Qwen3.5 reuses its vision graph across image resolutions; Gemma4 uses
+resolution-specific encoder graphs.
+
+Gemma4 audio is not enabled: preprocessing and Conformer still need dynamic length/block handling, runtime padding and view/state offsets, and cross-length compiled-model reuse. The small weightless preprocessing graph currently runs uncached because of the naive path's node-count heuristic.
+
+Static/NPU multimodal execution is untested.
