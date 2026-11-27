@@ -162,6 +162,7 @@ constexpr env_var env_vars[] = {
     {"GGML_OPENVINO_DUMP_IR", env_type::BOOL},
     {"GGML_OPENVINO_DEBUG_INPUT", env_type::BOOL},
     {"GGML_OPENVINO_DEBUG_OUTPUT", env_type::BOOL},
+    {"GGML_OPENVINO_DEBUG_DYNAMIC_DIMS", env_type::BOOL},
     // Force the static (NPU-shape) compute path on any device, e.g. GGML_OPENVINO_DEVICE=CPU,
     // to test the static-shape translation without NPUW/real NPU hardware in the loop.
     {"GGML_OPENVINO_FORCE_STATIC", env_type::BOOL},
@@ -195,12 +196,8 @@ constexpr env_var env_vars[] = {
     {"GGML_OPENVINO_GPU_KV_ROUND_UP", env_type::BOOL},
     {"GGML_OPENVINO_NPU_HFA_PREFILL", env_type::BOOL},
     {"GGML_OPENVINO_NPU_DECODE_UNFOLD", env_type::BOOL},
-    {"GGML_OPENVINO_NPU_PARALLEL_COMPILE", env_type::BOOL},
-    {"GGML_OPENVINO_SELF_CONTAINED_BLOB", env_type::BOOL},
     {"GGML_OPENVINO_SELF_CONTAINED_MMAP", env_type::BOOL},
-    {"GGML_OPENVINO_NPU_SHARED_BANK", env_type::BOOL},
     {"GGML_OPENVINO_KV_ONLY_PREFILL", env_type::BOOL},
-    {"GGML_OPENVINO_NPU_WEIGHTLESS_BANK", env_type::BOOL},
     {"GGML_OPENVINO_NPU_HOST_GATHER", env_type::BOOL},
     // Build the precise (but O(n_nodes)) graph cache key. Needed by op tests.
     {"GGML_OPENVINO_FULL_GRAPH_KEY", env_type::BOOL},
@@ -557,10 +554,7 @@ std::string ggml_openvino_config_overrides_in_use() {
 
 bool ggml_openvino_manual_gqa_enabled() {
     // set: a positive value enables it, 0 disables it; unset: on GPU only
-    if (ggml_openvino_getenv_str("GGML_OPENVINO_MANUAL_GQA_ATTN") != nullptr) {
-        return ggml_openvino_getenv_int("GGML_OPENVINO_MANUAL_GQA_ATTN") > 0;
-    }
-    return ggml_openvino_is_gpu();
+    return ggml_openvino_getenv_int("GGML_OPENVINO_MANUAL_GQA_ATTN", ggml_openvino_is_gpu() ? 1 : 0) > 0;
 }
 
 bool ggml_openvino_gdn_prescale_enabled() {
@@ -589,10 +583,7 @@ bool ggml_openvino_npu_is_4000() {
 }
 
 bool ggml_openvino_gdn_decompose_enabled() {
-    if (ggml_openvino_getenv_str("GGML_OPENVINO_GDN_DECOMPOSE") != nullptr) {
-        return ggml_openvino_getenv_int("GGML_OPENVINO_GDN_DECOMPOSE") > 0;
-    }
-    return ggml_openvino_npu_is_4000();
+    return ggml_openvino_getenv_int("GGML_OPENVINO_GDN_DECOMPOSE", ggml_openvino_npu_is_4000() ? 1 : 0) > 0;
 }
 
 int ggml_openvino_gdn_decompose_chunk() {
@@ -616,19 +607,14 @@ float ggml_openvino_gdn_q_scale() {
 }
 
 bool ggml_openvino_reduce_compile_mem_enabled() {
-    const char * reduce_compile_mem = ggml_openvino_getenv_str("GGML_OPENVINO_REDUCE_COMPILE_MEM");
-    if (reduce_compile_mem != nullptr) {
-        return ggml_openvino_getenv_int("GGML_OPENVINO_REDUCE_COMPILE_MEM") != 0;
-    }
-    return ggml_openvino_getenv_int("GGML_OPENVINO_MEMORY_OPTIMIZE") != 0;
+    return ggml_openvino_getenv_int("GGML_OPENVINO_REDUCE_COMPILE_MEM",
+                                    ggml_openvino_getenv_int("GGML_OPENVINO_MEMORY_OPTIMIZE")) != 0;
 }
 
 bool ggml_openvino_release_weights_enabled() {
-    const char * release_weights = ggml_openvino_getenv_str("GGML_OPENVINO_RELEASE_WEIGHTS");
-    if (release_weights != nullptr) {
-        return ggml_openvino_is_gpu() && ggml_openvino_getenv_int("GGML_OPENVINO_RELEASE_WEIGHTS") != 0;
-    }
-    return ggml_openvino_is_gpu() && ggml_openvino_getenv_int("GGML_OPENVINO_MEMORY_OPTIMIZE") != 0;
+    return ggml_openvino_is_gpu() &&
+           ggml_openvino_getenv_int("GGML_OPENVINO_RELEASE_WEIGHTS",
+                                    ggml_openvino_getenv_int("GGML_OPENVINO_MEMORY_OPTIMIZE")) != 0;
 }
 
 // Check if running on NPU
@@ -669,19 +655,8 @@ bool ggml_openvino_npu_decode_unfold_enabled() {
     return ggml_openvino_getenv_int("GGML_OPENVINO_NPU_DECODE_UNFOLD") != 0;
 }
 
-bool ggml_openvino_npu_parallel_compile_enabled() {
-    return ggml_openvino_getenv_int("GGML_OPENVINO_NPU_PARALLEL_COMPILE") != 0;
-}
-
 int ggml_openvino_npu_decode_bucket() {
     if (!ggml_openvino_is_npu()) {
-        return 0;
-    }
-    // A self-contained blob embeds its weights bank, and NPUW cannot load a blob into a bank that already holds
-    // weights, so a decode model per KV window cannot be imported next to the decode model of the pair.
-    if (ggml_openvino_getenv_str("GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR") &&
-        ggml_openvino_getenv_int("GGML_OPENVINO_SELF_CONTAINED_BLOB") != 0 &&
-        !ggml_openvino_npu_weightless_bank_enabled()) {
         return 0;
     }
     return ggml_openvino_getenv_int("GGML_OPENVINO_NPU_BLOB_PREBUILD", 1) != 0 ? ggml_openvino_kv_slice_base() : 0;
@@ -725,13 +700,13 @@ bool ggml_openvino_kv_only_prefill_enabled() {
     return ggml_openvino_getenv_int("GGML_OPENVINO_KV_ONLY_PREFILL", 1) != 0;
 }
 
-bool ggml_openvino_npu_raw_weight_cache_enabled() {
-    return ggml_openvino_getenv_int("GGML_OPENVINO_SELF_CONTAINED_BLOB") != 0 ||
-           ggml_openvino_npu_weightless_bank_enabled();
+bool ggml_openvino_npu_weightless_cache_enabled() {
+    return ggml_openvino_is_npu() && ggml_openvino_getenv_str("GGML_OPENVINO_COMPILED_MODEL_CACHE_DIR") != nullptr;
 }
 
-bool ggml_openvino_npu_weightless_bank_enabled() {
-    return ggml_openvino_getenv_int("GGML_OPENVINO_NPU_WEIGHTLESS_BANK") != 0;
+bool ggml_openvino_self_contained_mmap_enabled() {
+    return ggml_openvino_npu_weightless_cache_enabled() &&
+           ggml_openvino_getenv_int("GGML_OPENVINO_SELF_CONTAINED_MMAP") != 0;
 }
 
 namespace {

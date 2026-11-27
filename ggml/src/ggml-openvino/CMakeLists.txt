@@ -1,3 +1,7 @@
+if (NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64|aarch64)$")
+    message(FATAL_ERROR "OpenVINO: OpenVINO toolkit supports x86-64 and arm64 but not ${CMAKE_SYSTEM_PROCESSOR}")
+endif()
+
 find_package(OpenVINO REQUIRED COMPONENTS Runtime Threading)
 find_package(OpenCL REQUIRED)
 
@@ -22,12 +26,4 @@ endif()
 
 if (WIN32)
     target_link_libraries(ggml-openvino PRIVATE psapi)
-endif()
-
-if (GGML_OPENVINO)
-    if (CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
-    elseif (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "amd64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "AMD64")
-    else()
-        message(FATAL_ERROR "OpenVINO: OpenVINO toolkit supports x86-64 and arm64 but not ${CMAKE_SYSTEM_PROCESSOR}")
-    endif()
 endif()

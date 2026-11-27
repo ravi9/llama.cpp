@@ -515,9 +515,6 @@ OutputVector translate_gated_delta_net(const NodeContext & context) {
         g = std::make_shared<ov::op::v1::Multiply>(g, mask);
     }
 
-    // std::cout << "GatedDeltaNet input shapes: q=" << q.get_partial_shape() << ", k=" << k.get_partial_shape()
-    //           << ", v=" << v.get_partial_shape() << ", g=" << g.get_partial_shape()
-    //           << ", beta=" << beta.get_partial_shape() << ", state=" << state.get_partial_shape() << std::endl;
 
     Output<Node> attn_4d, states;
     if (snapshot_count > 1) {
