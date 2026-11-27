@@ -13,6 +13,7 @@
 #    include <openvino/op/parameter.hpp>
 #    include <openvino/op/reshape.hpp>
 #    include <openvino/op/slice.hpp>
+#    include <set>
 
 namespace ov::frontend::ggml {
 RecurrentCacheFusion::RecurrentCacheFusion(const std::shared_ptr<GgmlDecoder> & decoder,
@@ -33,22 +34,39 @@ RecurrentCacheFusion::RecurrentCacheFusion(const std::shared_ptr<GgmlDecoder> & 
     for (int i = 0; i < graph->n_nodes; ++i) {
         indices[graph->nodes[i]] = i;
     }
-    for (int i = 0; i < graph->n_nodes; ++i) {
+    auto is_remainder = [&](int i) {
         const auto cp = graph->nodes[i];
-        if (cp->op != GGML_OP_CPY || decoder->get_op_case(i) != 3 || !cp->src[0] || cp->src[0]->op != GGML_OP_VIEW ||
-            !cp->src[0]->src[0] || cp->src[0]->src[0]->op != GGML_OP_GET_ROWS) {
+        return cp->op == GGML_OP_CPY && decoder->get_op_case(i) == 3 && cp->src[0] && cp->src[0]->op == GGML_OP_VIEW &&
+               cp->src[0]->src[0] && cp->src[0]->src[0]->op == GGML_OP_GET_ROWS;
+    };
+    std::set<const ggml_tensor *> gathers_with_remainder;
+    for (int i = 0; i < graph->n_nodes; ++i) {
+        if (is_remainder(i)) {
+            gathers_with_remainder.insert(graph->nodes[i]->src[0]->src[0]);
+        }
+    }
+    for (int i = 0; i < graph->n_nodes; ++i) {
+        // a cache with one state row has no extra rows, so the graph may omit the remainder CPY
+        const bool remainder = is_remainder(i);
+        const auto node_i = graph->nodes[i];
+        if (!remainder && (node_i->op != GGML_OP_GET_ROWS || gathers_with_remainder.count(node_i) ||
+                           !node_i->src[0] || node_i->src[0]->op != GGML_OP_RESHAPE)) {
             continue;
         }
-        const auto gather = cp->src[0]->src[0];
-        const auto root = cp->view_src;
-        if (!root || (root->type != GGML_TYPE_F32 && root->type != GGML_TYPE_F16) || root->ne[2] != 1 ||
+        const auto gather = remainder ? node_i->src[0]->src[0] : node_i;
+        const auto root = remainder ? node_i->view_src : node_i->src[0]->src[0];
+        if (!root || (!remainder && !GgmlOvDecoder::is_recurrent_cache(root)) || (root->type != GGML_TYPE_F32 && root->type != GGML_TYPE_F16) || root->ne[2] != 1 ||
             root->ne[3] != 1 || gather->src[0]->op != GGML_OP_RESHAPE || gather->src[0]->src[0] != root ||
             gather->src[1]->op != GGML_OP_NONE || gather->src[1]->type != GGML_TYPE_I32) {
             continue;
         }
         Group group;
         group.gather = indices.at(gather);
-        group.remainder = i;
+        group.remainder = remainder ? i : -1;
+        // without the remainder the gathered rows are the active rows themselves
+        auto is_active = [&](const ggml_tensor * t) {
+            return t && ((t->op == GGML_OP_VIEW && t->src[0] == gather && t->view_offs == 0) || (!remainder && t == gather));
+        };
         for (int j = 0; j < group.gather; ++j) {
             const auto node = graph->nodes[j];
             if (GgmlOvDecoder::is_recurrent_cache_reset(node) &&
@@ -73,8 +91,7 @@ RecurrentCacheFusion::RecurrentCacheFusion(const std::shared_ptr<GgmlDecoder> & 
                 continue;
             }
             const auto active = node->src[0]->src[0];
-            if (active && active->op == GGML_OP_VIEW && active->src[0] == gather && active->view_offs == 0 &&
-                node->src[0]->ne[3] == 1 && node->src[0]->ne[0] * node->src[0]->ne[1] == root->ne[0]) {
+            if (is_active(active) && node->src[0]->ne[3] == 1 && node->src[0]->ne[0] * node->src[0]->ne[1] == root->ne[0]) {
                 group.concat = j;
                 for (int k = j + 1; k < graph->n_nodes; ++k) {
                     const auto write = graph->nodes[k];
@@ -119,8 +136,7 @@ RecurrentCacheFusion::RecurrentCacheFusion(const std::shared_ptr<GgmlDecoder> & 
                     continue;
                 }
                 const auto active = node->src[5]->src[0];
-                if (!active || active->op != GGML_OP_VIEW || active->src[0] != gather || active->view_offs != 0 ||
-                    node->src[5]->ne[0] * node->src[5]->ne[1] * node->src[5]->ne[2] != root->ne[0] ||
+                if (!is_active(active) || node->src[5]->ne[0] * node->src[5]->ne[1] * node->src[5]->ne[2] != root->ne[0] ||
                     decoder->get_output_names(j).size() < 2) {
                     continue;
                 }
@@ -146,8 +162,8 @@ RecurrentCacheFusion::RecurrentCacheFusion(const std::shared_ptr<GgmlDecoder> & 
         if (group.compute < 0) {
             continue;
         }
-        bool complete = tensors->count("rs_slot_begin_" + decoder->get_op_name(i)) &&
-                        tensors->count("rs_src_begin_" + decoder->get_op_name(i));
+        bool complete = !remainder || (tensors->count("rs_slot_begin_" + decoder->get_op_name(i)) &&
+                                       tensors->count("rs_src_begin_" + decoder->get_op_name(i)));
         if (group.concat >= 0) {
             complete &= tensors->count("rs_windows_" + decoder->get_op_name(group.concat));
             const auto & name = decoder->get_op_name(group.writeback);
@@ -187,7 +203,8 @@ RecurrentCacheFusion::RecurrentCacheFusion(const std::shared_ptr<GgmlDecoder> & 
                 if (!input) {
                     continue;
                 }
-                if (input == gather && node != active && node != graph->nodes[group.remainder]->src[0]) {
+                if (input == gather && active != gather && node != active &&
+                    (group.remainder < 0 || node != graph->nodes[group.remainder]->src[0])) {
                     complete = false;
                 }
                 if (input == active && node != reshaped) {
@@ -214,7 +231,9 @@ RecurrentCacheFusion::RecurrentCacheFusion(const std::shared_ptr<GgmlDecoder> & 
         group.root_name = GgmlOvDecoder::get_tensor_name(graph, root);
         const auto id = m_groups.size();
         for (int n : {group.reset, group.gather, group.remainder}) {
-            m_nodes[n] = id;
+            if (n >= 0) {
+                m_nodes[n] = id;
+            }
         }
         if (group.concat >= 0) {
             m_nodes[group.concat] = id;
@@ -257,18 +276,26 @@ OutputVector RecurrentCacheFusion::translate(int index, const NodeContext & cont
     }
     NodeContext gather_context(m_decoder, m_tensors, group.gather);
     auto rows = process_view_input_new(gather_context, 1);
-    const auto remainder_name = m_decoder->get_op_name(group.remainder);
-    auto offsets = std::make_shared<v0::Concat>(OutputVector{context.get_input("rs_slot_begin_" + remainder_name),
-                                                             context.get_input("rs_src_begin_" + remainder_name)},
-                                                0);
+    Output<Node> extra_offsets;
+    if (group.remainder >= 0) {
+        const auto remainder_name = m_decoder->get_op_name(group.remainder);
+        auto offsets = std::make_shared<v0::Concat>(OutputVector{context.get_input("rs_slot_begin_" + remainder_name),
+                                                                 context.get_input("rs_src_begin_" + remainder_name)},
+                                                    0);
+        extra_offsets = context.has_input("rs_offsets_" + remainder_name) ?
+                            context.get_input("rs_offsets_" + remainder_name) :
+                            std::make_shared<v1::Reshape>(offsets, constant({4}, {1, 1, 1, 2}), false)->output(0);
+    } else {
+        // the extra-row suffix starts after the active rows, so it is empty
+        auto offsets = std::make_shared<v0::Concat>(OutputVector{constant({1}, {0}), context.get_input("s_copy_active_slot_len")}, 0);
+        extra_offsets = std::make_shared<v1::Reshape>(offsets, constant({4}, {1, 1, 1, 2}), false);
+    }
     OutputVector inputs{group.old_cache,
                         rows,
                         rows,
                         metadata("cache_rs_reset_idx"),
                         metadata("cache_rs_reset_len"),
-                        context.has_input("rs_offsets_" + remainder_name) ?
-                            context.get_input("rs_offsets_" + remainder_name) :
-                            std::make_shared<v1::Reshape>(offsets, constant({4}, {1, 1, 1, 2}), false)};
+                        extra_offsets};
     inputs[1] = context.has_input("rs_active_rows") ?
                     context.get_input("rs_active_rows") :
                     std::make_shared<v8::Slice>(rows, constant({1}, {0}), context.get_input("s_copy_active_slot_len"),

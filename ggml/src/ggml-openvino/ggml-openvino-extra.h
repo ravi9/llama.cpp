@@ -272,6 +272,9 @@ void ggml_openvino_unregister_weight_buffer(const void * data);
 void ggml_openvino_release_weight_buffers();
 bool ggml_openvino_weight_buffers_released();
 
+// Group size of a 2-bit type that is loaded as u2 weights, 0 for other types
+size_t ggml_openvino_u2_group_size(ggml_type type);
+
 // Get requantization type for a tensor type (returns nullopt if no requant needed)
 std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor * tensor, bool no_requant = false);
 
@@ -349,6 +352,7 @@ struct ggml_openvino_extracted_layout {
     size_t zp_offset = 0;       // Offset to zero points in buffer
     size_t zp_size = 0;         // Size of zero points in bytes (U4 or U8)
     bool is_u4;                 // true for U4 weights, false for U8
+    bool is_u2 = false;         // true for 2-bit U2 weights (Q2_0); is_u4 is then false
     int64_t weights_per_block;  // weights per scale/zp block
     bool is_symmetric;          // true for symmetric quantization
 

@@ -45,3 +45,22 @@ cmake_pop_check_state()
 if(GGML_OPENVINO_HAS_CACHE_UPDATE)
     target_compile_definitions(ggml-openvino PRIVATE GGML_OPENVINO_HAS_CACHE_UPDATE=1)
 endif()
+
+# Core features that not every ggml tree has
+unset(GGML_OPENVINO_HAS_BUFFER_TENSOR_N CACHE)
+unset(GGML_OPENVINO_HAS_FA_INDEXED_BIAS CACHE)
+set(CMAKE_REQUIRED_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${CMAKE_CURRENT_SOURCE_DIR}/..")
+check_cxx_source_compiles("#include <ggml-backend-impl.h>
+int main() { ggml_backend_buffer_i i{}; return i.set_tensor_n != nullptr; }"
+    GGML_OPENVINO_HAS_BUFFER_TENSOR_N)
+check_cxx_source_compiles("#include <ggml.h>
+using fn = decltype(&ggml_flash_attn_ext_has_indexed_bias);
+int main() { return 0; }"
+    GGML_OPENVINO_HAS_FA_INDEXED_BIAS)
+unset(CMAKE_REQUIRED_INCLUDES)
+if(GGML_OPENVINO_HAS_BUFFER_TENSOR_N)
+    target_compile_definitions(ggml-openvino PRIVATE GGML_OPENVINO_HAS_BUFFER_TENSOR_N=1)
+endif()
+if(GGML_OPENVINO_HAS_FA_INDEXED_BIAS)
+    target_compile_definitions(ggml-openvino PRIVATE GGML_OPENVINO_HAS_FA_INDEXED_BIAS=1)
+endif()
