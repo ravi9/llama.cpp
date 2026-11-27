@@ -327,7 +327,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OPENVINO_INSTALL_DIR="/opt/intel/openvino_${OPENVINO_VERSION_MAJOR}"
 OPENVINO_LINK_DIR="/opt/intel/openvino"
 OPENVINO_TGZ="${SCRIPT_DIR}/openvino.tgz"
-OPENVINO_URL="https://storage.openvinotoolkit.org/repositories/openvino/packages/${OPENVINO_VERSION_MAJOR}/linux/openvino_toolkit_ubuntu24_${OPENVINO_VERSION_FULL}_x86_64.tgz"
+UBUNTU_MAJOR="$(. /etc/os-release && echo "${VERSION_ID%%.*}")"  # 22, 24 or 26
+OPENVINO_URL="https://storage.openvinotoolkit.org/repositories/openvino/packages/${OPENVINO_VERSION_MAJOR}/linux/openvino_toolkit_ubuntu${UBUNTU_MAJOR}_${OPENVINO_VERSION_FULL}_x86_64.tgz"
 
 echo "============================================"
 echo "Installing prerequisites (apt)..."
