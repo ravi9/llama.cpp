@@ -83,7 +83,7 @@ These options are off by default. They are not validated for general use: some h
 | `GGML_OPENVINO_NPU_REQUANT_POLICY` | NPU | String | `group-128` | Layout of requantized weights: `group-128` (`Q4_0_128`) or `channel-wise` (`Q4_0_C`, lower accuracy). |
 | `GGML_OPENVINO_GDN_DECOMPOSE_CHUNK` | all | Integer | `16` | Tokens in one chunk when `GGML_OPENVINO_GDN_DECOMPOSE` is on. A power of 2 from 2 to 128; other values use `16`. |
 | `GGML_OPENVINO_GDN_NATIVE_STATE` | NPU | Boolean | `0` | Keep the `GATED_DELTA_NET` state in the layout of the OpenVINO op instead of the GGML layout. Every `GATED_DELTA_NET` must then run on the OpenVINO backend; the load aborts if one would run on the CPU backend. Saved states and `GGML_OPENVINO_DEBUG_NODE` dumps hold the OpenVINO layout. `test-backend-ops` fails with it. |
-| `GGML_OPENVINO_FORCE_STATIC` | CPU, GPU | Boolean | `0` | Run the static-shape path of the NPU on the CPU or the GPU, to separate translation bugs from NPU plugin or driver problems. Cannot be used with `GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY`. |
+| `GGML_OPENVINO_FORCE_STATIC` | CPU, GPU | Boolean | `0` | Run the static-shape path of the NPU on the CPU or the GPU, to separate translation bugs from NPU plugin or driver problems. This includes the NPU translation of MoE blocks, which computes every expert on the CPU or the GPU and is slow. Cannot be used with `GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY`. |
 | `GGML_OPENVINO_ENABLE_FALLBACK` | all | Boolean | `0` | Detect graphs that the scheduler splits between OpenVINO and another backend, and translate them as partial graphs, without the compiled model cache. By default every graph is treated as a complete model graph. Cannot be used with `GGML_OPENVINO_COMPILED_MODEL_CACHE_ONLY`. |
 | `GGML_OPENVINO_ROPE_F32_ANGLE` | GPU | Boolean | `0` | Keep the RoPE angle in f32 under the f16 hint, for long prompts. Validated on one model. On CPU, `test-backend-ops -o ROPE` fails with it. |
 | `GGML_OPENVINO_NATIVE_SOFTPLUS` | all | Boolean | `0` | Translate `SOFTPLUS` to the OpenVINO `SoftPlus` op instead of the default `relu(x) + log(1 + exp(-abs(x)))`. |
@@ -172,6 +172,18 @@ The backend sets the properties below for the NPU. `GGML_OPENVINO_NPU_CONFIG` ca
 | `NPU_COMPILER_DYNAMIC_QUANTIZATION` | Boolean | `YES` | `NO` | Dynamic quantization in the NPU compiler. |
 | `NPU_COMPILER_TYPE` | String | `DRIVER` | `PREFER_PLUGIN` | The NPU compiler: `DRIVER` (in the NPU driver), `PLUGIN` (in OpenVINO) or `PREFER_PLUGIN` (`PLUGIN` when it is available, `DRIVER` if not). Models with `GATED_DELTA_NET` layers (Qwen3.5) compile with `PLUGIN` unless the user sets this property. |
 | `NPUW_CACHE_DIR` | String | value of `GGML_OPENVINO_CACHE_DIR` | empty | Directory for the compiled parts. |
+
+Graphs with a MoE block (softmax router and SwiGLU experts, translated into the batched form that NPUW recognises) also get the properties below. They make NPUW run only the routed experts, with the router on the host (the `HOST_ROUTED` mode of `NPUW_LLM_*_MOE_HINT`). `GGML_OPENVINO_NPU_CONFIG` can change them.
+
+| Property | Type | Backend default | OpenVINO default | Description |
+|---|---|---|---|---|
+| `NPUW_ONLINE_PIPELINE` | String | `REP` | `REG` | Partitioning pipeline. `REP` finds the repeating blocks, which the MoE support needs. |
+| `NPUW_ONLINE_ISOLATE` | String | `MOE` added | empty | Isolate the experts into their own functions. Added to a value that is already set. |
+| `NPUW_ONLINE_KEEP_BLOCKS_TAGGED` | String | `expert` added | empty | Keep the isolated experts even below the repeating-block threshold. |
+| `NPUW_ONLINE_KEEP_BLOCK_SIZE` | Integer | `4` | `10` | Smallest repeating block that is kept. |
+| `NPUW_UNFOLD_IREQS` | Boolean | `NO` | `NO` | One infer request for each part. |
+| `NPUW_MOE_TOKEN_CHUNK_SIZE` | Integer | `16` | `0` | Tokens per expert call in prefill. `0` compiles 8 sizes (16 to 512); one small size uses less memory. |
+| `NPUW_MOE_POOL_SIZE` | Integer | `0` | `8` | Infer requests per MoE layer kept for decode, each bound to a set of experts. With 40 MoE layers, the default of 8 fills the NPU memory of a 32 GB system and the load hangs. |
 
 Other properties that are useful with `GGML_OPENVINO_NPU_CONFIG`. The backend does not set them.
 

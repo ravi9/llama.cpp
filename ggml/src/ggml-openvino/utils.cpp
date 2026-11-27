@@ -2357,8 +2357,14 @@ static ov::AnyMap static_variant_config(const static_graph_args & a,
                                         const decoder_runtime_ctx & e,
                                         const GgmlOvDecoder & decoder,
                                         bool prefill) {
-    ov::AnyMap config = prefill ? ggml_openvino_npu_prefill_config(a.compile_config, decoder) :
-                                  ggml_openvino_npu_decode_config(a.compile_config, a.device);
+    // A graph with a MoE block that translate_moe_tiled turns into the batched form also needs the NPUW properties
+    // that make NPUW isolate the experts and run only the routed ones (ggml_openvino_npu_moe_config). They are
+    // NPUW properties, so not for cacheless graphs, which compile without NPUW, and not for the static path that
+    // GGML_OPENVINO_FORCE_STATIC runs on the CPU or the GPU. The decoder finds the block once, when it is built.
+    const bool moe = !a.no_kv_cache && a.device == "NPU" && decoder.has_moe_block();
+    const ov::AnyMap base = moe ? ggml_openvino_npu_moe_config(a.compile_config) : a.compile_config;
+    ov::AnyMap config = prefill ? ggml_openvino_npu_prefill_config(base, decoder) :
+                                  ggml_openvino_npu_decode_config(base, a.device);
     if (!a.model_cache_dir.empty()) {
         config.erase("CACHE_DIR");
         config.erase("CACHE_MODE");
@@ -2570,6 +2576,8 @@ enum ggml_status ov_graph_compute_static(ggml_cgraph * cgraph, const std::shared
         fprintf(stderr, "GGML OpenVINO profiling: static graph kind=%s, input_tokens=%lld, chunk_size=%d\n",
                 is_prefill ? "prefill" : "decode", static_cast<long long>(input_tokens), prefill_chunk_size);
     }
+    // Compile properties for this graph: cacheless (encoder) graphs compile on the plain NPU plugin, graphs with
+    // GATED_DELTA_NET layers may switch the compiler (see npu_config.h), the others take the base config.
     const ov::AnyMap compile_config = no_kv_cache              ? ggml_openvino_npu_without_npuw(config) :
                                       m_params.state_size >= 0 ? ggml_openvino_npu_gdn_config(config) :
                                                                  config;

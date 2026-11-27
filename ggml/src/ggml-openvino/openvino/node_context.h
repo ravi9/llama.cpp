@@ -160,6 +160,8 @@ public:
 
     bool is_prefill() const { return m_decoder->is_prefill(); }
 
+    int get_static_n_tokens() const { return m_decoder->get_static_n_tokens(); }
+
     int get_ssm_state_size() const { return m_decoder->get_ssm_state_size(); }
 
 private:
