@@ -1,5 +1,8 @@
 #include "ggml-quants.h"
 
+// Block structs and the IQ lookup tables (kvalues_iq4nl, iq3xxs_grid, iq3s_grid, ksigns_iq2xs, kmask_iq2xs)
+#define GGML_COMMON_DECL_CPP
+#define GGML_COMMON_IMPL_CPP
 #include "ggml-common.h"
 #include "ggml-impl.h"
 #include "ggml-openvino-extra.h"
@@ -10,6 +13,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <openvino/core/except.hpp>
@@ -550,6 +554,173 @@ void extract_q5_k_data(const ggml_tensor * tensor,
     });
 }
 
+// The extractors below decode the same values as ggml's dequantize_row_* (ggml-quants.c) but keep the
+// integer part and the per-group scale apart, so the weights stay exact and compressed.
+
+// Q3_K: q = 2 low bits + 1 high bit (hmask) - 4, in [-4, 3], with one scale d * (sc - 32) per 16 weights.
+// Stored as i4 (two's complement nibbles, even element in the low nibble).
+void extract_q3_k_data(const ggml_tensor * tensor, ov::Tensor & weights_arr, ov::Tensor & scales_arr) {
+    GGML_ASSERT(weights_arr.get_element_type() == ov::element::i4);
+    const auto * blocks = static_cast<const block_q3_K *>(tensor->data);
+    auto * weights = static_cast<uint8_t *>(weights_arr.data());
+    auto * scales = scales_arr.data<ov::element_type_traits<ov::element::f16>::value_type>();
+    const size_t n_blocks = ggml_nelements(tensor) / QK_K;
+
+    ov::parallel_for(n_blocks, [&](size_t i) {
+        const block_q3_K & b = blocks[i];
+        const float d = static_cast<float>(ov::float16::from_bits(b.d));
+
+        // Unpack the 16 6-bit scales
+        const uint32_t kmask1 = 0x03030303;
+        const uint32_t kmask2 = 0x0f0f0f0f;
+        uint32_t aux[4];
+        memcpy(aux, b.scales, 12);
+        const uint32_t tmp = aux[2];
+        aux[2] = ((aux[0] >> 4) & kmask2) | (((tmp >> 4) & kmask1) << 4);
+        aux[3] = ((aux[1] >> 4) & kmask2) | (((tmp >> 6) & kmask1) << 4);
+        aux[0] = (aux[0] & kmask2) | (((tmp >> 0) & kmask1) << 4);
+        aux[1] = (aux[1] & kmask2) | (((tmp >> 2) & kmask1) << 4);
+        const auto * sc = reinterpret_cast<const int8_t *>(aux);
+        for (int j = 0; j < QK_K / 16; ++j) {
+            scales[i * (QK_K / 16) + j] = ov::float16(d * static_cast<float>(sc[j] - 32));
+        }
+
+        int8_t q[QK_K];
+        const uint8_t * qs = b.qs;
+        uint8_t m = 1;
+        int y = 0;
+        for (int n = 0; n < QK_K; n += 128) {
+            for (int shift = 0; shift < 8; shift += 2) {
+                for (int l = 0; l < 32; ++l) {
+                    q[y++] = static_cast<int8_t>(((qs[l] >> shift) & 3) - ((b.hmask[l] & m) ? 0 : 4));
+                }
+                m <<= 1;
+            }
+            qs += 32;
+        }
+
+        uint8_t * dst = weights + i * (QK_K / 2);
+        for (int k = 0; k < QK_K / 2; ++k) {
+            dst[k] = static_cast<uint8_t>((q[2 * k] & 0x0F) | ((q[2 * k + 1] & 0x0F) << 4));
+        }
+    });
+}
+
+// IQ4_NL: each 4-bit index selects an int8 value from the non-linear kvalues_iq4nl table; one scale d per
+// 32 weights. Stored as i8.
+void extract_iq4_nl_data(const ggml_tensor * tensor, ov::Tensor & weights_arr, ov::Tensor & scales_arr) {
+    GGML_ASSERT(weights_arr.get_element_type() == ov::element::i8);
+    const auto * blocks = static_cast<const block_iq4_nl *>(tensor->data);
+    auto * weights = static_cast<int8_t *>(weights_arr.data());
+    auto * scales = scales_arr.data<ov::element_type_traits<ov::element::f16>::value_type>();
+    const size_t n_blocks = ggml_nelements(tensor) / QK4_NL;
+
+    ov::parallel_for(n_blocks, [&](size_t i) {
+        const block_iq4_nl & b = blocks[i];
+        scales[i] = ov::float16::from_bits(b.d);
+        int8_t * w = weights + i * QK4_NL;
+        for (int j = 0; j < QK4_NL / 2; ++j) {
+            w[j] = kvalues_iq4nl[b.qs[j] & 0xf];
+            w[j + QK4_NL / 2] = kvalues_iq4nl[b.qs[j] >> 4];
+        }
+    });
+}
+
+// IQ4_XS: IQ4_NL values in 256-weight super-blocks, with one 6-bit scale d * (ls - 32) per 32 weights.
+// Stored as i8.
+void extract_iq4_xs_data(const ggml_tensor * tensor, ov::Tensor & weights_arr, ov::Tensor & scales_arr) {
+    GGML_ASSERT(weights_arr.get_element_type() == ov::element::i8);
+    const auto * blocks = static_cast<const block_iq4_xs *>(tensor->data);
+    auto * weights = static_cast<int8_t *>(weights_arr.data());
+    auto * scales = scales_arr.data<ov::element_type_traits<ov::element::f16>::value_type>();
+    const size_t n_blocks = ggml_nelements(tensor) / QK_K;
+
+    ov::parallel_for(n_blocks, [&](size_t i) {
+        const block_iq4_xs & b = blocks[i];
+        const float d = static_cast<float>(ov::float16::from_bits(b.d));
+        const uint8_t * qs = b.qs;
+        for (int ib = 0; ib < QK_K / 32; ++ib) {
+            const int ls = ((b.scales_l[ib / 2] >> 4 * (ib % 2)) & 0xf) | (((b.scales_h >> 2 * ib) & 3) << 4);
+            scales[i * (QK_K / 32) + ib] = ov::float16(d * static_cast<float>(ls - 32));
+            int8_t * w = weights + i * QK_K + ib * 32;
+            for (int j = 0; j < 16; ++j) {
+                w[j] = kvalues_iq4nl[qs[j] & 0xf];
+                w[j + 16] = kvalues_iq4nl[qs[j] >> 4];
+            }
+            qs += 16;
+        }
+    });
+}
+
+// IQ3_XXS: each 8-bit index selects 4 magnitudes from iq3xxs_grid, with 7-bit sign patterns (ksigns_iq2xs) and
+// one 4-bit scale d * (0.5 + ls) * 0.5 per 32 weights. Stored as i8 (|value| <= 62).
+void extract_iq3_xxs_data(const ggml_tensor * tensor, ov::Tensor & weights_arr, ov::Tensor & scales_arr) {
+    GGML_ASSERT(weights_arr.get_element_type() == ov::element::i8);
+    const auto * blocks = static_cast<const block_iq3_xxs *>(tensor->data);
+    auto * weights = static_cast<int8_t *>(weights_arr.data());
+    auto * scales = scales_arr.data<ov::element_type_traits<ov::element::f16>::value_type>();
+    const size_t n_blocks = ggml_nelements(tensor) / QK_K;
+
+    ov::parallel_for(n_blocks, [&](size_t i) {
+        const block_iq3_xxs & b = blocks[i];
+        const float d = static_cast<float>(ov::float16::from_bits(b.d));
+        const uint8_t * qs = b.qs;
+        const uint8_t * scales_and_signs = b.qs + QK_K / 4;
+        for (int ib32 = 0; ib32 < QK_K / 32; ++ib32) {
+            uint32_t aux32;
+            memcpy(&aux32, scales_and_signs + 4 * ib32, sizeof(uint32_t));
+            scales[i * (QK_K / 32) + ib32] = ov::float16(d * (0.5f + static_cast<float>(aux32 >> 28)) * 0.5f);
+            int8_t * w = weights + i * QK_K + ib32 * 32;
+            for (int l = 0; l < 4; ++l) {
+                const uint8_t signs = ksigns_iq2xs[(aux32 >> 7 * l) & 127];
+                const auto * grid1 = reinterpret_cast<const uint8_t *>(iq3xxs_grid + qs[2 * l + 0]);
+                const auto * grid2 = reinterpret_cast<const uint8_t *>(iq3xxs_grid + qs[2 * l + 1]);
+                for (int j = 0; j < 4; ++j) {
+                    w[8 * l + j] = static_cast<int8_t>((signs & kmask_iq2xs[j + 0]) ? -grid1[j] : grid1[j]);
+                    w[8 * l + j + 4] = static_cast<int8_t>((signs & kmask_iq2xs[j + 4]) ? -grid2[j] : grid2[j]);
+                }
+            }
+            qs += 8;
+        }
+    });
+}
+
+// IQ3_S: 9-bit indices into iq3s_grid (high bit in qh), explicit sign bits, and one 4-bit scale d * (1 + 2 * s)
+// per 32 weights. Stored as i8 (|value| <= 15).
+void extract_iq3_s_data(const ggml_tensor * tensor, ov::Tensor & weights_arr, ov::Tensor & scales_arr) {
+    GGML_ASSERT(weights_arr.get_element_type() == ov::element::i8);
+    const auto * blocks = static_cast<const block_iq3_s *>(tensor->data);
+    auto * weights = static_cast<int8_t *>(weights_arr.data());
+    auto * scales = scales_arr.data<ov::element_type_traits<ov::element::f16>::value_type>();
+    const size_t n_blocks = ggml_nelements(tensor) / QK_K;
+
+    ov::parallel_for(n_blocks, [&](size_t i) {
+        const block_iq3_s & b = blocks[i];
+        const float d = static_cast<float>(ov::float16::from_bits(b.d));
+        const uint8_t * qs = b.qs;
+        const uint8_t * signs = b.signs;
+        int8_t * w = weights + i * QK_K;
+
+        // Each sub-block of 32 uses one qh byte, 8 qs bytes and 4 sign bytes.
+        for (int ib32 = 0; ib32 < QK_K / 32; ++ib32) {
+            const uint8_t s = (ib32 % 2 == 0) ? (b.scales[ib32 / 2] & 0xf) : (b.scales[ib32 / 2] >> 4);
+            scales[i * (QK_K / 32) + ib32] = ov::float16(d * static_cast<float>(1 + 2 * s));
+            const uint8_t qh = b.qh[ib32];
+            for (int l = 0; l < 4; ++l) {
+                const auto * grid1 = reinterpret_cast<const uint8_t *>(iq3s_grid + (qs[2 * l + 0] | ((qh << (8 - 2 * l)) & 256)));
+                const auto * grid2 = reinterpret_cast<const uint8_t *>(iq3s_grid + (qs[2 * l + 1] | ((qh << (7 - 2 * l)) & 256)));
+                for (int j = 0; j < 4; ++j) {
+                    w[j + 0] = static_cast<int8_t>((signs[l] & kmask_iq2xs[j + 0]) ? -grid1[j] : grid1[j]);
+                    w[j + 4] = static_cast<int8_t>((signs[l] & kmask_iq2xs[j + 4]) ? -grid2[j] : grid2[j]);
+                }
+                w += 8;
+            }
+            qs += 8;
+            signs += 4;
+        }
+    });
+}
+
 // TODO Reorder for make_intX_weights
 
 // If for_gather_matmul is true, weight may be N-D (e.g. 3D MoE expert weights [n_expert, rows, cols]).
@@ -1085,10 +1256,18 @@ std::shared_ptr<ov::Node> extract_quantized_weights(const ggml_tensor * tensor,
         is_u4 = true;
         weights_per_block = 32;
         break;
+    case GGML_TYPE_Q3_K:
+        is_u4 = true;
+        weights_per_block = 16;
+        break;
     case GGML_TYPE_Q8_0:
     case GGML_TYPE_Q5_0:
     case GGML_TYPE_Q5_1:
     case GGML_TYPE_Q5_K:
+    case GGML_TYPE_IQ4_NL:
+    case GGML_TYPE_IQ4_XS:
+    case GGML_TYPE_IQ3_XXS:
+    case GGML_TYPE_IQ3_S:
         is_u4 = false;
         weights_per_block = 32;
         break;
@@ -1132,6 +1311,21 @@ std::shared_ptr<ov::Node> extract_quantized_weights(const ggml_tensor * tensor,
         break;
     case GGML_TYPE_Q5_K:
         extract_q5_k_data(&temp_tensor, weights, scales, zp, use_bias);
+        break;
+    case GGML_TYPE_Q3_K:
+        extract_q3_k_data(&temp_tensor, weights, scales);
+        break;
+    case GGML_TYPE_IQ4_NL:
+        extract_iq4_nl_data(&temp_tensor, weights, scales);
+        break;
+    case GGML_TYPE_IQ4_XS:
+        extract_iq4_xs_data(&temp_tensor, weights, scales);
+        break;
+    case GGML_TYPE_IQ3_XXS:
+        extract_iq3_xxs_data(&temp_tensor, weights, scales);
+        break;
+    case GGML_TYPE_IQ3_S:
+        extract_iq3_s_data(&temp_tensor, weights, scales);
         break;
     default:
         throw std::runtime_error("Unsupported quantized type: " + std::string(ggml_type_name(tensor->type)));
