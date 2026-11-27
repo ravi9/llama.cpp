@@ -55,6 +55,10 @@ public:
         return m_decoder->get_view_input_size(m_node_idx, m_input_names[index]);
     }
 
+    std::string get_input_view_src_name(size_t index) const {
+        return m_decoder->get_input_view_src_name(m_node_idx, m_input_names[index]);
+    }
+
     size_t get_view_input_offset(size_t index, size_t view_index) const {
         return m_decoder->get_view_input_offset(m_node_idx, m_input_names[index], view_index);
     }
@@ -128,18 +132,40 @@ public:
                 return base_it->second;
             }
             if (!base_name.empty()) {
-                return m_tensor_map->at(base_name);
+                auto base_it = m_tensor_map->find(base_name);
+                if (base_it != m_tensor_map->end()) {
+                    return base_it->second;
+                }
             }
         }
         // Not a VIEW or failed to get base name, use the original logic
-        return m_tensor_map->at(m_input_names[idx]);
+        auto it = m_tensor_map->find(m_input_names[idx]);
+        if (it != m_tensor_map->end()) {
+            return it->second;
+        }
+        std::string view_src_name = m_decoder->get_input_view_src_name(m_node_idx, m_input_names[idx]);
+        if (!view_src_name.empty()) {
+            auto src_it = m_tensor_map->find(view_src_name);
+            if (src_it != m_tensor_map->end()) {
+                return src_it->second;
+            }
+        }
+        throw std::runtime_error("'" + m_input_names[idx] + "' not found in tensor map.");
     }
 
     Output<Node> get_input(const std::string & name) const override {
-        if (m_tensor_map->find(name) == m_tensor_map->end()) {
-            throw std::runtime_error("'" + name + "' not found in tensor map.");
+        auto it = m_tensor_map->find(name);
+        if (it != m_tensor_map->end()) {
+            return it->second;
         }
-        return m_tensor_map->at(name);
+        std::string view_src_name = m_decoder->get_input_view_src_name(m_node_idx, name);
+        if (!view_src_name.empty()) {
+            auto src_it = m_tensor_map->find(view_src_name);
+            if (src_it != m_tensor_map->end()) {
+                return src_it->second;
+            }
+        }
+        throw std::runtime_error("'" + name + "' not found in tensor map.");
     }
 
     bool has_input(const std::string & name) const { return m_tensor_map->find(name) != m_tensor_map->end(); }

@@ -329,8 +329,13 @@ std::shared_ptr<Model> TranslateSession::translate_graph(const frontend::InputMo
 #ifdef GGML_OPENVINO_HAS_CACHE_UPDATE
         converted_outputs = recurrent_fusion.translate(node_idx, node_context);
 #endif
-        if (converted_outputs.empty()) {
-            converted_outputs = it->second(node_context);
+        try {
+            if (converted_outputs.empty()) {
+                converted_outputs = it->second(node_context);
+            }
+        } catch (const std::exception & e) {
+            OPENVINO_THROW("Error in op translator for '", operation_type, "' while translating node '",
+                           decoder->get_op_name(node_idx), "' (node_idx: ", node_idx, "): ", e.what());
         }
 
         FRONT_END_OP_CONVERSION_CHECK(node_output_names.size() == converted_outputs.size(), "Number of ",

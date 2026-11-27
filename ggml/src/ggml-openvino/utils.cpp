@@ -708,7 +708,11 @@ ov::Tensor convert_ggml_input_to_ov(const std::shared_ptr<GgmlOvDecoder> & ggml_
         auto * extra_base = static_cast<ggml_openvino_extra_base *>(ggml_tensor->extra);
         if (extra_base->type == ggml_openvino_extra_base::Type::TENSOR) {
             auto * tensor_extra = static_cast<ggml_openvino_tensor_extra *>(extra_base);
-            return *tensor_extra->tensor;
+            const auto expected_shape = GgmlOvDecoder::get_shape(ggml_tensor);
+            if (tensor_extra->tensor && tensor_extra->tensor->get_shape() == expected_shape &&
+                tensor_extra->data == ggml_tensor->data) {
+                return *tensor_extra->tensor;
+            }
         }
     }
 

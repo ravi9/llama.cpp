@@ -95,6 +95,8 @@ public:
 
     virtual bool is_view_like_alias_of(int node_idx, const std::string & view_src_name) const = 0;
 
+    virtual std::string get_input_view_src_name(int /*node_idx*/, const std::string & /*name*/) const { return ""; }
+
     virtual const std::string & get_op_type() const = 0;
 
     virtual const std::string & get_op_type(int node_idx) const = 0;
